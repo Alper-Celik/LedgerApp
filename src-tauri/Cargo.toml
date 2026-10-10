@@ -33,6 +33,7 @@ rustledger-core = "0.24.0"
 rustledger-parser = "0.24.0"
 rustledger-loader = "0.24.0"
 rustledger-query = "0.24.0"
+rust_decimal = "1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

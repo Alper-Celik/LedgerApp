@@ -6,11 +6,15 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	/**
-	 *  Leaf account balances. TODO(alper): replace this sample list with balances
-	 *  collected from the loaded directives; keep the `Vec<AccountBalance>`
-	 *  contract (sidebar derives the tree and parent sums).
+	 *  Leaf account balances. Parents are omitted; the frontend derives the tree
+	 *  and sums subtrees.
 	 */
 	accounts: () => __TAURI_INVOKE<AccountBalance[]>("accounts"),
+	/**
+	 *  Parse, book, and validate a beancount file, then keep it as app state.
+	 *  A failed load leaves the previously loaded ledger untouched.
+	 */
+	loadLedger: (path: string) => typedError<LoadSummary, string>(__TAURI_INVOKE("load_ledger", { path })),
 };
 
 /* Types */
@@ -18,10 +22,33 @@ export const commands = {
 export type AccountBalance = {
 	name: string,
 	/**
-	 *  Balance of the account in its primary commodity.
-	 *  TODO(alper): compute from posted transactions; only leaf balances are
-	 *  returned here, parent totals are summed on the frontend.
+	 *  Balance of the leaf account in its primary commodity: the first
+	 *  `option "operating_currency"` the account holds, else the commodity
+	 *  with the largest absolute position.
 	 */
 	balance: number | null,
 };
+
+/**  Summary of a successful ledger load. */
+export type LoadSummary = {
+	/**  Path of the loaded root journal. */
+	path: string,
+	/**  Number of loaded directives (after booking and plugins). */
+	directive_count: number,
+	/**
+	 *  Number of validation/processing errors collected; the ledger is still
+	 *  loaded and usable.
+	 */
+	error_count: number,
+};
+
+/* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
 

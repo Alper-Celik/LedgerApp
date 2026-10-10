@@ -4,14 +4,15 @@ SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
-	import { onMount } from "svelte";
 	import ChevronRight from "@lucide/svelte/icons/chevron-right";
+	import { page } from "$app/state";
 	import { commands, type AccountBalance } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import * as Collapsible from "$lib/components/ui/collapsible/index.js";
 	import {
 		ACCOUNT_SECTIONS,
 		accountsForSection,
+		accountHref,
 		amountColorClass,
 		buildAccountTree,
 		formatAmount,
@@ -19,7 +20,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	} from "$lib/accounts.js";
 
 	let accounts = $state<AccountBalance[]>([]);
-	let selected = $state<string | null>(null);
 
 	let sections = $derived(
 		ACCOUNT_SECTIONS.map((section) => {
@@ -37,53 +37,65 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	});
 </script>
 
+{#snippet linkInner(node: AccountNode)}
+	<span>{node.name}</span>
+	<span class="ml-auto w-24 text-left tabular-nums {amountColorClass(node.balance)}">
+		{formatAmount(node.balance)}
+	</span>
+{/snippet}
+
 {#snippet renderAccounts(nodes: AccountNode[], depth: number)}
-	{#each nodes as node (node.fullName)}
+	{#each nodes as node, i (node.fullName)}
+		{#if i > 0}
+			<Sidebar.MenuSubItem><Sidebar.Separator /></Sidebar.MenuSubItem>
+		{/if}
 		{#if node.children.length > 0}
 			<Collapsible.Root open={true} class="group/collapsible">
-				<Sidebar.MenuItem>
+				<Sidebar.MenuItem class="flex items-center">
 					<Collapsible.Trigger>
 						{#snippet child({ props })}
-							<Sidebar.MenuButton {...props}>
+							<Sidebar.MenuButton
+								{...props}
+								class="w-auto px-1.5"
+								aria-label={`Toggle ${node.fullName}`}
+							>
 								<ChevronRight
 									class="transition-transform group-data-[state=open]/collapsible:rotate-90"
 								/>
-								<span>{node.name}</span>
-								<span class="ml-auto tabular-nums {amountColorClass(node.balance)}">
-									{formatAmount(node.balance)}
-								</span>
 							</Sidebar.MenuButton>
 						{/snippet}
 					</Collapsible.Trigger>
-					<Collapsible.Content>
-						<Sidebar.MenuSub>
-							{@render renderAccounts(node.children, depth + 1)}
-						</Sidebar.MenuSub>
-					</Collapsible.Content>
+					<Sidebar.MenuButton isActive={page.url.pathname === accountHref(node.fullName)}>
+						{#snippet child({ props })}
+							<a {...props} href={accountHref(node.fullName)}>
+								{@render linkInner(node)}
+							</a>
+						{/snippet}
+					</Sidebar.MenuButton>
 				</Sidebar.MenuItem>
+				<Collapsible.Content>
+					<Sidebar.MenuSub>
+						{@render renderAccounts(node.children, depth + 1)}
+					</Sidebar.MenuSub>
+				</Collapsible.Content>
 			</Collapsible.Root>
 		{:else if depth === 0}
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton
-					isActive={selected === node.fullName}
-					onclick={() => (selected = node.fullName)}
-				>
-					<span>{node.name}</span>
-					<span class="ml-auto tabular-nums {amountColorClass(node.balance)}">
-						{formatAmount(node.balance)}
-					</span>
+				<Sidebar.MenuButton isActive={page.url.pathname === accountHref(node.fullName)}>
+					{#snippet child({ props })}
+						<a {...props} href={accountHref(node.fullName)}>
+							{@render linkInner(node)}
+						</a>
+					{/snippet}
 				</Sidebar.MenuButton>
 			</Sidebar.MenuItem>
 		{:else}
 			<Sidebar.MenuSubItem>
 				<Sidebar.MenuSubButton
-					isActive={selected === node.fullName}
-					onclick={() => (selected = node.fullName)}
+					href={accountHref(node.fullName)}
+					isActive={page.url.pathname === accountHref(node.fullName)}
 				>
-					<span>{node.name}</span>
-					<span class="ml-auto tabular-nums {amountColorClass(node.balance)}">
-						{formatAmount(node.balance)}
-					</span>
+					{@render linkInner(node)}
 				</Sidebar.MenuSubButton>
 			</Sidebar.MenuSubItem>
 		{/if}
@@ -103,7 +115,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							<Sidebar.MenuItem>
 								<Sidebar.MenuButton>
 									<span>{entry.section.label}</span>
-									<span class="ml-auto tabular-nums {amountColorClass(entry.total)}">
+									<span
+										class="ml-auto w-24 text-left tabular-nums {amountColorClass(entry.total)}"
+									>
 										{formatAmount(entry.total)}
 									</span>
 								</Sidebar.MenuButton>

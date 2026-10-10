@@ -77,6 +77,11 @@ export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 	return root.children;
 }
 
+/** Route path for an account page; the full name is one URL segment. */
+export function accountHref(fullName: string): string {
+	return `/account/${encodeURIComponent(fullName)}`;
+}
+
 const amountFormat = new Intl.NumberFormat(undefined, {
 	signDisplay: "exceptZero",
 	minimumFractionDigits: 2,

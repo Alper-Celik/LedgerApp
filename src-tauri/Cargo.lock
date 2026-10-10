@@ -2128,6 +2128,7 @@ dependencies = [
 name = "ledger-app"
 version = "0.1.0"
 dependencies = [
+ "rust_decimal",
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
