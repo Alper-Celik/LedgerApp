@@ -1,0 +1,12 @@
+<!--
+SPDX-FileCopyrightText: 2026 shadcn-svelte contributors <https://github.com/huntabyte/shadcn-svelte>
+
+SPDX-License-Identifier: MIT
+-->
+<script lang="ts">
+	import { Dialog as SheetPrimitive } from "bits-ui";
+
+	let { ref = $bindable(null), ...restProps }: SheetPrimitive.TriggerProps = $props();
+</script>
+
+<SheetPrimitive.Trigger bind:ref data-slot="sheet-trigger" {...restProps} />
