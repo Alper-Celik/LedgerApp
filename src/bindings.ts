@@ -5,5 +5,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
+	/**  Fully-qualified Beancount account names, e.g. "Expenses:Food:Groceries". */
+	accounts: () => __TAURI_INVOKE<string[]>("accounts"),
 };
 
