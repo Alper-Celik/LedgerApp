@@ -29,4 +29,9 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 # Paraglide
 src/lib/paraglide
+
+# Rust / Tauri (kept in sync with src-tauri/.gitignore)
+/src-tauri/target/
+/src-tauri/gen/schemas
+
 project.inlang/cache/
