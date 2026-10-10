@@ -12,21 +12,31 @@ fn greet(name: String) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-/// Fully-qualified Beancount account names, e.g. "Expenses:Food:Groceries".
-// TODO(alper): replace this sample list with the accounts collected from the
-// loaded directives; keep the `Vec<String>` contract (sidebar derives the tree).
+/// Fully-qualified Beancount account name, e.g. "Expenses:Food:Groceries".
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct AccountBalance {
+    pub name: String,
+    /// Balance of the account in its primary commodity.
+    /// TODO(alper): compute from posted transactions; only leaf balances are
+    /// returned here, parent totals are summed on the frontend.
+    pub balance: f64,
+}
+
+/// Leaf account balances. TODO(alper): replace this sample list with balances
+/// collected from the loaded directives; keep the `Vec<AccountBalance>`
+/// contract (sidebar derives the tree and parent sums).
 #[tauri::command]
 #[specta::specta]
-fn accounts() -> Vec<String> {
+fn accounts() -> Vec<AccountBalance> {
     vec![
-        "Assets:Bank:Checking".into(),
-        "Assets:Bank:Savings".into(),
-        "Assets:Cash".into(),
-        "Expenses:Food:Groceries".into(),
-        "Expenses:Food:Restaurants".into(),
-        "Expenses:Home:Rent".into(),
-        "Income:Salary".into(),
-        "Liabilities:CreditCard".into(),
+        AccountBalance { name: "Assets:Bank:Checking".into(), balance: 1500.0 },
+        AccountBalance { name: "Assets:Bank:Savings".into(), balance: 10000.0 },
+        AccountBalance { name: "Assets:Cash".into(), balance: 120.5 },
+        AccountBalance { name: "Expenses:Food:Groceries".into(), balance: 345.2 },
+        AccountBalance { name: "Expenses:Food:Restaurants".into(), balance: 89.9 },
+        AccountBalance { name: "Expenses:Home:Rent".into(), balance: 950.0 },
+        AccountBalance { name: "Income:Salary".into(), balance: -3000.0 },
+        AccountBalance { name: "Liabilities:CreditCard".into(), balance: -520.75 },
     ]
 }
 

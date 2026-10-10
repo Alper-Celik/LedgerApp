@@ -5,7 +5,23 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
-	/**  Fully-qualified Beancount account names, e.g. "Expenses:Food:Groceries". */
-	accounts: () => __TAURI_INVOKE<string[]>("accounts"),
+	/**
+	 *  Leaf account balances. TODO(alper): replace this sample list with balances
+	 *  collected from the loaded directives; keep the `Vec<AccountBalance>`
+	 *  contract (sidebar derives the tree and parent sums).
+	 */
+	accounts: () => __TAURI_INVOKE<AccountBalance[]>("accounts"),
+};
+
+/* Types */
+/**  Fully-qualified Beancount account name, e.g. "Expenses:Food:Groceries". */
+export type AccountBalance = {
+	name: string,
+	/**
+	 *  Balance of the account in its primary commodity.
+	 *  TODO(alper): compute from posted transactions; only leaf balances are
+	 *  returned here, parent totals are summed on the frontend.
+	 */
+	balance: number | null,
 };
 
