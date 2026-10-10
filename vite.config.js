@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 // @ts-expect-error type error without @types/node package

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
 
