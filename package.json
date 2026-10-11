@@ -10,7 +10,8 @@
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:e2e": "playwright test"
   },
   "license": "MIT",
   "dependencies": {
@@ -25,6 +26,7 @@
     "@hugeicons/svelte": "^1.1.5",
     "@internationalized/date": "^3.12.4",
     "@lucide/svelte": "^1.55.0",
+    "@playwright/test": "^1.64.0",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.65.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
