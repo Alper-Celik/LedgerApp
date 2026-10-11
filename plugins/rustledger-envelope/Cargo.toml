@@ -15,8 +15,12 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+# Exact decimal arithmetic: money is never approximated, never converted.
+rust_decimal = "1"
+# The configuration's account patterns. `regex-lite` keeps the WASM binary
+# small while accepting the patterns beancount users write.
+regex-lite = "0.1"
 rustledger-plugin-types = { version = "0.24.0", features = ["guest"] }
-serde = { version = "1", features = ["derive"] }
 
 [profile.release]
 opt-level = "s"
