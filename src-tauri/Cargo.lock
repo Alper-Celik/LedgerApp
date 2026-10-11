@@ -2153,7 +2153,6 @@ name = "ledger-app"
 version = "0.1.0"
 dependencies = [
  "git2",
- "parking_lot",
  "rust_decimal",
  "rustledger-core",
  "rustledger-loader",
