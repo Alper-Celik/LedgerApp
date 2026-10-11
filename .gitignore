@@ -39,3 +39,10 @@ src/lib/paraglide
 /src-tauri/gen/schemas
 
 project.inlang/cache/
+
+# The ledger itself: private data, and its own git repository.
+books/
+
+# Playwright artifacts.
+test-results/
+playwright-report/
