@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "rustledger-envelope"
+version = "0.1.0"
+edition = "2024"
+description = "Envelope budgeting for rustledger as a WASM directive plugin"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# The plugin is loaded by rustledger's WASM runtime, which needs a cdylib.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustledger-plugin-types = { version = "0.24.0", features = ["guest"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

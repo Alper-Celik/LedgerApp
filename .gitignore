@@ -38,4 +38,7 @@ src/lib/paraglide
 /src-tauri/target/
 /src-tauri/gen/schemas
 
+# Plugin crates
+/plugins/*/target/
+
 project.inlang/cache/
