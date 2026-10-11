@@ -67,3 +67,38 @@ pub fn category_account(expense_account: &str, expense_root: &str) -> Option<Str
         Some(format!("{NAMESPACE}:{tail}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expense_accounts_mirror_into_the_namespace() {
+        assert_eq!(
+            category_account("Expenses:Groceries:Bread", "Expenses").as_deref(),
+            Some("Equity:Envelope:Groceries:Bread")
+        );
+        // The bare root has no component to mirror.
+        assert_eq!(
+            category_account("Expenses", "Expenses").as_deref(),
+            Some(UNCATEGORIZED)
+        );
+        // Only the expense tree is a category.
+        assert_eq!(category_account("Assets:Bank", "Expenses"), None);
+        assert_eq!(category_account("ExpensesOther:Thing", "Expenses"), None);
+    }
+
+    #[test]
+    fn namespace_membership_respects_component_boundaries() {
+        assert!(is_under("Equity:Envelope:Food", "Equity:Envelope:Food"));
+        assert!(is_under("Equity:Envelope:Food:Bread", "Equity:Envelope:Food"));
+        // A longer account that merely starts with the same characters is not a
+        // descendant — this is the whole reason the separator is checked.
+        assert!(!is_under("Equity:Envelope:Foodie", "Equity:Envelope:Food"));
+        assert!(!is_under("Equity:Envelope", "Equity:Envelope:To-Be-Budgeted"));
+
+        assert!(is_generated("Equity:Envelope:Uncategorized"));
+        assert!(!is_generated("Equity:Opening-Balances"));
+        assert!(is_category("Expenses", "Expenses"));
+    }
+}

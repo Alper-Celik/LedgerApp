@@ -1137,4 +1137,416 @@ mod tests {
             "income account defaults to ^Income:"
         );
     }
+
+    #[test]
+    fn directive_without_a_key_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", Vec::new()));
+        let diagnostics = parse(&directives).expect_err("a keyless directive cannot be classified");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("missing its key")
+        }));
+    }
+
+    #[test]
+    fn a_non_string_key_is_treated_as_missing() {
+        // The key itself must come from a STRING value: `envelope 2026` has none.
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", vec![number("2026")]));
+        let diagnostics = parse(&directives).expect_err("a non-string key is not a key");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("missing its key")
+        }));
+    }
+
+    #[test]
+    fn months_ahead_negative_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("months ahead"), number("-1")],
+        ));
+        let diagnostics = parse(&directives).expect_err("months ahead cannot be negative");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("months ahead")
+                && diagnostic.message.contains("non-negative whole number")
+        }));
+    }
+
+    #[test]
+    fn months_ahead_fractional_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("months ahead"), number("1.5")],
+        ));
+        let diagnostics = parse(&directives).expect_err("months ahead cannot be fractional");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("months ahead")
+                && diagnostic.message.contains("non-negative whole number")
+        }));
+    }
+
+    #[test]
+    fn months_ahead_out_of_range_is_an_error() {
+        let mut directives = required();
+        // Non-negative and whole, so it passes the sign/fraction check; it fits
+        // in u64 but not in u32, so only the range check rejects it.
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("months ahead"), number("4294967296")],
+        ));
+        let diagnostics = parse(&directives).expect_err("a month count past u32 cannot be stored");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("months ahead")
+                && diagnostic.message.contains("out of range")
+        }));
+    }
+
+    #[test]
+    fn months_ahead_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", vec![text("months ahead"), text("2")]));
+        let diagnostics = parse(&directives).expect_err("months ahead takes a NUMBER");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("months ahead")
+                && diagnostic.message.contains("expected a NUMBER as argument 1")
+        }));
+    }
+
+    #[test]
+    fn end_date_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", vec![text("end date"), number("2027")]));
+        let diagnostics = parse(&directives).expect_err("end date takes a STRING month");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("end date")
+                && diagnostic.message.contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn start_date_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives[0] = envelope("2026-10-01", vec![text("start date"), number("2026")]);
+        let diagnostics = parse(&directives).expect_err("start date takes a STRING month");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("start date")
+                && diagnostic.message.contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn budget_account_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("budget account"), flag(true)],
+        ));
+        let diagnostics = parse(&directives).expect_err("a pattern must be a STRING");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("budget account")
+                && diagnostic.message.contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn income_account_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("income account"), number("1")],
+        ));
+        let diagnostics = parse(&directives).expect_err("a pattern must be a STRING");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("income account")
+                && diagnostic.message.contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn adjust_wrong_amount_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("adjust"), account("Expenses:Food"), text("100")],
+        ));
+        let diagnostics = parse(&directives).expect_err("adjust takes an AMOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("adjust")
+                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn zero_wrong_account_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("zero"), text("Expenses:Fun")],
+        ));
+        let diagnostics = parse(&directives).expect_err("zero takes an ACCOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("zero")
+                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+        }));
+    }
+
+    #[test]
+    fn balance_wrong_amount_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("balance"), account("Expenses:Fun"), text("500")],
+        ));
+        let diagnostics = parse(&directives).expect_err("balance takes an AMOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("balance")
+                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn balance_without_a_pad_is_allowed() {
+        // `check_pads` only tracks categories with a pending bare pad; a balance
+        // for a category that never declared one is not an error.
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![
+                text("balance"),
+                account("Expenses:Fun"),
+                amount("500.00", "TRY"),
+            ],
+        ));
+        let config = parse(&directives).expect("a balance without a pad is allowed");
+        assert_eq!(config.targets.len(), 1);
+        assert!(matches!(
+            config.targets[0],
+            Target::Balance { ref node, .. } if node == "Expenses:Fun"
+        ));
+    }
+
+    #[test]
+    fn pad_wrong_account_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", vec![text("pad"), text("Expenses:Fun")]));
+        let diagnostics = parse(&directives).expect_err("pad takes an ACCOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("pad")
+                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+        }));
+    }
+
+    #[test]
+    fn pad_wrong_amount_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("pad"), account("Expenses:Fun"), text("250")],
+        ));
+        let diagnostics = parse(&directives).expect_err("a second pad argument is an AMOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("pad")
+                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn rollover_wrong_account_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("rollover"), text("Expenses:Food"), flag(true)],
+        ));
+        let diagnostics = parse(&directives).expect_err("rollover takes an ACCOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("rollover")
+                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+        }));
+    }
+
+    #[test]
+    fn rollover_missing_second_argument_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("rollover"), account("Expenses:Food")],
+        ));
+        let diagnostics = parse(&directives).expect_err("rollover takes a policy");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("rollover")
+                && diagnostic.message.contains("expected a BOOL or an AMOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn rollover_wrong_second_argument_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("rollover"), account("Expenses:Food"), text("carry")],
+        ));
+        let diagnostics = parse(&directives).expect_err("rollover's policy is a BOOL or an AMOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("rollover")
+                && diagnostic.message.contains("expected a BOOL or an AMOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn map_wrong_account_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("map"), text("^Expenses:Dining"), text("Expenses:Food")],
+        ));
+        let diagnostics = parse(&directives).expect_err("map's target is an ACCOUNT");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("map")
+                && diagnostic.message.contains("expected an ACCOUNT as argument 2")
+        }));
+    }
+
+    #[test]
+    fn map_wrong_pattern_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("map"), number("1"), account("Expenses:Food")],
+        ));
+        let diagnostics = parse(&directives).expect_err("map's pattern is a STRING");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("map")
+                && diagnostic.message.contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn include_starting_balance_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("include starting balance"), text("yes")],
+        ));
+        let diagnostics = parse(&directives).expect_err("the flag must be a BOOL");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("include starting balance")
+                && diagnostic.message.contains("expected a BOOL as argument 1")
+        }));
+    }
+
+    #[test]
+    fn assert_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope("2026-10-01", vec![text("assert"), number("1")]));
+        let diagnostics = parse(&directives).expect_err("assert takes a BOOL");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("assert")
+                && diagnostic.message.contains("expected a BOOL as argument 1")
+        }));
+    }
+
+    #[test]
+    fn strict_wrong_kind_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("strict"), amount("1.00", "TRY")],
+        ));
+        let diagnostics = parse(&directives).expect_err("strict takes a BOOL");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("strict")
+                && diagnostic.message.contains("expected a BOOL as argument 1")
+        }));
+    }
+
+    #[test]
+    fn invalid_directive_month_on_a_pad_is_an_error() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-13-01",
+            vec![
+                text("pad"),
+                account("Expenses:Fun"),
+                amount("250.00", "TRY"),
+            ],
+        ));
+        let diagnostics = parse(&directives).expect_err("2026-13 is not a month");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("pad")
+                && diagnostic.message.contains("invalid directive date")
+                && diagnostic.message.contains("2026-13-01")
+        }));
+    }
+
+    #[test]
+    fn malformed_directive_date_on_a_rollover_is_an_error() {
+        let mut directives = required();
+        // Too short for `get(..7)`, so the date never reaches `Month::parse`.
+        directives.push(envelope(
+            "2026",
+            vec![text("rollover"), account("Expenses:Food"), flag(true)],
+        ));
+        let diagnostics = parse(&directives).expect_err("2026 is not a YYYY-MM-DD date");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("rollover")
+                && diagnostic.message.contains("invalid directive date")
+        }));
+    }
+
+    #[test]
+    fn an_error_carries_the_directive_location() {
+        let mut directives = required();
+        let mut located = envelope("2026-10-01", vec![text("strict"), text("not a bool")]);
+        located.filename = Some("budget.bean".to_string());
+        located.lineno = Some(42);
+        directives.push(located);
+        let diagnostics = parse(&directives).expect_err("strict must be a BOOL");
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message.contains("strict"))
+            .expect("the strict diagnostic is reported");
+        assert_eq!(diagnostic.source_file.as_deref(), Some("budget.bean"));
+        assert_eq!(diagnostic.line_number, Some(42));
+    }
+
+    #[test]
+    fn a_warning_carries_the_directive_location() {
+        let mut directives = required();
+        let mut located = envelope("2026-10-01", vec![text("allocate"), text("Expenses:Food")]);
+        located.filename = Some("budget.bean".to_string());
+        located.lineno = Some(7);
+        directives.push(located);
+        let config = parse(&directives).expect("an unknown key is only a warning");
+        assert_eq!(config.warnings.len(), 1);
+        assert_eq!(config.warnings[0].severity, PluginErrorSeverity::Warning);
+        assert_eq!(config.warnings[0].source_file.as_deref(), Some("budget.bean"));
+        assert_eq!(config.warnings[0].line_number, Some(7));
+    }
 }

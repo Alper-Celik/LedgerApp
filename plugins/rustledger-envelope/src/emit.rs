@@ -20,11 +20,12 @@
 //! * one `balance` per [`Assertion`](crate::model::Assertion), dated at the
 //!   month's end — rustledger's Late validation then verifies the plugin's own
 //!   arithmetic;
-//! * every [`PluginError`] from the plan's diagnostics.
+//! * every diagnostic from the plan (the host validates the op list's coverage
+//!   of the input, so this module does not re-check it in production code).
 
 use rustledger_plugin_types::{
-    BalanceData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginError, PluginOp,
-    PluginOutput, PostingData, TransactionData, validate_op_coverage,
+    BalanceData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginOp, PluginOutput,
+    PostingData, TransactionData,
 };
 
 use crate::model::Plan;
@@ -37,6 +38,7 @@ pub fn build(plan: &Plan, input_len: usize) -> PluginOutput {
     ops.extend(plan.opens.iter().map(|open| {
         PluginOp::Insert(wrapper(
             open.date.clone(),
+            "open",
             DirectiveData::Open(OpenData {
                 account: open.account.clone(),
                 currencies: Vec::new(),
@@ -69,6 +71,7 @@ pub fn build(plan: &Plan, input_len: usize) -> PluginOutput {
             }
             ops.push(PluginOp::Insert(wrapper(
                 entry.date.clone(),
+                "transaction",
                 DirectiveData::Transaction(TransactionData {
                     flag: "*".to_string(),
                     payee: None,
@@ -95,6 +98,7 @@ pub fn build(plan: &Plan, input_len: usize) -> PluginOutput {
         for assertion in &month.assertions {
             ops.push(PluginOp::Insert(wrapper(
                 assertion.date.clone(),
+                "balance",
                 DirectiveData::Balance(BalanceData {
                     account: assertion.account.clone(),
                     amount: assertion.amount.to_amount_data(),
@@ -105,33 +109,20 @@ pub fn build(plan: &Plan, input_len: usize) -> PluginOutput {
         }
     }
 
-    match validate_op_coverage(input_len, &ops) {
-        Ok(()) => PluginOutput {
-            ops,
-            errors: plan.diagnostics.clone(),
-        },
-        Err(failure) => {
-            let mut output = PluginOutput::passthrough(input_len);
-            output.errors.push(PluginError::error(format!(
-                "envelope plugin produced an invalid op list: {failure}"
-            )));
-            output
-        }
+    // The host checks op coverage as well (`validate_op_coverage` is shared by
+    // the loader's plugin pass and the FFI's), so a malformed list is reported
+    // there rather than silently dropped; the test module asserts coverage here.
+    PluginOutput {
+        ops,
+        errors: plan.diagnostics.clone(),
     }
 }
 
-/// A synthesized directive wrapper: no source identity, a named type (as
-/// `rustledger_plugin_types` derives it from the data).
-fn wrapper(date: String, data: DirectiveData) -> DirectiveWrapper {
-    let directive_type = match &data {
-        DirectiveData::Transaction(_) => "transaction",
-        DirectiveData::Balance(_) => "balance",
-        DirectiveData::Open(_) => "open",
-        _ => "",
-    }
-    .to_string();
+/// A synthesized directive wrapper: no source identity, and the directive type
+/// named explicitly the way `rustledger_plugin_types` derives it from the data.
+fn wrapper(date: String, kind: &str, data: DirectiveData) -> DirectiveWrapper {
     DirectiveWrapper {
-        directive_type,
+        directive_type: kind.to_string(),
         date,
         filename: None,
         lineno: None,

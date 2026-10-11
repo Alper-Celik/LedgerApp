@@ -123,6 +123,26 @@ The nix `rustc` ships the `wasm32-unknown-unknown` standard library but no
 `rust-lld`, which is why the devShell carries `lld` and `.cargo/config.toml` points
 the wasm target at `wasm-ld`.
 
+## Coverage
+
+The nix `rustc` ships no `llvm-tools-preview`, so the LLVM tools come from nixpkgs —
+pinned to the LLVM rustc was built against (`rustc -vV | grep LLVM`):
+
+```sh
+nix shell nixpkgs#cargo-llvm-cov nixpkgs#llvmPackages_21.llvm -c bash -c '
+  export LLVM_COV=$(command -v llvm-cov) LLVM_PROFDATA=$(command -v llvm-profdata)
+  cargo llvm-cov --summary-only                 # per-file table
+  cargo llvm-cov --text --show-missing-lines    # annotated source, gaps listed
+'
+```
+
+What the tests are for, in order of what they protect: `model.rs` and `validation_tests.rs`
+pin the arithmetic (the weights a posting is worth, the rollover policies, the pool
+identity, and the whole emitted ledger passing rustledger's own validation), `config.rs`
+pins the directive language including every rejection, and the remaining branches are
+error paths — most of the residue is defensive code the parser makes unreachable
+(e.g. a `zero` naming a non-expense account) plus `unreachable!()` arms.
+
 ## How it runs inside rustledger
 
 The plugin is a directive plugin and rustledger runs it in the **post-booking**

@@ -103,3 +103,47 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 pub fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn months_parse_only_well_formed_labels() {
+        assert_eq!(Month::parse("2026-10"), Some(Month::new(2026, 10)));
+        assert_eq!(Month::from_date("2026-10-05"), Some(Month::new(2026, 10)));
+        for bad in ["2026-13", "2026-00", "2026-1", "26-10", "2026", "", "junk"] {
+            assert!(Month::parse(bad).is_none(), "{bad} must not parse");
+        }
+        assert!(Month::from_date("2026").is_none());
+        assert!(Month::from_date("").is_none());
+    }
+
+    #[test]
+    fn month_boundaries_follow_the_gregorian_calendar() {
+        // February is where date arithmetic goes wrong, so pin the leap rules.
+        assert_eq!(days_in_month(2026, 2), 28);
+        assert_eq!(days_in_month(2028, 2), 29);
+        assert_eq!(days_in_month(2100, 2), 28);
+        assert_eq!(days_in_month(2000, 2), 29);
+        assert_eq!(days_in_month(2026, 1), 31);
+        assert_eq!(days_in_month(2026, 4), 30);
+        assert_eq!(days_in_month(2026, 12), 31);
+
+        assert_eq!(Month::new(2026, 2).last_day(), "2026-02-28");
+        assert_eq!(Month::new(2028, 2).last_day(), "2028-02-29");
+        assert_eq!(Month::new(2026, 10).first_day(), "2026-10-01");
+        assert_eq!(Month::new(2026, 10).label(), "2026-10");
+    }
+
+    #[test]
+    fn months_step_across_year_boundaries() {
+        let december = Month::new(2026, 12);
+        assert_eq!(december.next(), Month::new(2027, 1));
+        assert_eq!(Month::new(2027, 1).index() - december.index(), 1);
+        assert_eq!(Month::from_index(december.index()), december);
+        assert_eq!(Month::from_index(0), Month::new(0, 1));
+        // A month number out of range is clamped rather than panicking.
+        assert_eq!(Month::new(2026, 13), Month::new(2026, 12));
+    }
+}

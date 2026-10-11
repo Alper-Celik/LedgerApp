@@ -752,17 +752,15 @@ fn effective_rollovers(config: &Config, month: Month) -> Vec<(String, Rollover)>
     nodes
         .into_iter()
         .map(|node| (node.to_string(), rollover_for(config, node, month)))
-        .filter(|(_, policy)| !matches!(policy, Rollover::Carry))
         .collect()
 }
 
 /// Append `change` (a signed, per-commodity change to `account`) and the
 /// opposite legs on `To-Be-Budgeted`, so the entry balances inside the namespace.
 fn push_against_pool(legs: &mut Vec<Leg>, account: &str, change: &Inventory) {
+    // `Inventory` never holds a zero position (see `Inventory::add`), so every
+    // position here deserves a posting.
     for (commodity, amount) in change.iter() {
-        if amount.is_zero() {
-            continue;
-        }
         legs.push(Leg {
             account: account.to_string(),
             amount: Money::new(amount, commodity),
@@ -1500,4 +1498,360 @@ mod tests {
         assert_eq!(plan.months.len(), 1);
         assert!(plan.diagnostics.is_empty());
     }
+    fn posting(account: &str, number: &str, currency: &str) -> PostingData {
+        PostingData {
+            account: account.to_string(),
+            units: Some(AmountData {
+                number: number.to_string(),
+                currency: currency.to_string(),
+            }),
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: Vec::new(),
+            span: None,
+        }
+    }
+
+    fn cost(number: CostNumberData) -> rustledger_plugin_types::CostData {
+        rustledger_plugin_types::CostData {
+            number: Some(number),
+            currency: Some("USD".to_string()),
+            date: None,
+            label: None,
+            merge: false,
+        }
+    }
+
+    fn price(amount: &str, currency: &str, is_total: bool) -> rustledger_plugin_types::PriceAnnotationData
+    {
+        rustledger_plugin_types::PriceAnnotationData {
+            is_total,
+            amount: Some(AmountData {
+                number: amount.to_string(),
+                currency: currency.to_string(),
+            }),
+            number: None,
+            currency: None,
+        }
+    }
+
+    fn txn_of(date: &str, postings: Vec<PostingData>) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: date.to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "priced".to_string(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                metadata: Vec::new(),
+                postings,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_postings_weight_is_read_as_written() {
+        let mut per_unit = posting("Expenses:PerUnit", "10.00", "AAPL");
+        per_unit.cost = Some(cost(CostNumberData::PerUnit {
+            value: "150.00".to_string(),
+        }));
+        let mut total = posting("Expenses:Total", "10.00", "AAPL");
+        total.cost = Some(cost(CostNumberData::Total {
+            value: "1500.00".to_string(),
+        }));
+        let mut booked = posting("Expenses:Booked", "10.00", "AAPL");
+        booked.cost = Some(cost(CostNumberData::PerUnitFromTotal {
+            per_unit: "150.00".to_string(),
+            total: "1500.00".to_string(),
+        }));
+        let mut compound = posting("Expenses:Compound", "2.00", "SHARE");
+        compound.cost = Some(cost(CostNumberData::Compound {
+            per_unit: "5.00".to_string(),
+            total: "10.00".to_string(),
+        }));
+        let mut priced = posting("Expenses:Priced", "10.00", "EUR");
+        priced.price = Some(price("1.10", "USD", false));
+        let mut priced_total = posting("Expenses:PricedTotal", "10.00", "EUR");
+        priced_total.price = Some(price("11.00", "USD", true));
+        // An incomplete annotation says nothing about what the posting was
+        // worth, so the units stand.
+        let mut incomplete = posting("Expenses:IncompletePrice", "10.00", "EUR");
+        incomplete.price = Some(rustledger_plugin_types::PriceAnnotationData {
+            is_total: false,
+            amount: None,
+            number: None,
+            currency: Some("USD".to_string()),
+        });
+
+        let plan = plan(
+            &config("2026-01", 1),
+            &[txn_of(
+                "2026-01-05",
+                vec![
+                    per_unit, total, booked, compound, priced, priced_total, incomplete,
+                ],
+            )],
+        );
+
+        assert_eq!(
+            rendered(&plan, EntryKind::Activity),
+            vec![
+                "Equity:Envelope:Booked -1500.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 1500.00 USD",
+                "Equity:Envelope:Compound -20.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 20.00 USD",
+                "Equity:Envelope:IncompletePrice -10.00 EUR",
+                "Equity:Envelope:To-Be-Budgeted 10.00 EUR",
+                "Equity:Envelope:PerUnit -1500.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 1500.00 USD",
+                "Equity:Envelope:Priced -11.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 11.00 USD",
+                "Equity:Envelope:PricedTotal -11.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 11.00 USD",
+                "Equity:Envelope:Total -1500.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 1500.00 USD",
+            ]
+        );
+    }
+
+    #[test]
+    fn postings_the_budget_cannot_value_are_skipped() {
+        let mut no_units = posting("Expenses:NoUnits", "0", "TRY");
+        no_units.units = None;
+        let mut unparseable = posting("Expenses:Unparseable", "0", "TRY");
+        unparseable.units = Some(AmountData {
+            number: "not a number".to_string(),
+            currency: "TRY".to_string(),
+        });
+        let zero = posting("Expenses:Zero", "0.00", "TRY");
+        // A hand-written posting inside the namespace is the budget's own money,
+        // never a category of its own.
+        let handwritten = posting("Equity:Envelope:Handwritten", "5.00", "TRY");
+        let real = posting("Expenses:Real", "12.00", "TRY");
+        let bank = posting("Assets:Bank", "-12.00", "TRY");
+
+        // A directive that is not a transaction, and one whose date does not
+        // parse, are ignored rather than guessed at.
+        let not_a_transaction = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2026-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(rustledger_plugin_types::OpenData {
+                account: "Expenses:Real".to_string(),
+                currencies: Vec::new(),
+                booking: None,
+                metadata: Vec::new(),
+            }),
+        };
+        let undated = txn_of("whenever", vec![posting("Expenses:Undated", "3.00", "TRY")]);
+
+        let plan = plan(
+            &config("2026-01", 1),
+            &[
+                not_a_transaction,
+                undated,
+                txn_of("2026-01-05", vec![no_units, unparseable, zero, handwritten, real, bank]),
+            ],
+        );
+
+        assert_eq!(
+            rendered(&plan, EntryKind::Activity),
+            vec![
+                "Equity:Envelope:Real -12.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 12.00 TRY",
+            ]
+        );
+        assert_eq!(
+            rendered(&plan, EntryKind::Money),
+            vec![
+                "Equity:Envelope:Money 12.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -12.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn transactions_after_the_horizon_are_not_budgeted() {
+        let directives = vec![
+            txn(
+                "2026-01-05",
+                &[("Expenses:Food", "10.00", "TRY"), ("Assets:Bank", "-10.00", "TRY")],
+            ),
+            txn(
+                "2026-03-05",
+                &[("Expenses:Food", "99.00", "TRY"), ("Assets:Bank", "-99.00", "TRY")],
+            ),
+        ];
+
+        let plan = plan(&config("2026-01", 1), &directives);
+        assert_eq!(plan.months.len(), 1);
+        assert_eq!(
+            rendered(&plan, EntryKind::Activity),
+            vec![
+                "Equity:Envelope:Food -10.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 10.00 TRY",
+            ]
+        );
+        assert_eq!(
+            rendered(&plan, EntryKind::Money),
+            vec![
+                "Equity:Envelope:Money 10.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -10.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn off_budget_accounts_do_not_fund_the_pool() {
+        // Paying from money the budget does not track still consumes the
+        // category, but adds nothing to the pool.
+        let directives = vec![txn(
+            "2026-01-05",
+            &[
+                ("Expenses:Food", "80.00", "TRY"),
+                ("Liabilities:Loan:Mom", "-80.00", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config("2026-01", 1), &directives);
+        assert!(legs(&plan, EntryKind::Money).is_empty());
+        assert_eq!(
+            rendered(&plan, EntryKind::Activity),
+            vec![
+                "Equity:Envelope:Food -80.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 80.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_end_date_before_the_start_is_refused() {
+        let mut config = config("2026-05", 1);
+        config.end = Some(Month::new(2026, 1));
+
+        let plan = plan(&config, &[]);
+        assert!(plan.months.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert!(plan.diagnostics[0].message.contains("before start date"));
+    }
+
+    #[test]
+    fn a_strict_warning_without_a_source_location_still_reports() {
+        let mut config = config("2026-01", 1);
+        config.strict = true;
+        let mut directive = txn(
+            "2026-01-05",
+            &[("Expenses:Coffee", "20.00", "TRY"), ("Assets:Bank", "-20.00", "TRY")],
+        );
+        directive.filename = None;
+        directive.lineno = None;
+
+        let plan = plan(&config, &[directive]);
+        let strict: Vec<&PluginError> = plan
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("with no assignment"))
+            .collect();
+        assert_eq!(strict.len(), 1);
+        assert!(strict[0].source_file.is_none());
+        assert!(strict[0].line_number.is_none());
+    }
+
+    #[test]
+    fn malformed_cost_or_price_values_are_ignored() {
+        // A posting the budget cannot value must be skipped, never counted as
+        // zero: silently turning a broken cost into "free" would spend an
+        // envelope by the wrong amount.
+        let mut bad_per_unit = posting("Expenses:BadPerUnit", "10.00", "AAPL");
+        bad_per_unit.cost = Some(cost(CostNumberData::PerUnit {
+            value: "not a number".to_string(),
+        }));
+        let mut bad_total = posting("Expenses:BadTotal", "10.00", "AAPL");
+        bad_total.cost = Some(cost(CostNumberData::Total {
+            value: "not a number".to_string(),
+        }));
+        let mut bad_booked = posting("Expenses:BadBooked", "10.00", "AAPL");
+        bad_booked.cost = Some(cost(CostNumberData::PerUnitFromTotal {
+            per_unit: "not a number".to_string(),
+            total: "not a number".to_string(),
+        }));
+        let mut bad_compound = posting("Expenses:BadCompound", "2.00", "SHARE");
+        bad_compound.cost = Some(cost(CostNumberData::Compound {
+            per_unit: "not a number".to_string(),
+            total: "not a number".to_string(),
+        }));
+        // `{}`: an at-cost posting whose cost was never resolved. Guessing the
+        // units as its value would understate the spend, so it is skipped.
+        let mut unresolved = posting("Expenses:UnresolvedCost", "10.00", "AAPL");
+        unresolved.cost = Some(rustledger_plugin_types::CostData {
+            number: None,
+            currency: Some("USD".to_string()),
+            date: None,
+            label: None,
+            merge: false,
+        });
+        let mut bad_priced = posting("Expenses:BadPriced", "10.00", "EUR");
+        bad_priced.price = Some(price("not a number", "USD", false));
+        let mut bad_priced_total = posting("Expenses:BadPricedTotal", "10.00", "EUR");
+        bad_priced_total.price = Some(price("not a number", "USD", true));
+
+        let plan = plan(
+            &config("2026-01", 1),
+            &[txn_of(
+                "2026-01-05",
+                vec![
+                    bad_per_unit,
+                    bad_total,
+                    bad_booked,
+                    bad_compound,
+                    unresolved,
+                    bad_priced,
+                    bad_priced_total,
+                ],
+            )],
+        );
+
+        assert!(legs(&plan, EntryKind::Activity).is_empty());
+        assert!(legs(&plan, EntryKind::Money).is_empty());
+    }
+
+    #[test]
+    fn the_horizon_clamps_to_the_start_when_the_ledger_is_older() {
+        let mut config = config("2026-05", 1);
+        config.end = None;
+        let directives = vec![txn(
+            "2026-01-05",
+            &[("Expenses:Food", "10.00", "TRY"), ("Assets:Bank", "-10.00", "TRY")],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_eq!(plan.months.len(), 1);
+        assert_eq!(plan.months[0].month, Month::new(2026, 5));
+        // January is before the budget starts, so it is not a budget month and
+        // (without `include starting balance`) contributes no money.
+        assert!(legs(&plan, EntryKind::Activity).is_empty());
+        assert!(legs(&plan, EntryKind::Money).is_empty());
+    }
+
+    #[test]
+    fn the_plugins_own_accounts_are_never_categories() {
+        // Defence in depth: the movement loops skip generated accounts before
+        // asking, and `category_for` refuses them too, so a hand-written posting
+        // inside the namespace can never mirror into itself.
+        assert_eq!(
+            category_for(&config("2026-01", 1), &[], "Equity:Envelope:Handwritten"),
+            None
+        );
+        assert_eq!(
+            category_for(&config("2026-01", 1), &[], "Expenses:Food:Groceries").as_deref(),
+            Some("Equity:Envelope:Food:Groceries")
+        );
+    }
+
 }
