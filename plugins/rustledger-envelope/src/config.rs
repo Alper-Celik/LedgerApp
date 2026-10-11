@@ -17,7 +17,7 @@
 //! | `end date` | STRING `YYYY-MM` | Last budget month (inclusive). Default: `months ahead` past the newest directive date in the ledger. |
 //! | `months ahead` | NUMBER | How many months past the newest ledger directive to budget. Default 0. |
 //! | `budget account` | STRING regex | An on-budget account: assets and liabilities holding spendable money. Repeatable; at least one is required. |
-//! | `income account` | STRING regex | Income source. Repeatable; default `^Income:`. |
+//! | `income account` | STRING regex | Accepted and validated (its regex must compile) so a file shared with fava-envelope keeps working. The budget's availability comes from the on-budget accounts, per commodity, so this changes no number. Repeatable; default `^Income:`. |
 //! | `fund` | ACCOUNT, AMOUNT | Assign `AMOUNT` to the category at ACCOUNT in the directive's month. **Inherited**: every later month keeps assigning it until a `fund` for the same category replaces it (`0.00` stops it). |
 //! | `adjust` | ACCOUNT, AMOUNT | One-off, month-scoped signed change to the category's balance (moving money to/from `To-Be-Budgeted`). Never inherited. |
 //! | `zero` | ACCOUNT | One-off: release the category subtree's whole balance (every commodity) to `To-Be-Budgeted`. |
@@ -77,7 +77,9 @@ pub struct Config {
     pub months_ahead: u32,
     /// On-budget account patterns.
     pub budget_accounts: Vec<String>,
-    /// Income account patterns.
+    /// Income account patterns: validated for fava-envelope compatibility, and
+    /// deliberately not read by the budget, whose availability is the on-budget
+    /// accounts' balances per commodity.
     pub income_accounts: Vec<String>,
     /// Assignments, in directive order, each effective from its month.
     pub funds: Vec<Fund>,

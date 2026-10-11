@@ -522,8 +522,13 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
             }
         }
         if config.assert_balances {
-            for (account, balance) in &categories {
-                for (commodity, amount) in balance.iter() {
+            // rustledger checks a `balance` against the account *and its
+            // subaccounts*, and a category's balance is its subtree sum, so the
+            // asserted figure is the subtree — the same number the budget calls
+            // available.
+            for account in categories.keys() {
+                let subtree = subtree_of(&categories, account);
+                for (commodity, amount) in subtree.iter() {
                     if asserted.contains(&(account.clone(), commodity.to_string())) {
                         continue;
                     }
@@ -702,19 +707,23 @@ fn category_for(config: &Config, mappings: &[(Regex, String)], account: &str) ->
     accounts::category_account(account, &config.expense_root)
 }
 
-/// The category balances under `node`, as one inventory.
+/// The category balances of `node`'s subtree, as one inventory.
 fn subtree_balance(
     categories: &BTreeMap<String, Inventory>,
     node: &str,
     expense_root: &str,
 ) -> Inventory {
-    let prefix = match accounts::category_account(node, expense_root) {
-        Some(account) => account,
-        None => return Inventory::new(),
-    };
+    match accounts::category_account(node, expense_root) {
+        Some(account) => subtree_of(categories, &account),
+        None => Inventory::new(),
+    }
+}
+
+/// The balances of `account` and everything under it, as one inventory.
+fn subtree_of(categories: &BTreeMap<String, Inventory>, account: &str) -> Inventory {
     let mut total = Inventory::new();
-    for (account, balance) in categories {
-        if accounts::is_under(account, &prefix) {
+    for (candidate, balance) in categories {
+        if accounts::is_under(candidate, account) {
             total.add_inventory(balance);
         }
     }
@@ -1114,7 +1123,10 @@ mod tests {
         assert_eq!(
             assertions(&plan),
             vec![
-                "2026-02-01 Equity:Envelope:Groceries 100.00 TRY",
+                // rustledger checks a `balance` against the account and its
+                // subaccounts, so the parent asserts the subtree (100 − 30) —
+                // the same figure the budget calls available in Groceries.
+                "2026-02-01 Equity:Envelope:Groceries 70.00 TRY",
                 "2026-02-01 Equity:Envelope:Groceries:Bread -30.00 TRY",
                 // To be budgeted = on-budget money (−30) − categories (70).
                 "2026-02-01 Equity:Envelope:To-Be-Budgeted -100.00 TRY",

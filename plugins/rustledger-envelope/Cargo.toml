@@ -22,6 +22,12 @@ rust_decimal = "1"
 regex-lite = "0.1"
 rustledger-plugin-types = { version = "0.24.0", features = ["guest"] }
 
+[dev-dependencies]
+# The emitted directives are validated by the same crate the loader uses, so the
+# plugin's arithmetic is checked by rustledger's own rules and not only by ours.
+rustledger-core = "0.24.0"
+rustledger-validate = "0.24.0"
+
 [profile.release]
 opt-level = "s"
 lto = true
