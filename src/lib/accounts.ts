@@ -8,8 +8,9 @@ export type AccountNode = {
 	name: string;
 	/** Full Beancount account name, e.g. "Assets:Bank:Checking" */
 	fullName: string;
-	/** Own balance for leaves; subtree sum for parents */
-	balance: number;
+	/** Own balance from the backend (exact decimal string); null for tree
+	 *  intermediate nodes without their own postings */
+	balance: string | null;
 	children: AccountNode[];
 };
 
@@ -17,8 +18,6 @@ export type AccountSection = {
 	label: string;
 	/** Top-level account names (e.g. "Assets") in this section. Omit for a catch-all of everything else. */
 	roots?: string[];
-	/** Render only the section total instead of the account tree. */
-	sumOnly?: boolean;
 };
 
 /**
@@ -44,9 +43,9 @@ export function accountsForSection(
 	return accounts.filter((a) => !claimed.has(a.name.split(":")[0]));
 }
 
-/** Builds the colon-path tree; leaves carry their balance, parents sum their subtree. */
+/** Builds the colon-path tree; every node carries its own backend balance. */
 export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
-	const root: AccountNode = { name: "", fullName: "", balance: 0, children: [] };
+	const root: AccountNode = { name: "", fullName: "", balance: null, children: [] };
 	const byName = new Map<string, AccountNode>();
 	for (const { name, balance } of [...accounts].sort((a, b) => a.name.localeCompare(b.name))) {
 		let path = "";
@@ -55,20 +54,14 @@ export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 			path = path ? `${path}:${part}` : part;
 			let child = byName.get(path);
 			if (!child) {
-				child = { name: part, fullName: path, balance: 0, children: [] };
+				child = { name: part, fullName: path, balance: null, children: [] };
 				byName.set(path, child);
 				node.children.push(child);
 			}
 			node = child;
 		}
-		// bindings type is `number | null` (specta f64 quirk; also None for parents)
-		node.balance += balance ?? 0;
+		node.balance = balance;
 	}
-	const sumSubtree = (node: AccountNode): number => {
-		node.balance = node.children.reduce((acc, child) => acc + sumSubtree(child), node.balance);
-		return node.balance;
-	};
-	for (const child of root.children) sumSubtree(child);
 	const rank = (name: string) => {
 		const index = TOP_LEVEL_ORDER.indexOf(name);
 		return index === -1 ? TOP_LEVEL_ORDER.length : index;
@@ -77,25 +70,21 @@ export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 	return root.children;
 }
 
-/** Route path for an account page; the full name is one URL segment. */
-export function accountHref(fullName: string): string {
-	return `/account/${encodeURIComponent(fullName)}`;
-}
-
 const amountFormat = new Intl.NumberFormat(undefined, {
 	signDisplay: "exceptZero",
 	minimumFractionDigits: 2,
 	maximumFractionDigits: 2,
 });
 
-export function formatAmount(value: number): string {
-	return amountFormat.format(value);
+export function formatAmount(value: string | null): string {
+	return value === null ? "" : amountFormat.format(Number(value));
 }
 
 /** Green for positive, red for negative, muted for zero. */
 /** Invert income/expense display here later (e.g. multiply by -1 per section). */
-export function amountColorClass(value: number): string {
-	if (value > 0) return "text-emerald-600 dark:text-emerald-400";
-	if (value < 0) return "text-red-600 dark:text-red-400";
+export function amountColorClass(value: string | null): string {
+	const amount = value === null ? 0 : Number(value);
+	if (amount > 0) return "text-emerald-600 dark:text-emerald-400";
+	if (amount < 0) return "text-red-600 dark:text-red-400";
 	return "text-muted-foreground";
 }

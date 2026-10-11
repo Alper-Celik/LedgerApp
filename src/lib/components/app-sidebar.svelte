@@ -4,15 +4,16 @@ SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
-	import ChevronRight from "@lucide/svelte/icons/chevron-right";
+	import { resolve } from "$app/paths";
 	import { page } from "$app/state";
+	import { onMount } from "svelte";
+	import ChevronRight from "@lucide/svelte/icons/chevron-right";
 	import { commands, type AccountBalance } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import * as Collapsible from "$lib/components/ui/collapsible/index.js";
 	import {
 		ACCOUNT_SECTIONS,
 		accountsForSection,
-		accountHref,
 		amountColorClass,
 		buildAccountTree,
 		formatAmount,
@@ -22,14 +23,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let accounts = $state<AccountBalance[]>([]);
 
 	let sections = $derived(
-		ACCOUNT_SECTIONS.map((section) => {
-			const list = accountsForSection(accounts, section, ACCOUNT_SECTIONS);
-			return {
-				section,
-				tree: buildAccountTree(list),
-				total: list.reduce((acc, account) => acc + (account.balance ?? 0), 0),
-			};
-		})
+		ACCOUNT_SECTIONS.map((section) => ({
+			section,
+			tree: buildAccountTree(accountsForSection(accounts, section, ACCOUNT_SECTIONS)),
+		}))
 	);
 
 	onMount(async () => {
@@ -37,7 +34,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	});
 </script>
 
-{#snippet linkInner(node: AccountNode)}
+{#snippet linkInner(node: AccountNode, href: string)}
 	<span>{node.name}</span>
 	<span class="ml-auto w-24 text-left tabular-nums {amountColorClass(node.balance)}">
 		{formatAmount(node.balance)}
@@ -46,6 +43,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 {#snippet renderAccounts(nodes: AccountNode[], depth: number)}
 	{#each nodes as node, i (node.fullName)}
+		{@const href = resolve("/account/[id]", { id: node.fullName })}
 		{#if i > 0}
 			<Sidebar.MenuSubItem><Sidebar.Separator /></Sidebar.MenuSubItem>
 		{/if}
@@ -65,10 +63,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							</Sidebar.MenuButton>
 						{/snippet}
 					</Collapsible.Trigger>
-					<Sidebar.MenuButton isActive={page.url.pathname === accountHref(node.fullName)}>
+					<Sidebar.MenuButton isActive={page.url.pathname === href}>
 						{#snippet child({ props })}
-							<a {...props} href={accountHref(node.fullName)}>
-								{@render linkInner(node)}
+							<a {...props} {href}>
+								{@render linkInner(node, href)}
 							</a>
 						{/snippet}
 					</Sidebar.MenuButton>
@@ -81,21 +79,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			</Collapsible.Root>
 		{:else if depth === 0}
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton isActive={page.url.pathname === accountHref(node.fullName)}>
+				<Sidebar.MenuButton isActive={page.url.pathname === href}>
 					{#snippet child({ props })}
-						<a {...props} href={accountHref(node.fullName)}>
-							{@render linkInner(node)}
+						<a {...props} {href}>
+							{@render linkInner(node, href)}
 						</a>
 					{/snippet}
 				</Sidebar.MenuButton>
 			</Sidebar.MenuItem>
 		{:else}
 			<Sidebar.MenuSubItem>
-				<Sidebar.MenuSubButton
-					href={accountHref(node.fullName)}
-					isActive={page.url.pathname === accountHref(node.fullName)}
-				>
-					{@render linkInner(node)}
+				<Sidebar.MenuSubButton {href} isActive={page.url.pathname === href}>
+					{@render linkInner(node, href)}
 				</Sidebar.MenuSubButton>
 			</Sidebar.MenuSubItem>
 		{/if}
@@ -110,24 +105,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Sidebar.Group>
 				<Sidebar.GroupLabel>{entry.section.label}</Sidebar.GroupLabel>
 				<Sidebar.GroupContent>
-					{#if entry.section.sumOnly}
-						<Sidebar.Menu>
-							<Sidebar.MenuItem>
-								<Sidebar.MenuButton>
-									<span>{entry.section.label}</span>
-									<span
-										class="ml-auto w-24 text-left tabular-nums {amountColorClass(entry.total)}"
-									>
-										{formatAmount(entry.total)}
-									</span>
-								</Sidebar.MenuButton>
-							</Sidebar.MenuItem>
-						</Sidebar.Menu>
-					{:else}
-						<Sidebar.Menu>
-							{@render renderAccounts(entry.tree, 0)}
-						</Sidebar.Menu>
-					{/if}
+					<Sidebar.Menu>
+						{@render renderAccounts(entry.tree, 0)}
+					</Sidebar.Menu>
 				</Sidebar.GroupContent>
 			</Sidebar.Group>
 		{/each}

@@ -5,11 +5,10 @@
 use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use rust_decimal::prelude::ToPrimitive;
-use rustledger_core::{Decimal, Directive, IncompleteAmount, is_subaccount_or_equal};
+use rustledger_core::{Decimal, Directive, IncompleteAmount};
 use rustledger_loader::{Ledger, LoadOptions};
 use tauri::State;
 
@@ -24,16 +23,54 @@ fn greet(name: String) -> String {
 #[derive(Debug, serde::Serialize, specta::Type)]
 pub struct AccountBalance {
     pub name: String,
-    /// Balance of the leaf account in its primary commodity: the first
-    /// `option "operating_currency"` the account holds, else the commodity
-    /// with the largest absolute position.
-    pub balance: f64,
+    /// Exact balance in the account's primary commodity (the first
+    /// `option "operating_currency"` it holds, else the commodity with the
+    /// largest absolute position), as a decimal string. Parents carry their
+    /// own postings' balance only; the frontend never sums.
+    pub balance: String,
 }
 
 /// Shared app state: the currently loaded ledger, if any.
 #[derive(Default)]
 struct AppState {
     ledger: RwLock<Option<Ledger>>,
+}
+
+impl AppState {
+    /// Open the ledger at startup: the last CLI argument if one was given,
+    /// else `LEDGER_PATH` from the environment (set per-machine via a
+    /// git-ignored `.envrc.local`), else `main.bean` in the working
+    /// directory. A missing or broken file just leaves the app running with
+    /// no ledger loaded.
+    fn new() -> Self {
+        let path = resolve_ledger_path();
+        let ledger = match rustledger_loader::load(Path::new(&path), &LoadOptions::default()) {
+            Ok(ledger) => Some(ledger),
+            Err(e) => {
+                eprintln!("not loading {}: {e}", path.display());
+                None
+            }
+        };
+        Self {
+            ledger: RwLock::new(ledger),
+        }
+    }
+}
+
+/// Resolve the ledger to open: last CLI argument, else `LEDGER_PATH`, else
+/// `main.bean`. A directory is resolved to the root journal inside it.
+fn resolve_ledger_path() -> PathBuf {
+    let raw = std::env::args()
+        .skip(1) // drop the program name
+        .last()
+        .or_else(|| std::env::var("LEDGER_PATH").ok())
+        .unwrap_or_else(|| "main.bean".to_string());
+    let path = PathBuf::from(raw);
+    if path.is_dir() {
+        rustledger_loader::discover_journal_file(&path).unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 /// Summary of a successful ledger load.
@@ -67,8 +104,8 @@ fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSummary, 
     Ok(summary)
 }
 
-/// Leaf account balances. Parents are omitted; the frontend derives the tree
-/// and sums subtrees.
+/// One entry per account that has postings; parents are included and carry
+/// only their own postings' balance.
 #[tauri::command]
 #[specta::specta]
 fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
@@ -77,7 +114,7 @@ fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
 }
 
 /// Accumulate per-(account, currency) units over the pad-merged transaction
-/// stream, then report only leaf accounts.
+/// stream; one entry per account with postings.
 fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
     let mut totals: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
     for directive in ledger.balance_view() {
@@ -98,18 +135,9 @@ fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
     }
     let mut balances: Vec<AccountBalance> = totals
         .iter()
-        // Drop accounts with a strict descendant present: the frontend sums
-        // subtrees, so returning a parent would double-count.
-        .filter(|(name, _)| {
-            !totals
-                .keys()
-                .any(|other| other.as_str() != name.as_str() && is_subaccount_or_equal(other, name))
-        })
         .map(|(name, held)| AccountBalance {
             name: name.clone(),
-            balance: primary_units(held, &ledger.options.operating_currency)
-                .to_f64()
-                .unwrap_or(0.0),
+            balance: primary_units(held, &ledger.options.operating_currency).to_string(),
         })
         .collect();
     balances.sort_by(|a, b| a.name.cmp(&b.name));
@@ -143,7 +171,7 @@ pub fn run() {
         .expect("Failed to export typescript bindings");
 
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(AppState::new())
         // and finally tell Tauri how to invoke them
         .invoke_handler(builder.invoke_handler())
         .run(tauri::generate_context!())
@@ -163,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn computes_leaf_balances_with_pads_and_multi_currency() {
+    fn computes_account_balances_with_pads_and_multi_currency() {
         let mut fs = rustledger_loader::VirtualFileSystem::new();
         fs.add_file(
             "main.beancount",
@@ -211,21 +239,23 @@ option \"operating_currency\" \"USD\"
             balances
                 .iter()
                 .find(|b| b.name == name)
-                .map(|b| b.balance)
+                .map(|b| b.balance.as_str())
                 .unwrap_or_else(|| panic!("missing {name} in {balances:?}"))
         };
 
         // Checking: 100 (pad) - 50 + 200 - 11 (bought EUR cash).
-        assert_eq!(get("Assets:Bank:Checking"), 239.0);
-        assert_eq!(get("Assets:Bank:Emergency"), 30.0);
+        assert_eq!(get("Assets:Bank:Checking"), "239.00");
+        assert_eq!(get("Assets:Bank:Emergency"), "30.00");
+        // Assets:Bank has postings AND a sub-account: included with its own
+        // postings' balance, never summed with children.
+        assert_eq!(get("Assets:Bank"), "-30.00");
         // USD held + USD is an operating currency → direct match.
-        assert_eq!(get("Expenses:Food"), 50.0);
-        assert_eq!(get("Income:Salary"), -200.0);
+        assert_eq!(get("Expenses:Food"), "50.00");
+        assert_eq!(get("Income:Salary"), "-200.00");
         // Fallback: EUR only, not an operating currency → largest |units|.
-        assert_eq!(get("Assets:Cash"), 10.0);
-        assert_eq!(get("Equity:Opening-Balances"), -100.0);
-        // Assets:Bank has postings AND a sub-account: must be dropped so the
-        // frontend's subtree sums don't double-count it.
-        assert!(balances.iter().all(|b| b.name != "Assets:Bank"));
+        assert_eq!(get("Assets:Cash"), "10.00");
+        assert_eq!(get("Equity:Opening-Balances"), "-100.00");
+        // Exact scale is preserved end-to-end.
+        assert!(balances.iter().all(|b| b.balance.contains('.')));
     }
 }

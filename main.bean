@@ -1,0 +1,22 @@
+; SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+;
+; SPDX-License-Identifier: AGPL-3.0-or-later
+
+option "operating_currency" "USD"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Assets:Cash
+2026-01-01 open Expenses:Food
+2026-01-01 open Income:Salary
+2026-01-01 open Equity:Opening-Balances
+
+2026-01-01 pad Assets:Bank:Checking Equity:Opening-Balances
+2026-01-02 balance Assets:Bank:Checking 100.00 USD
+
+2026-01-10 * "Groceries"
+  Assets:Bank:Checking            -50.00 USD
+  Expenses:Food                    50.00 USD
+
+2026-01-11 * "Salary"
+  Assets:Bank:Checking            200.00 USD
+  Income:Salary                  -200.00 USD

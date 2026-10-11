@@ -6,8 +6,8 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	/**
-	 *  Leaf account balances. Parents are omitted; the frontend derives the tree
-	 *  and sums subtrees.
+	 *  One entry per account that has postings; parents are included and carry
+	 *  only their own postings' balance.
 	 */
 	accounts: () => __TAURI_INVOKE<AccountBalance[]>("accounts"),
 	/**
@@ -22,11 +22,12 @@ export const commands = {
 export type AccountBalance = {
 	name: string,
 	/**
-	 *  Balance of the leaf account in its primary commodity: the first
-	 *  `option "operating_currency"` the account holds, else the commodity
-	 *  with the largest absolute position.
+	 *  Exact balance in the account's primary commodity (the first
+	 *  `option "operating_currency"` it holds, else the commodity with the
+	 *  largest absolute position), as a decimal string. Parents carry their
+	 *  own postings' balance only; the frontend never sums.
 	 */
-	balance: number | null,
+	balance: string,
 };
 
 /**  Summary of a successful ledger load. */
