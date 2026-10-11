@@ -5,11 +5,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
+	import Braces from "@lucide/svelte/icons/braces";
 	import ChevronRight from "@lucide/svelte/icons/chevron-right";
 	import Pencil from "@lucide/svelte/icons/pencil";
 	import { commands, type PostingView, type TransactionView } from "../../bindings";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
+	import SourceEditor from "$lib/components/source-editor.svelte";
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { signOf, sumDecimals } from "$lib/money.js";
 	import { smoothHeight } from "$lib/smooth-height.js";
@@ -65,9 +67,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/**
 	 * Column widths, defined once: the register's header/entry table and the
 	 * nested table inside each entry's leg block both use them, so the legs line
-	 * up with the columns they belong to.
+	 * up with the columns they belong to. The first column fits the entry's
+	 * actions side by side — the expander, the pencil, the source editor's
+	 * braces — so they cannot spill into the Date cell.
 	 */
-	const COLUMNS = ["3rem", "6rem", "minmax(0, 1fr)", "14rem", "7rem", "7rem"];
+	const COLUMNS = ["4.5rem", "6rem", "minmax(0, 1fr)", "14rem", "7rem", "7rem"];
 
 	/** The style choice sticks across accounts and reloads. */
 	let view = $state<ViewId>(
@@ -86,7 +90,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let draft = $state<{ date: string; payee: string; narration: string; units: string[] } | null>(null);
 	let editError = $state("");
 
+	/**
+	 * The other editor: `editing` rewrites an entry's fields in place, this one
+	 * shows its whole source text in a Monaco editor under the row. They are
+	 * mutually exclusive — opening either closes the other — because both end
+	 * by writing the same transaction.
+	 */
+	let sourceEditing = $state<number | null>(null);
+
 	function startEdit(tx: TransactionView) {
+		sourceEditing = null;
 		editing = tx.id;
 		editError = "";
 		draft = {
@@ -95,6 +108,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			narration: tx.narration,
 			units: tx.postings.map((posting) => posting.units),
 		};
+	}
+
+	function toggleSourceEdit(tx: TransactionView) {
+		cancelEdit();
+		sourceEditing = sourceEditing === tx.id ? null : tx.id;
 	}
 
 	function cancelEdit() {
@@ -385,6 +403,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									>
 										<Pencil />
 									</Button>
+									<!--
+										The other way into the same transaction: its whole
+										source text, edited as text.
+									-->
+									<Button
+										size="icon-xs"
+										variant="ghost"
+										aria-label={`Edit the source of ${tx.narration}`}
+										aria-expanded={sourceEditing === tx.id}
+										onclick={(event) => {
+											event.stopPropagation();
+											toggleSourceEdit(tx);
+										}}
+									>
+										<Braces />
+									</Button>
 								</span>
 							</td>
 							<td
@@ -458,6 +492,25 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									class="py-1 pr-3 pl-2 text-xs text-red-600 dark:text-red-400"
 								>
 									{editError}
+								</td>
+							</tr>
+						{/if}
+						<!--
+							The source editor spans every column, the way GnuCash's
+							register opens a fold: the text is the entry's own lines,
+							not a cell's value.
+						-->
+						{#if sourceEditing === tx.id}
+							<tr>
+								<td colspan={COLUMNS.length} class="p-0">
+									<SourceEditor
+										id={tx.id}
+										onSaved={() => {
+											sourceEditing = null;
+											invalidateAll();
+										}}
+										onCancel={() => (sourceEditing = null)}
+									/>
 								</td>
 							</tr>
 						{/if}
