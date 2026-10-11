@@ -37,6 +37,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{ href: "/commit", label: "Commit", icon: GitCommit },
 	] as const;
 
+	/**
+	 * Balances, or an empty list if the backend cannot answer — a rejected or
+	 * failing command must leave the sidebar standing, not throw out of the
+	 * render that called it.
+	 */
+	async function loadAccounts() {
+		try {
+			return await commands.accounts();
+		} catch (cause) {
+			console.error("accounts failed", cause);
+			return [];
+		}
+	}
+
 	/** Folded subtrees by account name; everything opens by default. */
 	let folded = $state<Record<string, boolean>>({});
 	let toggleFold = (name: string) => (folded[name] = !folded[name]);
@@ -76,14 +90,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	);
 
 	onMount(async () => {
-		accounts = await commands.accounts();
+		accounts = await loadAccounts();
 	});
 
 	$effect(() => {
 		// Balances are fetched once per page load, so an edit saved elsewhere (or a
 		// commit) has to bump the revision to bring this list back in step.
 		if (ledgerRevision.value === 0) return;
-		commands.accounts().then((result) => (accounts = result));
+		loadAccounts();
 	});
 </script>
 

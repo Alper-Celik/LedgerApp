@@ -16,7 +16,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * empty (the sidebar's virtual root). Filters are global, so a chart can
 	 * zoom a date range and this view follows it.
 	 */
-	let { account, transactions }: { account: string; transactions: TransactionView[] } = $props();
+	let { account, transactions, error = "" }: {
+		account: string;
+		transactions: TransactionView[];
+		error?: string;
+	} = $props();
 	let visible = $derived(transactions.filter(matchesFilters));
 </script>
 
@@ -43,7 +47,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{/if}
 	</div>
 
-	{#if visible.length === 0}
+	{#if error}
+		<p class="text-sm text-red-600 dark:text-red-400">{error}</p>
+	{:else if visible.length === 0}
 		<p class="text-muted-foreground text-sm">
 			{transactions.length === 0
 				? `No transactions${account ? " touch this account" : ""}.`
