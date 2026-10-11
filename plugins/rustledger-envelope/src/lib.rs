@@ -171,18 +171,31 @@ mod tests {
     fn a_configured_budget_generates_envelope_entries_and_keeps_every_input() {
         let directives = vec![
             custom("2026-01-01", vec![text("start date"), text("2026-01")]),
-            custom("2026-01-01", vec![text("budget account"), text("^Assets:Bank")]),
             custom(
                 "2026-01-01",
-                vec![text("fund"), account("Expenses:Food"), amount("100.00", "TRY")],
+                vec![text("budget account"), text("^Assets:Bank")],
+            ),
+            custom(
+                "2026-01-01",
+                vec![
+                    text("fund"),
+                    account("Expenses:Food"),
+                    amount("100.00", "TRY"),
+                ],
             ),
             txn(
                 "2026-01-02",
-                &[("Income:Salary", "-5000.00", "TRY"), ("Assets:Bank", "5000.00", "TRY")],
+                &[
+                    ("Income:Salary", "-5000.00", "TRY"),
+                    ("Assets:Bank", "5000.00", "TRY"),
+                ],
             ),
             txn(
                 "2026-01-05",
-                &[("Expenses:Food", "30.00", "TRY"), ("Assets:Bank", "-30.00", "TRY")],
+                &[
+                    ("Expenses:Food", "30.00", "TRY"),
+                    ("Assets:Bank", "-30.00", "TRY"),
+                ],
             ),
         ];
         let input = PluginInput {
@@ -235,10 +248,16 @@ mod tests {
     #[test]
     fn a_configuration_without_a_start_date_reports_and_changes_nothing() {
         let directives = vec![
-            custom("2026-01-01", vec![text("budget account"), text("^Assets:Bank")]),
+            custom(
+                "2026-01-01",
+                vec![text("budget account"), text("^Assets:Bank")],
+            ),
             txn(
                 "2026-01-05",
-                &[("Expenses:Food", "1.00", "TRY"), ("Assets:Bank", "-1.00", "TRY")],
+                &[
+                    ("Expenses:Food", "1.00", "TRY"),
+                    ("Assets:Bank", "-1.00", "TRY"),
+                ],
             ),
         ];
         let input = PluginInput {

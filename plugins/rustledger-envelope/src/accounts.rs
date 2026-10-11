@@ -91,11 +91,17 @@ mod tests {
     #[test]
     fn namespace_membership_respects_component_boundaries() {
         assert!(is_under("Equity:Envelope:Food", "Equity:Envelope:Food"));
-        assert!(is_under("Equity:Envelope:Food:Bread", "Equity:Envelope:Food"));
+        assert!(is_under(
+            "Equity:Envelope:Food:Bread",
+            "Equity:Envelope:Food"
+        ));
         // A longer account that merely starts with the same characters is not a
         // descendant — this is the whole reason the separator is checked.
         assert!(!is_under("Equity:Envelope:Foodie", "Equity:Envelope:Food"));
-        assert!(!is_under("Equity:Envelope", "Equity:Envelope:To-Be-Budgeted"));
+        assert!(!is_under(
+            "Equity:Envelope",
+            "Equity:Envelope:To-Be-Budgeted"
+        ));
 
         assert!(is_generated("Equity:Envelope:Uncategorized"));
         assert!(!is_generated("Equity:Opening-Balances"));

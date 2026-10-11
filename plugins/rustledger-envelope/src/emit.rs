@@ -251,7 +251,9 @@ mod tests {
             .collect();
         assert_eq!(keeps, vec![0, 1, 2]);
         assert!(
-            output.ops[3..].iter().all(|op| matches!(op, PluginOp::Insert(_))),
+            output.ops[3..]
+                .iter()
+                .all(|op| matches!(op, PluginOp::Insert(_))),
             "only Inserts follow the Keeps"
         );
     }
@@ -406,10 +408,7 @@ mod tests {
         let plan = sample_plan();
         for input_len in 0..5 {
             let output = build(&plan, input_len);
-            assert_eq!(
-                validate_op_coverage(input_len, &output.ops),
-                Ok(())
-            );
+            assert_eq!(validate_op_coverage(input_len, &output.ops), Ok(()));
         }
     }
 }

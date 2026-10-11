@@ -89,7 +89,10 @@ mod tests {
                 .number,
             "4000.00"
         );
-        assert_eq!(Money::new(Decimal::ZERO, "TRY").to_amount_data().number, "0.00");
+        assert_eq!(
+            Money::new(Decimal::ZERO, "TRY").to_amount_data().number,
+            "0.00"
+        );
         assert_eq!(
             Money::new(Decimal::from_str("0.5").expect("parses"), "TRY")
                 .to_amount_data()

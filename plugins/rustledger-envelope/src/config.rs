@@ -55,8 +55,8 @@
 use std::collections::BTreeMap;
 
 use regex_lite::Regex;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rustledger_plugin_types::{
     DirectiveData, DirectiveWrapper, MetaValueData, PluginError, PluginOptions,
 };
@@ -334,7 +334,11 @@ impl<'a> Parser<'a> {
                     self.amount_arg(key, args, 1),
                     self.directive_month(key, directive),
                 ) {
-                    self.funds.push(Fund { month, node, amount });
+                    self.funds.push(Fund {
+                        month,
+                        node,
+                        amount,
+                    });
                 }
             }
             "adjust" => {
@@ -343,7 +347,11 @@ impl<'a> Parser<'a> {
                     self.amount_arg(key, args, 1),
                     self.directive_month(key, directive),
                 ) {
-                    self.adjustments.push(Adjustment { month, node, amount });
+                    self.adjustments.push(Adjustment {
+                        month,
+                        node,
+                        amount,
+                    });
                 }
             }
             "zero" => {
@@ -367,7 +375,11 @@ impl<'a> Parser<'a> {
                     None
                 };
                 if let Some(month) = self.directive_month(key, directive) {
-                    self.targets.push(Target::Pad { month, node, amount });
+                    self.targets.push(Target::Pad {
+                        month,
+                        node,
+                        amount,
+                    });
                 }
             }
             "balance" => {
@@ -376,7 +388,11 @@ impl<'a> Parser<'a> {
                     self.amount_arg(key, args, 1),
                     self.directive_month(key, directive),
                 ) {
-                    self.targets.push(Target::Balance { month, node, amount });
+                    self.targets.push(Target::Balance {
+                        month,
+                        node,
+                        amount,
+                    });
                 }
             }
             "rollover" => {
@@ -400,7 +416,11 @@ impl<'a> Parser<'a> {
                     return;
                 };
                 if let Some(month) = self.directive_month(key, directive) {
-                    self.rollovers.push(RolloverDecl { month, node, policy });
+                    self.rollovers.push(RolloverDecl {
+                        month,
+                        node,
+                        policy,
+                    });
                 }
             }
             "map" => {
@@ -439,7 +459,10 @@ impl<'a> Parser<'a> {
             self.error("start date", "missing; a budget needs a first month");
         }
         if self.budget_accounts.is_empty() {
-            self.error("budget account", "at least one on-budget account is required");
+            self.error(
+                "budget account",
+                "at least one on-budget account is required",
+            );
         }
         self.check_pads();
         self.check_rollovers();
@@ -595,7 +618,10 @@ impl<'a> Parser<'a> {
         match args.get(index).and_then(value::account) {
             Some(account) => Some(account.to_string()),
             None => {
-                self.error(key, &format!("expected an ACCOUNT as argument {}", index + 1));
+                self.error(
+                    key,
+                    &format!("expected an ACCOUNT as argument {}", index + 1),
+                );
                 None
             }
         }
@@ -605,7 +631,10 @@ impl<'a> Parser<'a> {
         match args.get(index).and_then(value::amount) {
             Some(amount) => Some(amount),
             None => {
-                self.error(key, &format!("expected an AMOUNT as argument {}", index + 1));
+                self.error(
+                    key,
+                    &format!("expected an AMOUNT as argument {}", index + 1),
+                );
                 None
             }
         }
@@ -731,8 +760,8 @@ pub mod value {
 mod tests {
     use rust_decimal::Decimal;
     use rustledger_plugin_types::{
-        AmountData, CustomData, DirectiveData, DirectiveWrapper, MetaValueData, PluginErrorSeverity,
-        PluginOptions,
+        AmountData, CustomData, DirectiveData, DirectiveWrapper, MetaValueData,
+        PluginErrorSeverity, PluginOptions,
     };
 
     use super::{Config, Money, Month, Rollover, Target};
@@ -782,11 +811,16 @@ mod tests {
     fn required() -> Vec<DirectiveWrapper> {
         vec![
             envelope("2026-10-01", vec![text("start date"), text("2026-10")]),
-            envelope("2026-10-01", vec![text("budget account"), text("^Assets:Cash$")]),
+            envelope(
+                "2026-10-01",
+                vec![text("budget account"), text("^Assets:Cash$")],
+            ),
         ]
     }
 
-    fn parse(directives: &[DirectiveWrapper]) -> Result<Config, Vec<rustledger_plugin_types::PluginError>> {
+    fn parse(
+        directives: &[DirectiveWrapper],
+    ) -> Result<Config, Vec<rustledger_plugin_types::PluginError>> {
         Config::parse(directives, &PluginOptions::default())
     }
 
@@ -796,7 +830,10 @@ mod tests {
             envelope("2026-10-01", vec![text("start date"), text("2026-10")]),
             envelope("2026-10-01", vec![text("end date"), text("2027-03")]),
             envelope("2026-10-01", vec![text("months ahead"), number("2")]),
-            envelope("2026-10-01", vec![text("budget account"), text("^Assets:Cash$")]),
+            envelope(
+                "2026-10-01",
+                vec![text("budget account"), text("^Assets:Cash$")],
+            ),
             envelope("2026-10-01", vec![text("income account"), text("^Income:")]),
             envelope(
                 "2026-10-01",
@@ -857,7 +894,10 @@ mod tests {
         assert_eq!(config.funds.len(), 1);
         assert_eq!(config.funds[0].month, Month::new(2026, 10));
         assert_eq!(config.funds[0].node, "Expenses:Groceries");
-        assert_eq!(config.funds[0].amount, Money::new(Decimal::new(400000, 2), "TRY"));
+        assert_eq!(
+            config.funds[0].amount,
+            Money::new(Decimal::new(400000, 2), "TRY")
+        );
         assert_eq!(config.adjustments.len(), 1);
         assert_eq!(
             config.adjustments[0].amount,
@@ -985,7 +1025,10 @@ mod tests {
 
     #[test]
     fn missing_budget_account_is_an_error() {
-        let directives = vec![envelope("2026-10-01", vec![text("start date"), text("2026-10")])];
+        let directives = vec![envelope(
+            "2026-10-01",
+            vec![text("start date"), text("2026-10")],
+        )];
         let diagnostics = parse(&directives).expect_err("a budget account is required");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
@@ -1010,7 +1053,7 @@ mod tests {
         let mut directives = required();
         directives.push(envelope(
             "2026-10-01",
-            vec![text("budget account"), text("^Assets(:["), ],
+            vec![text("budget account"), text("^Assets(:[")],
         ));
         let diagnostics = parse(&directives).expect_err("the pattern does not compile");
         assert!(diagnostics.iter().any(|diagnostic| {
@@ -1048,7 +1091,11 @@ mod tests {
         ));
         directives.push(envelope(
             "2026-10-03",
-            vec![text("balance"), account("Expenses:Fun"), amount("500.00", "TRY")],
+            vec![
+                text("balance"),
+                account("Expenses:Fun"),
+                amount("500.00", "TRY"),
+            ],
         ));
         let diagnostics = parse(&directives).expect_err("two pads before one balance");
         assert!(diagnostics.iter().any(|diagnostic| {
@@ -1074,7 +1121,10 @@ mod tests {
         let Target::Pad { amount, .. } = &config.targets[0] else {
             panic!("expected a pad target, got {:?}", config.targets[0]);
         };
-        assert_eq!(amount.as_ref(), Some(&Money::new(Decimal::new(25000, 2), "TRY")));
+        assert_eq!(
+            amount.as_ref(),
+            Some(&Money::new(Decimal::new(25000, 2), "TRY"))
+        );
     }
 
     #[test]
@@ -1086,7 +1136,11 @@ mod tests {
         ));
         directives.push(envelope(
             "2026-11-01",
-            vec![text("rollover"), account("Expenses:Food:Groceries"), flag(true)],
+            vec![
+                text("rollover"),
+                account("Expenses:Food:Groceries"),
+                flag(true),
+            ],
         ));
         let diagnostics = parse(&directives).expect_err("nested rollovers overlap");
         assert!(diagnostics.iter().any(|diagnostic| {
@@ -1211,24 +1265,34 @@ mod tests {
     #[test]
     fn months_ahead_wrong_kind_is_an_error() {
         let mut directives = required();
-        directives.push(envelope("2026-10-01", vec![text("months ahead"), text("2")]));
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("months ahead"), text("2")],
+        ));
         let diagnostics = parse(&directives).expect_err("months ahead takes a NUMBER");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("months ahead")
-                && diagnostic.message.contains("expected a NUMBER as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a NUMBER as argument 1")
         }));
     }
 
     #[test]
     fn end_date_wrong_kind_is_an_error() {
         let mut directives = required();
-        directives.push(envelope("2026-10-01", vec![text("end date"), number("2027")]));
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("end date"), number("2027")],
+        ));
         let diagnostics = parse(&directives).expect_err("end date takes a STRING month");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("end date")
-                && diagnostic.message.contains("expected a STRING as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a STRING as argument 1")
         }));
     }
 
@@ -1240,7 +1304,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("start date")
-                && diagnostic.message.contains("expected a STRING as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a STRING as argument 1")
         }));
     }
 
@@ -1255,7 +1321,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("budget account")
-                && diagnostic.message.contains("expected a STRING as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a STRING as argument 1")
         }));
     }
 
@@ -1270,7 +1338,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("income account")
-                && diagnostic.message.contains("expected a STRING as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a STRING as argument 1")
         }));
     }
 
@@ -1285,7 +1355,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("adjust")
-                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected an AMOUNT as argument 2")
         }));
     }
 
@@ -1300,7 +1372,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("zero")
-                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected an ACCOUNT as argument 1")
         }));
     }
 
@@ -1315,7 +1389,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("balance")
-                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected an AMOUNT as argument 2")
         }));
     }
 
@@ -1343,12 +1419,17 @@ mod tests {
     #[test]
     fn pad_wrong_account_is_an_error() {
         let mut directives = required();
-        directives.push(envelope("2026-10-01", vec![text("pad"), text("Expenses:Fun")]));
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("pad"), text("Expenses:Fun")],
+        ));
         let diagnostics = parse(&directives).expect_err("pad takes an ACCOUNT");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("pad")
-                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected an ACCOUNT as argument 1")
         }));
     }
 
@@ -1363,7 +1444,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("pad")
-                && diagnostic.message.contains("expected an AMOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected an AMOUNT as argument 2")
         }));
     }
 
@@ -1378,7 +1461,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("rollover")
-                && diagnostic.message.contains("expected an ACCOUNT as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected an ACCOUNT as argument 1")
         }));
     }
 
@@ -1393,7 +1478,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("rollover")
-                && diagnostic.message.contains("expected a BOOL or an AMOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected a BOOL or an AMOUNT as argument 2")
         }));
     }
 
@@ -1408,7 +1495,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("rollover")
-                && diagnostic.message.contains("expected a BOOL or an AMOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected a BOOL or an AMOUNT as argument 2")
         }));
     }
 
@@ -1423,7 +1512,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("map")
-                && diagnostic.message.contains("expected an ACCOUNT as argument 2")
+                && diagnostic
+                    .message
+                    .contains("expected an ACCOUNT as argument 2")
         }));
     }
 
@@ -1438,7 +1529,9 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == PluginErrorSeverity::Error
                 && diagnostic.message.contains("map")
-                && diagnostic.message.contains("expected a STRING as argument 1")
+                && diagnostic
+                    .message
+                    .contains("expected a STRING as argument 1")
         }));
     }
 
@@ -1546,7 +1639,10 @@ mod tests {
         let config = parse(&directives).expect("an unknown key is only a warning");
         assert_eq!(config.warnings.len(), 1);
         assert_eq!(config.warnings[0].severity, PluginErrorSeverity::Warning);
-        assert_eq!(config.warnings[0].source_file.as_deref(), Some("budget.bean"));
+        assert_eq!(
+            config.warnings[0].source_file.as_deref(),
+            Some("budget.bean")
+        );
         assert_eq!(config.warnings[0].line_number, Some(7));
     }
 }

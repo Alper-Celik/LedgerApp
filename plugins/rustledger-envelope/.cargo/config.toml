@@ -1,8 +1,0 @@
-# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
-#
-# SPDX-License-Identifier: AGPL-3.0-or-later
-
-# The nix rustc ships no rust-lld (its wasm32 std is there, the linker is not),
-# so the plugin links with `wasm-ld` from lld, which the devShell provides.
-[target.wasm32-unknown-unknown]
-linker = "wasm-ld"

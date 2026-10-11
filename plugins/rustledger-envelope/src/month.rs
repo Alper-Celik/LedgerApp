@@ -82,7 +82,11 @@ impl Month {
     /// `YYYY-MM-<last day>`.
     #[must_use]
     pub fn last_day(self) -> String {
-        format!("{}-{:02}", self.label(), days_in_month(self.year, self.month))
+        format!(
+            "{}-{:02}",
+            self.label(),
+            days_in_month(self.year, self.month)
+        )
     }
 }
 

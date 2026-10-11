@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: plugin
+
+on:
+  push:
+    paths:
+      - "plugins/rustledger-envelope/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "plugins/rustledger-envelope/**"
+      - ".github/workflows/ci.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CRATE: plugins/rustledger-envelope
+  WASM: plugins/rustledger-envelope/target/wasm32-unknown-unknown/release/rustledger_envelope.wasm
+
+jobs:
+  test:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/rustledger-envelope
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/rustledger-envelope -> target
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+  wasm:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/rustledger-envelope
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/rustledger-envelope -> target
+      - name: Build the plugin
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+
+  # A published release carries the built plugin, which is how a ledger gets it
+  # (`plugin "…rustledger_envelope.wasm"` next to the journal).
+  release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: plugins/rustledger-envelope
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/rustledger-envelope -> target
+      - name: Build the plugin
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$GITHUB_WORKSPACE/$WASM" --clobber
+
+  reuse:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5

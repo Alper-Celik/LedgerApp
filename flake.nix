@@ -41,6 +41,12 @@
 
             shellHook = ''
               export XDG_DATA_DIRS="$GSETTINGS_SCHEMAS_PATH" # Needed on Wayland to report the correct display scale
+
+              # Nix's rustc ships no rust-lld, so the wasm32 target links through
+              # lld's wasm-ld, which this shell provides. The setting lives here
+              # rather than in a .cargo/config.toml because CI uses rustup, whose
+              # rust-lld cargo finds by itself.
+              export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER=wasm-ld
             '';
           };
         };

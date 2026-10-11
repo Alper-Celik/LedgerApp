@@ -184,7 +184,10 @@ fn fixture() -> Vec<DirectiveWrapper> {
         open("2026-01-01", "Income:Salary"),
         custom("2026-01-01", vec![text("start date"), text("2026-01")]),
         custom("2026-01-01", vec![text("end date"), text("2026-03")]),
-        custom("2026-01-01", vec![text("budget account"), text("^Assets:Bank")]),
+        custom(
+            "2026-01-01",
+            vec![text("budget account"), text("^Assets:Bank")],
+        ),
         custom(
             "2026-01-01",
             vec![
@@ -346,9 +349,8 @@ fn fixture() -> Vec<DirectiveWrapper> {
 // ── Host-side materialisation ───────────────────────────────────────────────
 
 fn decimal(number: &str, label: &str) -> Decimal {
-    Decimal::from_str(number.trim()).unwrap_or_else(|problem| {
-        panic!("{label}: {number:?} is not a decimal: {problem}")
-    })
+    Decimal::from_str(number.trim())
+        .unwrap_or_else(|problem| panic!("{label}: {number:?} is not a decimal: {problem}"))
 }
 
 fn parse_date(value: &str, label: &str) -> NaiveDate {
@@ -407,15 +409,14 @@ fn transaction_of(date: NaiveDate, data: &TransactionData, label: &str) -> Trans
     let mut characters = data.flag.chars();
     let flag = match (characters.next(), characters.next()) {
         (Some(flag), None) => flag,
-        _ => panic!("{label}: transaction flag {:?} is not one character", data.flag),
+        _ => panic!(
+            "{label}: transaction flag {:?} is not one character",
+            data.flag
+        ),
     };
     let mut transaction = Transaction::new(date, data.narration.clone()).with_flag(flag);
     transaction.payee = data.payee.clone().map(Into::into);
-    transaction.tags = data
-        .tags
-        .iter()
-        .map(|tag| Tag::new(tag.as_str()))
-        .collect();
+    transaction.tags = data.tags.iter().map(|tag| Tag::new(tag.as_str())).collect();
     transaction.links = data
         .links
         .iter()
@@ -436,7 +437,10 @@ fn transaction_of(date: NaiveDate, data: &TransactionData, label: &str) -> Trans
 /// fixture cannot produce is a loud failure naming the directive, not a
 /// silently different ledger.
 fn convert(wrapper: &DirectiveWrapper, origin: &str) -> Directive {
-    let label = format!("{origin} ({} dated {})", wrapper.directive_type, wrapper.date);
+    let label = format!(
+        "{origin} ({} dated {})",
+        wrapper.directive_type, wrapper.date
+    );
     let date = parse_date(&wrapper.date, &label);
     match &wrapper.data {
         DirectiveData::Custom(data) => {
@@ -458,7 +462,8 @@ fn convert(wrapper: &DirectiveWrapper, origin: &str) -> Directive {
             Directive::Open(open)
         }
         DirectiveData::Balance(data) => {
-            let mut balance = Balance::new(date, data.account.as_str(), amount_of(&data.amount, &label));
+            let mut balance =
+                Balance::new(date, data.account.as_str(), amount_of(&data.amount, &label));
             balance.tolerance = data
                 .tolerance
                 .as_ref()
@@ -513,8 +518,8 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
     let fees = category_account("Expenses:Fees", "Expenses").expect("Fees is a category");
     let groceries =
         category_account("Expenses:Groceries", "Expenses").expect("Groceries is a category");
-    let bread = category_account("Expenses:Groceries:Bread", "Expenses")
-        .expect("Bread is a category");
+    let bread =
+        category_account("Expenses:Groceries:Bread", "Expenses").expect("Bread is a category");
     for account in [
         MONEY,
         TO_BE_BUDGETED,
@@ -524,9 +529,9 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
         bread.as_str(),
     ] {
         assert!(
-            materialised
-                .iter()
-                .any(|directive| matches!(directive, Directive::Open(open) if open.account == account)),
+            materialised.iter().any(
+                |directive| matches!(directive, Directive::Open(open) if open.account == account)
+            ),
             "the plugin never opened {account}"
         );
     }
@@ -665,7 +670,10 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
     // 12000.00 TRY and Bread -1800.00 TRY; the unfunded spending was reset to
     // the pool, so To-Be-Budgeted is exactly the on-budget money of each
     // commodity.
-    assert_eq!(balance(&food, "TRY"), decimal("3000.00", "the Food balance"));
+    assert_eq!(
+        balance(&food, "TRY"),
+        decimal("3000.00", "the Food balance")
+    );
     assert_eq!(
         balance(&groceries, "TRY"),
         decimal("12000.00", "the Groceries balance")
@@ -699,9 +707,7 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
         actuals
             .iter()
             .find(|actual| {
-                actual.account == account
-                    && actual.currency == commodity
-                    && actual.date == date
+                actual.account == account && actual.currency == commodity && actual.date == date
             })
             .map(|actual| actual.asserted)
     };

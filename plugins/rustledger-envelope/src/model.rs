@@ -233,7 +233,9 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         }
         let category = category_for(config, &mappings, &movement.account);
         if let Some(category) = &category {
-            let month = per_month_activity.entry(movement.month.index()).or_default();
+            let month = per_month_activity
+                .entry(movement.month.index())
+                .or_default();
             let inventory = month.entry(category.clone()).or_default();
             inventory.add(&movement.value.currency, movement.value.value);
             continue;
@@ -373,7 +375,8 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         //    stands after the month's spending.
         let mut adjustment = Vec::new();
         for declaration in config.adjustments.iter().filter(|it| it.month == month) {
-            let account = match accounts::category_account(&declaration.node, &config.expense_root) {
+            let account = match accounts::category_account(&declaration.node, &config.expense_root)
+            {
                 Some(account) => account,
                 None => continue,
             };
@@ -599,7 +602,11 @@ fn horizon(config: &Config, directives: &[DirectiveWrapper]) -> Result<Vec<Month
                 .max()
                 .unwrap_or(config.start);
             let end = Month::from_index(newest.index() + config.months_ahead as i32);
-            if end < config.start { config.start } else { end }
+            if end < config.start {
+                config.start
+            } else {
+                end
+            }
         }
     };
     if end < config.start {
@@ -667,7 +674,9 @@ fn posting_value(posting: &PostingData) -> Option<Money> {
         let value = match cost.number.as_ref()? {
             CostNumberData::PerUnit { value } => quantity * Decimal::from_str(value.trim()).ok()?,
             CostNumberData::Total { value } => Decimal::from_str(value.trim()).ok()?,
-            CostNumberData::PerUnitFromTotal { total, .. } => Decimal::from_str(total.trim()).ok()?,
+            CostNumberData::PerUnitFromTotal { total, .. } => {
+                Decimal::from_str(total.trim()).ok()?
+            }
             CostNumberData::Compound { per_unit, total } => {
                 quantity * Decimal::from_str(per_unit.trim()).ok()?
                     + Decimal::from_str(total.trim()).ok()?
@@ -686,7 +695,8 @@ fn posting_value(posting: &PostingData) -> Option<Money> {
                 let total = Decimal::from_str(amount.number.trim()).ok()?;
                 return Some(Money::new(total, amount.currency.clone()));
             }
-            PriceAnnotationView::UnitIncomplete { .. } | PriceAnnotationView::TotalIncomplete { .. } => {}
+            PriceAnnotationView::UnitIncomplete { .. }
+            | PriceAnnotationView::TotalIncomplete { .. } => {}
         }
     }
 
@@ -807,7 +817,10 @@ mod tests {
     use crate::config::{Adjustment, Fund, Mapping, RolloverDecl};
 
     fn money(number: &str, currency: &str) -> Money {
-        Money::new(Decimal::from_str(number).expect("test numbers parse"), currency)
+        Money::new(
+            Decimal::from_str(number).expect("test numbers parse"),
+            currency,
+        )
     }
 
     fn config(start: &str, months: usize) -> Config {
@@ -922,7 +935,10 @@ mod tests {
                 );
             }
         }
-        assert!(total.is_empty(), "the namespace does not sum to zero: {total:?}");
+        assert!(
+            total.is_empty(),
+            "the namespace does not sum to zero: {total:?}"
+        );
     }
 
     #[test]
@@ -935,7 +951,10 @@ mod tests {
         });
         let directives = vec![txn(
             "2026-01-05",
-            &[("Expenses:Food", "30.00", "TRY"), ("Assets:Bank", "-30.00", "TRY")],
+            &[
+                ("Expenses:Food", "30.00", "TRY"),
+                ("Assets:Bank", "-30.00", "TRY"),
+            ],
         )];
 
         let plan = plan(&config, &directives);
@@ -971,7 +990,11 @@ mod tests {
             ]
         );
         assert_eq!(plan.diagnostics.len(), 1);
-        assert!(plan.diagnostics[0].message.contains("budgeted more than available"));
+        assert!(
+            plan.diagnostics[0]
+                .message
+                .contains("budgeted more than available")
+        );
     }
 
     #[test]
@@ -1019,12 +1042,18 @@ mod tests {
         let directives = vec![
             txn(
                 "2026-01-05",
-                &[("Expenses:Food", "30.00", "TRY"), ("Assets:Bank", "-30.00", "TRY")],
+                &[
+                    ("Expenses:Food", "30.00", "TRY"),
+                    ("Assets:Bank", "-30.00", "TRY"),
+                ],
             ),
             // February overspends the (freshly assigned) envelope.
             txn(
                 "2026-02-05",
-                &[("Expenses:Food", "140.00", "TRY"), ("Assets:Bank", "-140.00", "TRY")],
+                &[
+                    ("Expenses:Food", "140.00", "TRY"),
+                    ("Assets:Bank", "-140.00", "TRY"),
+                ],
             ),
         ];
 
@@ -1196,7 +1225,9 @@ mod tests {
         );
         // The declared assertion is emitted as written, so rustledger's own
         // validation checks it.
-        assert!(assertions(&plan).contains(&"2026-02-01 Equity:Envelope:Travel 250.00 EUR".to_string()));
+        assert!(
+            assertions(&plan).contains(&"2026-02-01 Equity:Envelope:Travel 250.00 EUR".to_string())
+        );
     }
 
     #[test]
@@ -1210,11 +1241,17 @@ mod tests {
         let directives = vec![
             txn(
                 "2026-01-05",
-                &[("Expenses:Vps", "12.00", "USD"), ("Assets:Bank", "-12.00", "USD")],
+                &[
+                    ("Expenses:Vps", "12.00", "USD"),
+                    ("Assets:Bank", "-12.00", "USD"),
+                ],
             ),
             txn(
                 "2026-01-06",
-                &[("Expenses:Food", "500.00", "TRY"), ("Assets:Bank", "-500.00", "TRY")],
+                &[
+                    ("Expenses:Food", "500.00", "TRY"),
+                    ("Assets:Bank", "-500.00", "TRY"),
+                ],
             ),
         ];
 
@@ -1298,11 +1335,17 @@ mod tests {
         let directives = vec![
             txn(
                 "2026-01-05",
-                &[("Expenses:Cafe", "50.00", "TRY"), ("Assets:Bank", "-50.00", "TRY")],
+                &[
+                    ("Expenses:Cafe", "50.00", "TRY"),
+                    ("Assets:Bank", "-50.00", "TRY"),
+                ],
             ),
             txn(
                 "2026-01-06",
-                &[("Expenses:Coffee", "20.00", "TRY"), ("Assets:Bank", "-20.00", "TRY")],
+                &[
+                    ("Expenses:Coffee", "20.00", "TRY"),
+                    ("Assets:Bank", "-20.00", "TRY"),
+                ],
             ),
         ];
 
@@ -1326,7 +1369,10 @@ mod tests {
     fn starting_balance_is_only_counted_when_configured() {
         let opening = txn(
             "2025-12-31",
-            &[("Assets:Bank", "500.00", "TRY"), ("Equity:Opening-Balances", "-500.00", "TRY")],
+            &[
+                ("Assets:Bank", "500.00", "TRY"),
+                ("Equity:Opening-Balances", "-500.00", "TRY"),
+            ],
         );
 
         let excluded = plan(&config("2026-01", 1), std::slice::from_ref(&opening));
@@ -1368,7 +1414,11 @@ mod tests {
         };
 
         let plan = plan(&config, &[already_open]);
-        let accounts: Vec<&str> = plan.opens.iter().map(|open| open.account.as_str()).collect();
+        let accounts: Vec<&str> = plan
+            .opens
+            .iter()
+            .map(|open| open.account.as_str())
+            .collect();
         assert!(!accounts.contains(&"Equity:Envelope:Food"));
         assert!(accounts.contains(&"Equity:Envelope:To-Be-Budgeted"));
         assert!(accounts.contains(&"Equity:Envelope:Money"));
@@ -1382,7 +1432,10 @@ mod tests {
         config.months_ahead = 2;
         let directives = vec![txn(
             "2026-03-15",
-            &[("Expenses:Food", "1.00", "TRY"), ("Assets:Bank", "-1.00", "TRY")],
+            &[
+                ("Expenses:Food", "1.00", "TRY"),
+                ("Assets:Bank", "-1.00", "TRY"),
+            ],
         )];
 
         let plan = plan(&config, &directives);
@@ -1391,7 +1444,10 @@ mod tests {
             .iter()
             .map(|month| month.month.label())
             .collect();
-        assert_eq!(months, vec!["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]);
+        assert_eq!(
+            months,
+            vec!["2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]
+        );
     }
 
     #[test]
@@ -1430,7 +1486,9 @@ mod tests {
                 "Equity:Envelope:To-Be-Budgeted 40.00 TRY",
             ]
         );
-        assert!(assertions(&plan).contains(&"2026-02-01 Equity:Envelope:Food 60.00 TRY".to_string()));
+        assert!(
+            assertions(&plan).contains(&"2026-02-01 Equity:Envelope:Food 60.00 TRY".to_string())
+        );
     }
 
     #[test]
@@ -1465,7 +1523,10 @@ mod tests {
         let config = config("2026-01", 1);
         let directives = vec![txn(
             "2026-01-05",
-            &[("Income:Salary", "-100.00", "TRY"), ("Assets:Bank", "100.00", "TRY")],
+            &[
+                ("Income:Salary", "-100.00", "TRY"),
+                ("Assets:Bank", "100.00", "TRY"),
+            ],
         )];
 
         let plan = plan(&config, &directives);
@@ -1523,8 +1584,11 @@ mod tests {
         }
     }
 
-    fn price(amount: &str, currency: &str, is_total: bool) -> rustledger_plugin_types::PriceAnnotationData
-    {
+    fn price(
+        amount: &str,
+        currency: &str,
+        is_total: bool,
+    ) -> rustledger_plugin_types::PriceAnnotationData {
         rustledger_plugin_types::PriceAnnotationData {
             is_total,
             amount: Some(AmountData {
@@ -1593,7 +1657,13 @@ mod tests {
             &[txn_of(
                 "2026-01-05",
                 vec![
-                    per_unit, total, booked, compound, priced, priced_total, incomplete,
+                    per_unit,
+                    total,
+                    booked,
+                    compound,
+                    priced,
+                    priced_total,
+                    incomplete,
                 ],
             )],
         );
@@ -1656,7 +1726,10 @@ mod tests {
             &[
                 not_a_transaction,
                 undated,
-                txn_of("2026-01-05", vec![no_units, unparseable, zero, handwritten, real, bank]),
+                txn_of(
+                    "2026-01-05",
+                    vec![no_units, unparseable, zero, handwritten, real, bank],
+                ),
             ],
         );
 
@@ -1681,11 +1754,17 @@ mod tests {
         let directives = vec![
             txn(
                 "2026-01-05",
-                &[("Expenses:Food", "10.00", "TRY"), ("Assets:Bank", "-10.00", "TRY")],
+                &[
+                    ("Expenses:Food", "10.00", "TRY"),
+                    ("Assets:Bank", "-10.00", "TRY"),
+                ],
             ),
             txn(
                 "2026-03-05",
-                &[("Expenses:Food", "99.00", "TRY"), ("Assets:Bank", "-99.00", "TRY")],
+                &[
+                    ("Expenses:Food", "99.00", "TRY"),
+                    ("Assets:Bank", "-99.00", "TRY"),
+                ],
             ),
         ];
 
@@ -1747,7 +1826,10 @@ mod tests {
         config.strict = true;
         let mut directive = txn(
             "2026-01-05",
-            &[("Expenses:Coffee", "20.00", "TRY"), ("Assets:Bank", "-20.00", "TRY")],
+            &[
+                ("Expenses:Coffee", "20.00", "TRY"),
+                ("Assets:Bank", "-20.00", "TRY"),
+            ],
         );
         directive.filename = None;
         directive.lineno = None;
@@ -1827,7 +1909,10 @@ mod tests {
         config.end = None;
         let directives = vec![txn(
             "2026-01-05",
-            &[("Expenses:Food", "10.00", "TRY"), ("Assets:Bank", "-10.00", "TRY")],
+            &[
+                ("Expenses:Food", "10.00", "TRY"),
+                ("Assets:Bank", "-10.00", "TRY"),
+            ],
         )];
 
         let plan = plan(&config, &directives);
@@ -1853,5 +1938,4 @@ mod tests {
             Some("Equity:Envelope:Food:Groceries")
         );
     }
-
 }
