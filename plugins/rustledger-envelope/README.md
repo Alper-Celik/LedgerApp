@@ -43,6 +43,8 @@ budget. The namespace is net-worth neutral and sums to zero:
 A category's *balance* is the sum over its subtree, so funding
 `Expenses:Groceries` while spending lands on `Expenses:Groceries:Bread` reports a
 single number for `Groceries`, and the same number for every parent above it.
+The assertions the plugin emits assert that subtree sum too, matching the way
+beancount and rustledger check a `balance` (an account plus its subaccounts).
 
 ## The month
 

@@ -24,17 +24,13 @@
 //! * **E3001** — every generated transaction must balance by rustledger's
 //!   weight rules, not merely by the plan's own inventory;
 //! * **E2001** — every `balance` the plugin asserts must match the inventory
-//!   rustledger computes from the generated transactions.
-//!
-//! The fixture's categories are leaves, which is what makes those two
-//! inventories the same object. rustledger's balance check covers the account
-//! *and its subaccounts*, while the plugin asserts a category account's own
-//! balance (`crate::model`), so funding `Expenses:Food` while one posting lands
-//! on `Expenses:Food:Market` (250.00 TRY) is reported as E2001:
-//! `Equity:Envelope:Food` asserts 3250.00 TRY against the 3000.00 TRY the
-//! validator computes for the subtree. This test therefore pins the leaf case
-//! and does not paper over the parent case — a fixture that adds a subaccount
-//! spend fails here until the plugin asserts subtree balances.
+//!   rustledger computes from the generated transactions. rustledger's check
+//!   covers the account *and its subaccounts*, so the fixture funds
+//!   `Expenses:Groceries` while every purchase lands on
+//!   `Expenses:Groceries:Bread`: the parent has to be asserted as the subtree
+//!   sum (12000.00 TRY assigned, 1800.00 TRY spent below it) and the child as
+//!   its own balance, and both have to match what the validator computes. An
+//!   assertion built from the parent account's own inventory fails here.
 //!
 //! Finally the budget invariant the README states — `Σ Equity:Envelope:* = 0`
 //! per commodity and `To-Be-Budgeted = on-budget money − Σ categories` — is
@@ -168,6 +164,11 @@ fn txn(date: &str, narration: &str, postings: &[(&str, &str, &str)]) -> Directiv
 /// * a funded category: `Expenses:Food`, assigned 4000.00 TRY every month and
 ///   capped to 3000.00 TRY at each month boundary, so the excess is swept back
 ///   to the pool;
+/// * a funded category whose spending lands on a *child*: `Expenses:Groceries`
+///   assigned 4000.00 TRY every month, with every purchase on
+///   `Expenses:Groceries:Bread` — so the parent's assertion can only be right if
+///   it is the subtree sum rustledger computes, not the parent account's own
+///   balance;
 /// * an unfunded one: `Expenses:Fees`, never assigned and reset at each month
 ///   boundary, so its deficit is charged to the pool;
 /// * a second commodity: USD spending in a TRY ledger, funded by USD income
@@ -178,6 +179,8 @@ fn fixture() -> Vec<DirectiveWrapper> {
         open("2026-01-01", "Assets:Bank:US"),
         open("2026-01-01", "Expenses:Food"),
         open("2026-01-01", "Expenses:Fees"),
+        open("2026-01-01", "Expenses:Groceries"),
+        open("2026-01-01", "Expenses:Groceries:Bread"),
         open("2026-01-01", "Income:Salary"),
         custom("2026-01-01", vec![text("start date"), text("2026-01")]),
         custom("2026-01-01", vec![text("end date"), text("2026-03")]),
@@ -187,6 +190,14 @@ fn fixture() -> Vec<DirectiveWrapper> {
             vec![
                 text("fund"),
                 account_value("Expenses:Food"),
+                amount_value("4000.00", "TRY"),
+            ],
+        ),
+        custom(
+            "2026-01-01",
+            vec![
+                text("fund"),
+                account_value("Expenses:Groceries"),
                 amount_value("4000.00", "TRY"),
             ],
         ),
@@ -211,8 +222,8 @@ fn fixture() -> Vec<DirectiveWrapper> {
             "2026-01-05",
             "salary",
             &[
-                ("Assets:Bank", "6000.00", "TRY"),
-                ("Income:Salary", "-6000.00", "TRY"),
+                ("Assets:Bank", "9000.00", "TRY"),
+                ("Income:Salary", "-9000.00", "TRY"),
             ],
         ),
         txn(
@@ -221,6 +232,14 @@ fn fixture() -> Vec<DirectiveWrapper> {
             &[
                 ("Expenses:Food", "1200.00", "TRY"),
                 ("Assets:Bank", "-1200.00", "TRY"),
+            ],
+        ),
+        txn(
+            "2026-01-25",
+            "bread",
+            &[
+                ("Expenses:Groceries:Bread", "700.00", "TRY"),
+                ("Assets:Bank", "-700.00", "TRY"),
             ],
         ),
         txn(
@@ -252,8 +271,8 @@ fn fixture() -> Vec<DirectiveWrapper> {
             "2026-02-04",
             "salary",
             &[
-                ("Assets:Bank", "6000.00", "TRY"),
-                ("Income:Salary", "-6000.00", "TRY"),
+                ("Assets:Bank", "9000.00", "TRY"),
+                ("Income:Salary", "-9000.00", "TRY"),
             ],
         ),
         txn(
@@ -262,6 +281,14 @@ fn fixture() -> Vec<DirectiveWrapper> {
             &[
                 ("Expenses:Food", "1500.00", "TRY"),
                 ("Assets:Bank", "-1500.00", "TRY"),
+            ],
+        ),
+        txn(
+            "2026-02-15",
+            "bread",
+            &[
+                ("Expenses:Groceries:Bread", "500.00", "TRY"),
+                ("Assets:Bank", "-500.00", "TRY"),
             ],
         ),
         txn(
@@ -293,8 +320,8 @@ fn fixture() -> Vec<DirectiveWrapper> {
             "2026-03-03",
             "salary",
             &[
-                ("Assets:Bank", "6000.00", "TRY"),
-                ("Income:Salary", "-6000.00", "TRY"),
+                ("Assets:Bank", "9000.00", "TRY"),
+                ("Income:Salary", "-9000.00", "TRY"),
             ],
         ),
         txn(
@@ -303,6 +330,14 @@ fn fixture() -> Vec<DirectiveWrapper> {
             &[
                 ("Expenses:Food", "900.00", "TRY"),
                 ("Assets:Bank", "-900.00", "TRY"),
+            ],
+        ),
+        txn(
+            "2026-03-12",
+            "bread",
+            &[
+                ("Expenses:Groceries:Bread", "600.00", "TRY"),
+                ("Assets:Bank", "-600.00", "TRY"),
             ],
         ),
     ]
@@ -476,7 +511,18 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
     // The plugin opens its own namespace, once per account it posts to.
     let food = category_account("Expenses:Food", "Expenses").expect("Food is a category");
     let fees = category_account("Expenses:Fees", "Expenses").expect("Fees is a category");
-    for account in [MONEY, TO_BE_BUDGETED, food.as_str(), fees.as_str()] {
+    let groceries =
+        category_account("Expenses:Groceries", "Expenses").expect("Groceries is a category");
+    let bread = category_account("Expenses:Groceries:Bread", "Expenses")
+        .expect("Bread is a category");
+    for account in [
+        MONEY,
+        TO_BE_BUDGETED,
+        food.as_str(),
+        fees.as_str(),
+        groceries.as_str(),
+        bread.as_str(),
+    ] {
         assert!(
             materialised
                 .iter()
@@ -614,12 +660,23 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
 
     // The fixture's arithmetic, by hand: Food was assigned 4000.00 TRY a month
     // and the cap swept everything above 3000.00 TRY back each boundary, so
-    // exactly 3000.00 TRY is left; the unfunded spending was reset to the pool,
-    // so To-Be-Budgeted is exactly the on-budget money of each commodity.
+    // exactly 3000.00 TRY is left; Groceries was assigned 4000.00 TRY a month
+    // with all 1800.00 TRY of its spending below it, so its own account holds
+    // 12000.00 TRY and Bread -1800.00 TRY; the unfunded spending was reset to
+    // the pool, so To-Be-Budgeted is exactly the on-budget money of each
+    // commodity.
     assert_eq!(balance(&food, "TRY"), decimal("3000.00", "the Food balance"));
     assert_eq!(
+        balance(&groceries, "TRY"),
+        decimal("12000.00", "the Groceries balance")
+    );
+    assert_eq!(
+        balance(&bread, "TRY"),
+        decimal("-1800.00", "the Bread balance")
+    );
+    assert_eq!(
         balance(TO_BE_BUDGETED, "TRY"),
-        decimal("11260.00", "To-Be-Budgeted in TRY")
+        decimal("8260.00", "To-Be-Budgeted in TRY")
     );
     assert_eq!(
         balance(TO_BE_BUDGETED, "USD"),
@@ -627,7 +684,7 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
     );
     assert_eq!(
         balance(MONEY, "TRY"),
-        decimal("-14260.00", "the money contra in TRY")
+        decimal("-21460.00", "the money contra in TRY")
     );
     assert_eq!(
         balance(MONEY, "USD"),
@@ -654,38 +711,68 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
     // Food: assigned 4000.00 TRY a month, spent 1200.00 then 1500.00 then
     // 900.00, and capped at 3000.00 TRY — so 2800.00 after January, then the
     // cap from February on.
-    assert_eq!(
-        assertion(&food, "TRY", february),
-        Some(decimal("2800.00", "January's Food assertion"))
-    );
-    assert_eq!(
-        assertion(&food, "TRY", march),
-        Some(decimal("3000.00", "February's Food assertion"))
-    );
-    assert_eq!(
-        assertion(&food, "TRY", april),
-        Some(decimal("3000.00", "March's Food assertion"))
+    for (date, month, expected) in [
+        (february, "January's", "2800.00"),
+        (march, "February's", "3000.00"),
+        (april, "March's", "3000.00"),
+    ] {
+        assert_eq!(
+            assertion(&food, "TRY", date),
+            Some(decimal(expected, "a pinned figure")),
+            "{month} Food assertion"
+        );
+    }
+    // Groceries is the parent whose spending happens below it, so its assertion
+    // is the subtree sum — the assignments of 4000.00 TRY a month plus what
+    // Bread spent — and it differs from the parent account's own 12000.00 TRY.
+    for (date, month, expected) in [
+        (february, "January's", "3300.00"),
+        (march, "February's", "6800.00"),
+        (april, "March's", "10200.00"),
+    ] {
+        assert_eq!(
+            assertion(&groceries, "TRY", date),
+            Some(decimal(expected, "a pinned figure")),
+            "{month} Groceries assertion"
+        );
+    }
+    // …while the child is asserted as its own balance, exactly the spending.
+    for (date, month, expected) in [
+        (february, "January's", "-700.00"),
+        (march, "February's", "-1200.00"),
+        (april, "March's", "-1800.00"),
+    ] {
+        assert_eq!(
+            assertion(&bread, "TRY", date),
+            Some(decimal(expected, "a pinned figure")),
+            "{month} Bread assertion"
+        );
+    }
+    // The parent's asserted figure must not be its own account balance: that
+    // difference is the whole point of the pair (rustledger checks the subtree),
+    // and it is what the fixture would silently lose if Bread's spending moved
+    // back onto its parent.
+    assert_ne!(
+        assertion(&groceries, "TRY", april),
+        Some(balance(&groceries, "TRY")),
+        "the fixture must keep a child whose balance differs from its parent's"
     );
     // The pool keeps the real figure each month, both commodities: the unfunded
     // spending was reset into it and the swept excess too.
-    assert_eq!(
-        assertion(TO_BE_BUDGETED, "TRY", february),
-        Some(decimal("1920.00", "January's pool"))
-    );
-    assert_eq!(
-        assertion(TO_BE_BUDGETED, "TRY", march),
-        Some(decimal("6160.00", "February's pool"))
-    );
-    assert_eq!(
-        assertion(TO_BE_BUDGETED, "TRY", april),
-        Some(decimal("11260.00", "March's pool"))
-    );
-    assert_eq!(
-        assertion(TO_BE_BUDGETED, "USD", february),
-        Some(decimal("280.00", "January's USD pool"))
-    );
-    assert_eq!(
-        assertion(TO_BE_BUDGETED, "USD", april),
-        Some(decimal("450.00", "March's USD pool"))
-    );
+    for (date, month, try_expected, usd_expected) in [
+        (february, "January's", "920.00", "280.00"),
+        (march, "February's", "4160.00", "450.00"),
+        (april, "March's", "8260.00", "450.00"),
+    ] {
+        assert_eq!(
+            assertion(TO_BE_BUDGETED, "TRY", date),
+            Some(decimal(try_expected, "a pinned figure")),
+            "{month} pool in TRY"
+        );
+        assert_eq!(
+            assertion(TO_BE_BUDGETED, "USD", date),
+            Some(decimal(usd_expected, "a pinned figure")),
+            "{month} pool in USD"
+        );
+    }
 }
