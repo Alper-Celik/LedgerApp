@@ -34,6 +34,12 @@ rustledger-parser = "0.24.0"
 rustledger-loader = "0.24.0"
 rustledger-query = "0.24.0"
 rust_decimal = "1"
+# Locks without the poisoning error path: no `unwrap` at every lock site.
+parking_lot = "0.12"
+# libgit2 bindings for staging and diffing the ledger against HEAD. Default
+# features stay off: this app only ever touches a local repository, so the SSH
+# and HTTPS transports (and their OpenSSL/libssh2 build chain) are dead weight.
+git2 = { version = "0.21", default-features = false }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

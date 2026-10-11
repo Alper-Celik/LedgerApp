@@ -6,15 +6,58 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	/**
-	 *  One entry per account that has postings; parents are included and carry
-	 *  only their own postings' balance.
+	 *  One entry per account that appears in the tree — accounts with postings
+	 *  and their ancestors — each carrying its full subtree balance.
 	 */
 	accounts: () => __TAURI_INVOKE<AccountBalance[]>("accounts"),
+	/**
+	 *  Transactions touching `account` — the account itself or any sub-account —
+	 *  newest first, each carrying all of its postings so the UI can show the whole
+	 *  entry even when only one leg hits this account. An empty `account` is the
+	 *  virtual root: the whole ledger.
+	 */
+	accountTransactions: (account: string) => __TAURI_INVOKE<TransactionView[]>("account_transactions", { account }),
 	/**
 	 *  Parse, book, and validate a beancount file, then keep it as app state.
 	 *  A failed load leaves the previously loaded ledger untouched.
 	 */
 	loadLedger: (path: string) => typedError<LoadSummary, string>(__TAURI_INVOKE("load_ledger", { path })),
+	/**
+	 *  Rewrite one transaction's own lines in the `.bean` file it came from, reload
+	 *  the ledger from disk, and stage the file.
+	 * 
+	 *  Only the lines that changed are rewritten — the rest of the file stays
+	 *  byte-identical. The reload is the authority on whether the edit was legal (a
+	 *  balanced transaction, a parseable header): when it raises an error the file
+	 *  is put back exactly as it was and the loader's complaint is returned, so an
+	 *  edit can never leave a broken ledger on disk. The file is staged for a
+	 *  later commit; a ledger outside a git repository is still written, there is
+	 *  simply nothing to stage.
+	 */
+	updateTransaction: (edit: TransactionEdit) => typedError<null, string>(__TAURI_INVOKE("update_transaction", { edit })),
+	/**
+	 *  The transaction's exact source text (its own lines, as they appear in the
+	 *  file): the header from its date token on, every posting line, and the
+	 *  newline that ends the last of them, with their original indentation. This
+	 *  is the byte range [`update_transaction_source`] rewrites.
+	 */
+	transactionSource: (id: number) => typedError<string, string>(__TAURI_INVOKE("transaction_source", { id })),
+	/**
+	 *  Replace a transaction's source text with `text` — the source editor's way in
+	 *  — through the same pipeline as [`update_transaction`]: reload the ledger and
+	 *  refuse the edit (putting the file back byte-for-byte) if the reload fails or
+	 *  raises an error the ledger did not already have, and stage the file on
+	 *  success.
+	 */
+	updateTransactionSource: (id: number, text: string) => typedError<null, string>(__TAURI_INVOKE("update_transaction_source", { id, text })),
+	/**
+	 *  Unified diff of the ledger's files against HEAD, index and working tree
+	 *  together, for the diff view: git's own patch text under a `=== path ===`
+	 *  header per changed file.
+	 */
+	ledgerDiff: () => typedError<string, string>(__TAURI_INVOKE("ledger_diff")),
+	/**  Commit the ledger's staged changes; returns the new commit's short id. */
+	commitLedger: (message: string) => typedError<string, string>(__TAURI_INVOKE("commit_ledger", { message })),
 };
 
 /* Types */
@@ -22,12 +65,18 @@ export const commands = {
 export type AccountBalance = {
 	name: string,
 	/**
-	 *  Exact balance in the account's primary commodity (the first
+	 *  Exact subtree balance in the account's primary commodity (the first
 	 *  `option "operating_currency"` it holds, else the commodity with the
-	 *  largest absolute position), as a decimal string. Parents carry their
-	 *  own postings' balance only; the frontend never sums.
+	 *  largest absolute position), as a decimal string — beancount `bal`
+	 *  semantics: leaves report their own postings, parents the sum of their
+	 *  whole subtree. The frontend never sums.
 	 */
 	balance: string,
+	/**
+	 *  Beancount commodity of `balance`, e.g. `USD` or `TRY` — the code the
+	 *  frontend needs to place a symbol or code next to the amount.
+	 */
+	currency: string,
 };
 
 /**  Summary of a successful ledger load. */
@@ -41,6 +90,57 @@ export type LoadSummary = {
 	 *  loaded and usable.
 	 */
 	error_count: number,
+};
+
+/**
+ *  One posting's new units figure. Everything else on the posting's line — its
+ *  currency, `@`/`@@` price, `{cost}` spec and comment — stays as written.
+ */
+export type PostingEdit = {
+	index: number,
+	units: string,
+};
+
+/**  One posting as shown on an account page. */
+export type PostingView = {
+	account: string,
+	/**  Exact units as a decimal string. */
+	units: string,
+	currency: string,
+};
+
+/**
+ *  Fields the register may change about one transaction. `id` is the
+ *  `TransactionView.id` the frontend already has: the transaction's index in the
+ *  ledger's transaction stream, which this command re-derives the same way.
+ */
+export type TransactionEdit = {
+	id: number,
+	date: string,
+	flag: string,
+	payee: string | null,
+	narration: string,
+	/**  Posting amount edits, by the posting's index inside the transaction. */
+	postings: PostingEdit[],
+};
+
+/**  A transaction that touches an account, with every posting it contains. */
+export type TransactionView = {
+	/**  Position of the transaction in the ledger's transaction stream; stable id for the UI. */
+	id: number,
+	/**  `YYYY-MM-DD`. */
+	date: string,
+	/**  Transaction flag, `*` or `!`. */
+	flag: string,
+	payee: string | null,
+	narration: string,
+	postings: PostingView[],
+	/**
+	 *  Whether the transaction's own lines differ from the ledger's last commit,
+	 *  staged or not. False everywhere when the ledger is not in a git
+	 *  repository or nothing changed — the register never fails over git.
+	 */
+	modified: boolean,
 };
 
 /* Tauri Specta runtime */

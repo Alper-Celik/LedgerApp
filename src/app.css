@@ -128,6 +128,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	--radius-2xl: calc(var(--radius) * 1.8);
 	--radius-3xl: calc(var(--radius) * 2.2);
 	--radius-4xl: calc(var(--radius) * 2.6);
+
+	/*
+		Motion, Material 3's tokens (Google's own material-web `_md-sys-motion`):
+		the md-sys values are the source and the app reads only the four semantic
+		aliases below — so switching motion systems is a change here, in the
+		theme, never in component code. Shape changes (a list expanding, a fold
+		opening) use emphasized/medium2; content entering uses
+		emphasized-decelerate; colour and rotation use short2.
+	*/
+	--md-sys-motion-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
+	--md-sys-motion-easing-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+	--md-sys-motion-duration-short2: 100ms;
+	--md-sys-motion-duration-medium2: 300ms;
+
+	--motion-ease: var(--md-sys-motion-easing-emphasized);
+	--motion-ease-entering: var(--md-sys-motion-easing-emphasized-decelerate);
+	--motion-duration: var(--md-sys-motion-duration-medium2);
+	--motion-duration-fast: var(--md-sys-motion-duration-short2);
 }
 /*
 ---break---
@@ -142,4 +160,27 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	html {
 		@apply font-sans;
 	}
+}
+
+/*
+	While the sidebar resize handle is dragged, the vendored width transitions
+	(sidebar.ts sidebar-gap and sidebar-container) would trail the pointer.
+*/
+html.sidebar-resizing {
+	user-select: none;
+}
+html.sidebar-resizing [data-slot="sidebar-gap"],
+html.sidebar-resizing [data-slot="sidebar-container"] {
+	transition: none;
+}
+
+/*
+	The vendored sidebar animates its own collapse with a linear 200ms; fold it
+	into the app's single motion token so every expand/collapse in the app shares
+	one curve. The drag override above still wins while a resize is in progress.
+*/
+[data-slot="sidebar-gap"],
+[data-slot="sidebar-container"] {
+	transition-timing-function: var(--motion-ease);
+	transition-duration: var(--motion-duration);
 }

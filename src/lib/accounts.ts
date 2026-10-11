@@ -2,15 +2,16 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { AccountBalance } from "../bindings";
+import { signOf } from "./money.js";
 
 export type AccountNode = {
 	/** Last path segment, e.g. "Checking" */
 	name: string;
 	/** Full Beancount account name, e.g. "Assets:Bank:Checking" */
 	fullName: string;
-	/** Own balance from the backend (exact decimal string); null for tree
-	 *  intermediate nodes without their own postings */
-	balance: string | null;
+	/** Balance from the backend (exact decimal string + its commodity); null
+	 *  for tree intermediate nodes the backend did not report */
+	balance: { units: string; currency: string } | null;
 	children: AccountNode[];
 };
 
@@ -20,12 +21,15 @@ export type AccountSection = {
 	roots?: string[];
 };
 
+/** Label of the whole ledger: the sidebar's virtual root row and the `/ledger` title. */
+export const LEDGER_LABEL = "All accounts";
+
 /**
  * Sidebar layout. Edit here (or load from settings later) to change which
  * sections appear, their order, and whether they collapse to a single total.
  * Currently one tree of all accounts.
  */
-export const ACCOUNT_SECTIONS: AccountSection[] = [{ label: "Accounts" }];
+export const ACCOUNT_SECTIONS: AccountSection[] = [{ label: LEDGER_LABEL }];
 
 /** Top-level accounts pinned before the rest (rest stays alphabetical). */
 export const TOP_LEVEL_ORDER: string[] = ["Assets", "Liabilities"];
@@ -47,10 +51,10 @@ export function accountsForSection(
 export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 	const root: AccountNode = { name: "", fullName: "", balance: null, children: [] };
 	const byName = new Map<string, AccountNode>();
-	for (const { name, balance } of [...accounts].sort((a, b) => a.name.localeCompare(b.name))) {
+	for (const account of [...accounts].sort((a, b) => a.name.localeCompare(b.name))) {
 		let path = "";
 		let node = root;
-		for (const part of name.split(":")) {
+		for (const part of account.name.split(":")) {
 			path = path ? `${path}:${part}` : part;
 			let child = byName.get(path);
 			if (!child) {
@@ -60,7 +64,7 @@ export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 			}
 			node = child;
 		}
-		node.balance = balance;
+		node.balance = { units: account.balance, currency: account.currency };
 	}
 	const rank = (name: string) => {
 		const index = TOP_LEVEL_ORDER.indexOf(name);
@@ -70,21 +74,20 @@ export function buildAccountTree(accounts: AccountBalance[]): AccountNode[] {
 	return root.children;
 }
 
-const amountFormat = new Intl.NumberFormat(undefined, {
-	signDisplay: "exceptZero",
-	minimumFractionDigits: 2,
-	maximumFractionDigits: 2,
-});
-
-export function formatAmount(value: string | null): string {
-	return value === null ? "" : amountFormat.format(Number(value));
+/**
+ * True when `account` is `ancestor` itself or a sub-account of it. An empty
+ * `ancestor` is the virtual root, which contains every account.
+ */
+export function isSubAccountOf(account: string, ancestor: string): boolean {
+	if (ancestor === "") return true;
+	return account === ancestor || account.startsWith(`${ancestor}:`);
 }
 
 /** Green for positive, red for negative, muted for zero. */
 /** Invert income/expense display here later (e.g. multiply by -1 per section). */
-export function amountColorClass(value: string | null): string {
-	const amount = value === null ? 0 : Number(value);
-	if (amount > 0) return "text-emerald-600 dark:text-emerald-400";
-	if (amount < 0) return "text-red-600 dark:text-red-400";
+export function amountColorClass(units: string | null): string {
+	const sign = units === null ? 0 : signOf(units);
+	if (sign > 0) return "text-emerald-600 dark:text-emerald-400";
+	if (sign < 0) return "text-red-600 dark:text-red-400";
 	return "text-muted-foreground";
 }
