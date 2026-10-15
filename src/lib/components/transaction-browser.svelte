@@ -17,17 +17,27 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * empty (the sidebar's virtual root). Filters are global, so a chart can
 	 * zoom a date range and this view follows it.
 	 */
-	let { account, transactions, error = "" }: {
+	let {
+		account,
+		transactions,
+		error = "",
+		title,
+		emptyText,
+	}: {
 		account: string;
 		transactions: TransactionView[];
 		error?: string;
+		/** Heading override, for views that are not one account. */
+		title?: string;
+		/** Empty-state override, same reason. */
+		emptyText?: string;
 	} = $props();
 	let visible = $derived(transactions.filter(matchesFilters));
 </script>
 
 <div class="flex flex-col gap-4 p-4">
 	<div class="flex flex-wrap items-center gap-2">
-		<h1 class="truncate text-lg font-semibold tracking-tight">{account || LEDGER_LABEL}</h1>
+		<h1 class="truncate text-lg font-semibold tracking-tight">{title ?? (account || LEDGER_LABEL)}</h1>
 		<span class="text-muted-foreground text-xs">
 			{visible.length}{transactions.length === visible.length
 				? ""
@@ -57,9 +67,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		<Alert variant="destructive">{error}</Alert>
 	{:else if visible.length === 0}
 		<p class="text-muted-foreground text-sm">
-			{transactions.length === 0
-				? `No transactions${account ? " touch this account" : ""}.`
-				: "No transactions match the filter."}
+			{emptyText ??
+				(transactions.length === 0
+					? `No transactions${account ? " touch this account" : ""}.`
+					: "No transactions match the filter.")}
 		</p>
 	{:else}
 		<AccountRegister {account} transactions={visible} />

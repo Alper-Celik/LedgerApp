@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { resolve } from "$app/paths";
+	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { onMount } from "svelte";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
@@ -12,6 +13,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		ChevronRightIcon,
 		FileDiffIcon,
 		GitCommitIcon,
+		PlusSignIcon,
 		Settings01Icon,
 	} from "@hugeicons/core-free-icons";
 	import { commands, type AccountBalance } from "../../bindings";
@@ -22,6 +24,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		buildAccountTree,
 		type AccountNode,
 	} from "$lib/accounts.js";
+	import { parseSelection, selectionParam } from "$lib/multi-register.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
@@ -70,6 +73,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** Folded subtrees by account name; everything opens by default. */
 	let folded = $state<Record<string, boolean>>({});
 	let toggleFold = (name: string) => (folded[name] = !folded[name]);
+
+	/**
+	 * Adds an account to the multi-account register's selection. The selection
+	 * lives in the `/register` URL: when the register is the current page its
+	 * query grows, otherwise the account starts a fresh one.
+	 */
+	function addToSelection(name: string) {
+		const current =
+			page.url.pathname === resolve("/register")
+				? parseSelection(page.url.searchParams.get("accounts"))
+				: [];
+		const next = current.includes(name) ? current : [...current, name];
+		goto(`${resolve("/register")}?accounts=${selectionParam(next)}`);
+	}
 
 	let resizing = false;
 	let dragStartX = 0;
@@ -164,6 +181,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						</a>
 					{/snippet}
 				</Sidebar.MenuButton>
+				<Sidebar.MenuButton
+					size="sm"
+					class="w-auto rounded-none px-1.5"
+					aria-label={`Add ${node.fullName} to selection`}
+					onclick={() => addToSelection(node.fullName)}
+				>
+					<HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} />
+				</Sidebar.MenuButton>
 			</Sidebar.MenuItem>
 			<!--
 				Fold: the row track goes 1fr to 0fr, which animates the child list's
@@ -188,7 +213,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</div>
 			</div>
 		{:else if depth === 0}
-			<Sidebar.MenuItem>
+			<Sidebar.MenuItem class="flex items-center">
 				<Sidebar.MenuButton size="sm" class="rounded-none" isActive={page.url.pathname === href}>
 					{#snippet child({ props })}
 						<a {...props} {href}>
@@ -196,9 +221,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						</a>
 					{/snippet}
 				</Sidebar.MenuButton>
+				<Sidebar.MenuButton
+					size="sm"
+					class="w-auto rounded-none px-1.5"
+					aria-label={`Add ${node.fullName} to selection`}
+					onclick={() => addToSelection(node.fullName)}
+				>
+					<HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} />
+				</Sidebar.MenuButton>
 			</Sidebar.MenuItem>
 		{:else}
-			<Sidebar.MenuSubItem>
+			<Sidebar.MenuSubItem class="flex items-center">
 				<Sidebar.MenuSubButton
 					{href}
 					class="rounded-none"
@@ -206,6 +239,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				>
 					{@render linkInner(node)}
 				</Sidebar.MenuSubButton>
+				<Sidebar.MenuButton
+					size="sm"
+					class="w-auto shrink-0 rounded-none px-1.5"
+					aria-label={`Add ${node.fullName} to selection`}
+					onclick={() => addToSelection(node.fullName)}
+				>
+					<HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} />
+				</Sidebar.MenuButton>
 			</Sidebar.MenuSubItem>
 		{/if}
 	{/each}
