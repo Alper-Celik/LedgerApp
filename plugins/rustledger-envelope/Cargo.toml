@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "rustledger-envelope"
+version = "0.1.0"
+edition = "2024"
+description = "Envelope budgeting for rustledger as a WASM directive plugin"
+license = "AGPL-3.0-or-later"
+publish = false
+
+# The plugin is loaded by rustledger's WASM runtime, which needs a cdylib.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Exact decimal arithmetic: money is never approximated, never converted.
+rust_decimal = "1"
+# The configuration's account patterns. `regex-lite` keeps the WASM binary
+# small while accepting the patterns beancount users write.
+regex-lite = "0.1"
+rustledger-plugin-types = { version = "0.24.0", features = ["guest"] }
+
+[dev-dependencies]
+# The emitted directives are validated by the same crate the loader uses, so the
+# plugin's arithmetic is checked by rustledger's own rules and not only by ours.
+rustledger-core = "0.24.0"
+rustledger-validate = "0.24.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

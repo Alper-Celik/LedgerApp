@@ -38,6 +38,12 @@ src/lib/paraglide
 /src-tauri/target/
 /src-tauri/gen/schemas
 
+# Plugin crates
+/plugins/*/target/
+
+# Nix build output
+/result
+
 project.inlang/cache/
 
 # The ledger itself: private data, and its own git repository.

@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+name: plugin
+
+on:
+  push:
+    paths:
+      - "plugins/rustledger-envelope/**"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "plugins/rustledger-envelope/**"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/ci.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: rustfmt
+        run: nix develop .#plugin -c bash -c 'cd plugins/rustledger-envelope && cargo fmt --all -- --check'
+
+  # The derivation runs the crate's test suite, so a green build is a tested
+  # build; the file it installs is exactly what a release carries.
+  build:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: nix build
+        run: nix build .#rustledger-envelope
+      - name: The artifact is a plugin
+        run: nix shell nixpkgs#wabt -c bash -c 'wasm-objdump -x result/lib/rustledger_envelope.wasm | grep -q "process"'
+      - name: Stage the asset
+        run: |
+          mkdir -p "$RUNNER_TEMP/asset"
+          cp result/lib/rustledger_envelope.wasm "$RUNNER_TEMP/asset/"
+          cd "$RUNNER_TEMP/asset"
+          sha256sum rustledger_envelope.wasm > rustledger_envelope.wasm.sha256
+          cat rustledger_envelope.wasm.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rustledger_envelope
+          path: |
+            ${{ runner.temp }}/asset/rustledger_envelope.wasm
+            ${{ runner.temp }}/asset/rustledger_envelope.wasm.sha256
+          if-no-files-found: error
+
+  # Publishing a release is what ships the plugin, and a ledger consumes it as a
+  # release asset next to the journal:
+  #
+  #   plugin "rustledger_envelope.wasm"
+  #
+  # downloaded from
+  #   https://github.com/<owner>/<repo>/releases/latest/download/rustledger_envelope.wasm
+  #   https://github.com/<owner>/<repo>/releases/download/<tag>/rustledger_envelope.wasm
+  #
+  # (a pre-release exercises this pipeline without becoming "latest"), and the
+  # `.sha256` beside it is what `sha256sum -c` wants.
+  release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: nix build
+        run: nix build .#rustledger-envelope
+      - name: The artifact is a plugin
+        run: nix shell nixpkgs#wabt -c bash -c 'wasm-objdump -x result/lib/rustledger_envelope.wasm | grep -q "process"'
+      - name: Attach the plugin and its checksum to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/asset"
+          cp result/lib/rustledger_envelope.wasm "$RUNNER_TEMP/asset/"
+          cd "$RUNNER_TEMP/asset"
+          sha256sum rustledger_envelope.wasm > rustledger_envelope.wasm.sha256
+          gh release upload "${{ github.event.release.tag_name }}" \
+            rustledger_envelope.wasm rustledger_envelope.wasm.sha256 \
+            --clobber
+
+  reuse:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
