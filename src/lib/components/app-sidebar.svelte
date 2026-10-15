@@ -123,20 +123,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 {/snippet}
 
 {#snippet renderAccounts(nodes: AccountNode[], depth: number)}
-	{#each nodes as node, i (node.fullName)}
+	{#each nodes as node (node.fullName)}
 		{@const href = resolve("/account/[id]", { id: node.fullName })}
-		{#if depth !== 0 || i > 0}
-			<!--
-				Rule starts one indent level out — at the item start of the row
-				that owns this subtree — and keeps its right end at the rows'
-				right edge, so it always spans the amounts. Inline width is
-				needed: the class list ends up with both `w-full` and `w-auto`,
-				and a margin alone cannot widen it.
-			-->
-			<Sidebar.MenuSubItem>
-				<Sidebar.Separator class={cn("mx-0", depth !== 0 && "subtree-rule")} />
-			</Sidebar.MenuSubItem>
-		{/if}
 		{#if node.children.length > 0}
 			<Sidebar.MenuItem class="flex items-center">
 				<Sidebar.MenuButton

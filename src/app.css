@@ -291,13 +291,6 @@ html.sidebar-resizing [data-slot="sidebar-container"] {
 	height: 60dvh;
 }
 
-/* One sidebar indent level: the guide line of a nested account list runs from
-	its own level out to the rows' right edge. */
-@utility subtree-rule {
-	margin-left: -0.9375rem;
-	width: calc(100% + 0.9375rem);
-}
-
 /* The register's columns. Both of its tables — the register itself and the
 	nested leg block under each entry — lay out from these, so the legs line up
 	with the columns they belong to and no `col` carries an inline width. The
