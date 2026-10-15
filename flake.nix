@@ -263,15 +263,20 @@
                 }
                 GRADLE_INIT
 
+                # The vendored deps carry their own cargo config: crates-io is
+                # replaced by a `vendored-sources` directory source, and every
+                # git dependency adds its own mapping stanza — a hand-written
+                # replacement only covers crates-io and misses the git ones.
+                # The config references the deps through the RELATIVE path
+                # `cargo-vendor-dir`, which cargo resolves against the directory
+                # holding the config file, so the copy must keep that name.
+                cp -rL ${finalAttrs.cargoDeps} cargo-vendor-dir
+                chmod -R u+w cargo-vendor-dir
+                mkdir -p .cargo
+                cat cargo-vendor-dir/.cargo/config.toml >> .cargo/config.toml
+
                 export CARGO_HOME=$TMPDIR/cargo-home
                 mkdir -p "$CARGO_HOME"
-                cat > "$CARGO_HOME/config.toml" <<EOF
-                [source.crates-io]
-                replace-with = "vendored-sources"
-
-                [source.vendored-sources]
-                directory = "${finalAttrs.cargoDeps}"
-                EOF
 
                 export npm_config_cache=$TMPDIR/npm-cache
                 mkdir -p "$npm_config_cache"
