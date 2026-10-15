@@ -251,7 +251,74 @@ html.sidebar-resizing [data-slot="sidebar-container"] {
 	}
 
 	.transition-motion,
-	.transition-motion-fast {
+	.transition-motion-fast,
+	.fold {
 		transition-duration: 0ms;
 	}
+}
+
+/*
+	Layout presets. These exist so no component has to carry an arbitrary class
+	value (`grid-rows-[0fr]`, `h-[60vh]`, a `style=` attribute): the measurement
+	lives here, once, under a name that says what it is for.
+*/
+
+/*
+	A fold: a single-row grid whose track goes 0fr to 1fr, which animates the
+	child's own height either way — no measured height needed, and no JS action.
+	Pair `fold` with `fold-open` on the container; the child must clip itself
+	(`overflow-hidden`).
+*/
+@utility fold {
+	display: grid;
+	grid-template-rows: 0fr;
+	transition-property: grid-template-rows;
+	transition-duration: var(--motion-duration);
+	transition-timing-function: var(--motion-ease);
+}
+
+@utility fold-open {
+	grid-template-rows: 1fr;
+}
+
+/* The source editor's panes: the entry's own lines fit a fixed fold, the whole
+	file wants most of the window. `dvh` so a mobile address bar cannot clip it. */
+@utility editor-pane {
+	height: 12.5rem;
+}
+
+@utility editor-pane-tall {
+	height: 60dvh;
+}
+
+/* One sidebar indent level: the guide line of a nested account list runs from
+	its own level out to the rows' right edge. */
+@utility subtree-rule {
+	margin-left: -0.9375rem;
+	width: calc(100% + 0.9375rem);
+}
+
+/* The register's columns. Both of its tables — the register itself and the
+	nested leg block under each entry — lay out from these, so the legs line up
+	with the columns they belong to and no `col` carries an inline width. The
+	description is the one that absorbs the remaining width, and `minmax(0, …)`
+	is what lets it truncate instead of overflowing. */
+@utility col-actions {
+	width: 4.5rem;
+}
+
+@utility col-date {
+	width: 6rem;
+}
+
+@utility col-description {
+	width: minmax(0, 1fr);
+}
+
+@utility col-transfer {
+	width: 14rem;
+}
+
+@utility col-amount {
+	width: 7rem;
 }

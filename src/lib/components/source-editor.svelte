@@ -250,7 +250,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		bind:this={host}
 		class={cn(
 			"border-border overflow-hidden rounded-md border font-mono",
-			scope === "file" ? "h-[60vh]" : "h-[200px]"
+			scope === "file" ? "editor-pane-tall" : "editor-pane"
 		)}
 	></div>
 	<div class="flex flex-wrap items-center gap-2">

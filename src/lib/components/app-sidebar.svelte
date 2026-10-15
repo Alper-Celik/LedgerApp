@@ -134,12 +134,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				and a margin alone cannot widen it.
 			-->
 			<Sidebar.MenuSubItem>
-				<Sidebar.Separator
-					class="mx-0"
-					style="margin-left: {depth === 0 ? 0 : -15}px; width: {depth === 0
-						? '100%'
-						: 'calc(100% + 15px)'}"
-				/>
+				<Sidebar.Separator class={cn("mx-0", depth !== 0 && "subtree-rule")} />
 			</Sidebar.MenuSubItem>
 		{/if}
 		{#if node.children.length > 0}
@@ -176,10 +171,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				here).
 			-->
 			<div
-				class={cn(
-					"grid transition-[grid-template-rows] transition-motion",
-					folded[node.fullName] ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
-				)}
+				class={cn("fold", !folded[node.fullName] && "fold-open")}
 			>
 				<div class="overflow-hidden">
 					<!--
@@ -263,10 +255,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							</Sidebar.MenuButton>
 						</Sidebar.MenuItem>
 						<div
-							class={cn(
-								"grid transition-[grid-template-rows] transition-motion",
-								folded[entry.section.label] ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
-							)}
+							class={cn("fold", !folded[entry.section.label] && "fold-open")}
 						>
 							<div class="overflow-hidden">
 								<!-- Accounts are children of the virtual root, one level in. -->

@@ -69,13 +69,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	const VIEW_KEY = "account_view";
 
 	/**
-	 * Column widths, defined once: the register's header/entry table and the
-	 * nested table inside each entry's leg block both use them, so the legs line
-	 * up with the columns they belong to. The first column fits the entry's
-	 * actions side by side — the expander, the pencil, the source editor's
-	 * braces — so they cannot spill into the Date cell.
+	 * Column widths, named in `app.css` and applied to both the register's own
+	 * table and the nested table inside each entry's leg block, so the legs line
+	 * up with the columns they belong to. The first fits the entry's actions
+	 * side by side — the expander, the pencil, the source editor's braces — so
+	 * they cannot spill into the Date cell; the description column is the one
+	 * that absorbs the remaining width and truncates.
 	 */
-	const COLUMNS = ["4.5rem", "6rem", "minmax(0, 1fr)", "14rem", "7rem", "7rem"];
+	const COLUMNS = [
+		"col-actions",
+		"col-date",
+		"col-description",
+		"col-transfer",
+		"col-amount",
+		"col-amount",
+	];
 
 	/** The style choice sticks across accounts and reloads. */
 	let view = $state<ViewId>(
@@ -310,10 +318,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			Fixed layout: widths come from the colgroup, never from content, so a
 			long description or an opened entry cannot shift the amount columns.
 		-->
-		<Table.Root class="table-fixed min-w-[44rem] animate-enter">
+		<Table.Root class="table-fixed min-w-176 animate-enter">
 			<colgroup>
-				{#each COLUMNS as width, index (index)}
-					<col style="width: {width}" />
+				{#each COLUMNS as column, index (index)}
+					<col class={column} />
 				{/each}
 			</colgroup>
 			<Table.Header>
@@ -465,7 +473,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									/>
 									<span class="text-muted-foreground">—</span>
 									<Input
-										class="h-6 min-w-0 flex-[2] px-1"
+										class="h-6 min-w-0 flex-2 px-1"
 										placeholder="Narration"
 										bind:value={draft.narration}
 										aria-label="Narration"
@@ -556,16 +564,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					>
 						<Table.Cell colspan={COLUMNS.length} class="p-0">
 							<div
-								class={cn(
-									"grid transition-motion",
-									current === tx.id ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-								)}
+								class={cn("fold", current === tx.id && "fold-open")}
 							>
 								<div class="overflow-hidden">
 									<Table.Root class="table-fixed">
 										<colgroup>
-											{#each COLUMNS as width, index (index)}
-												<col style="width: {width}" />
+											{#each COLUMNS as column, index (index)}
+												<col class={column} />
 											{/each}
 										</colgroup>
 										<Table.Body>
