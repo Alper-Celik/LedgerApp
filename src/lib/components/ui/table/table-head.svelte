@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 shadcn-svelte contributors <https://github.com/huntabyte/shadcn-svelte>
+
+SPDX-License-Identifier: MIT
+-->
 <script lang="ts">
 	import { cn, type WithElementRef } from "$lib/utils.js";
 	import type { HTMLThAttributes } from "svelte/elements";
