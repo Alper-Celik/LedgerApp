@@ -205,6 +205,28 @@ Because of that, funding USD beyond the USD you hold is reported in USD while TR
 stays untouched — which is precisely the case you fix by buying currency, an
 ordinary on-budget transfer in your ledger.
 
+## Getting it
+
+The plugin ships as a release asset: publishing a release builds it and attaches
+`rustledger_envelope.wasm` (plus a `.sha256` beside it) to that release.
+
+```sh
+curl -LO https://github.com/<owner>/<repo>/releases/latest/download/rustledger_envelope.wasm
+curl -LO https://github.com/<owner>/<repo>/releases/latest/download/rustledger_envelope.wasm.sha256
+sha256sum -c rustledger_envelope.wasm.sha256
+```
+
+Put it next to your journal and reference it from there — a `plugin` path is
+resolved relative to the file that declares it:
+
+```beancount
+plugin "rustledger_envelope.wasm"
+```
+
+Pre-releases run the same pipeline, so a release candidate can be attached and
+tried without becoming `latest`. To build it yourself instead, see
+[Building](#building).
+
 ## Building
 
 ```sh

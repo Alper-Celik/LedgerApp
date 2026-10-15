@@ -21,10 +21,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CRATE: plugins/rustledger-envelope
-  WASM: plugins/rustledger-envelope/target/wasm32-unknown-unknown/release/rustledger_envelope.wasm
-
 jobs:
   test:
     if: github.event_name != 'release'
@@ -61,9 +57,30 @@ jobs:
           workspaces: plugins/rustledger-envelope -> target
       - name: Build the plugin
         run: cargo build --locked --release --target wasm32-unknown-unknown
+      - name: Checksum it
+        run: |
+          cd "$GITHUB_WORKSPACE/plugins/rustledger-envelope/target/wasm32-unknown-unknown/release"
+          sha256sum rustledger_envelope.wasm > rustledger_envelope.wasm.sha256
+      # So a branch can hand out the plugin without cutting a release.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rustledger_envelope
+          path: |
+            plugins/rustledger-envelope/target/wasm32-unknown-unknown/release/rustledger_envelope.wasm
+            plugins/rustledger-envelope/target/wasm32-unknown-unknown/release/rustledger_envelope.wasm.sha256
+          if-no-files-found: error
 
-  # A published release carries the built plugin, which is how a ledger gets it
-  # (`plugin "…rustledger_envelope.wasm"` next to the journal).
+  # Publishing a release is what ships the plugin, and a ledger consumes it as a
+  # release asset next to the journal:
+  #
+  #   plugin "rustledger_envelope.wasm"
+  #
+  # downloaded from
+  #   https://github.com/<owner>/<repo>/releases/latest/download/rustledger_envelope.wasm
+  #   https://github.com/<owner>/<repo>/releases/download/<tag>/rustledger_envelope.wasm
+  #
+  # (a pre-release exercises this pipeline without becoming "latest"), and the
+  # `.sha256` beside it is what `sha256sum -c` wants.
   release:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -82,10 +99,15 @@ jobs:
           workspaces: plugins/rustledger-envelope -> target
       - name: Build the plugin
         run: cargo build --locked --release --target wasm32-unknown-unknown
-      - name: Attach it to the release
+      - name: Attach the plugin and its checksum to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "$GITHUB_WORKSPACE/$WASM" --clobber
+        run: |
+          cd "$GITHUB_WORKSPACE/plugins/rustledger-envelope/target/wasm32-unknown-unknown/release"
+          sha256sum rustledger_envelope.wasm > rustledger_envelope.wasm.sha256
+          gh release upload "${{ github.event.release.tag_name }}" \
+            rustledger_envelope.wasm rustledger_envelope.wasm.sha256 \
+            --clobber
 
   reuse:
     if: github.event_name != 'release'
