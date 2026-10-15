@@ -29,6 +29,20 @@ fn greet(name: String) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Accounts the ledger's envelope-budgeting plugin generates
+/// (`plugins/rustledger-envelope`). The whole budget lives under this prefix, so
+/// one string is enough to keep it out of the app — tree, balances and register
+/// — while the plugin keeps doing the arithmetic.
+const ENVELOPE_NAMESPACE: &str = "Equity:Envelope";
+
+/// Whether `account` is one the envelope plugin generated.
+fn is_envelope_account(account: &str) -> bool {
+    account == ENVELOPE_NAMESPACE
+        || (account.len() > ENVELOPE_NAMESPACE.len()
+            && account.starts_with(ENVELOPE_NAMESPACE)
+            && account.as_bytes()[ENVELOPE_NAMESPACE.len()] == b':')
+}
+
 /// Fully-qualified Beancount account name, e.g. "Expenses:Food:Groceries".
 #[derive(Debug, serde::Serialize, specta::Type)]
 pub struct AccountBalance {
@@ -413,6 +427,16 @@ fn account_transaction_views(
             let Directive::Transaction(tx) = directive else {
                 return None;
             };
+            // The plugin's generated entries are bookkeeping, not entries the
+            // user wrote: they never reach the register. (The id stays the
+            // ledger-stream position, so the user's own rows keep theirs.)
+            if tx
+                .postings
+                .iter()
+                .all(|posting| is_envelope_account(posting.value.account.as_str()))
+            {
+                return None;
+            }
             let touches = root
                 || tx.postings.iter().any(|posting| {
                     let name = posting.value.account.as_str();
@@ -472,6 +496,12 @@ fn account_balances(ledger: &Ledger, modified: &BTreeSet<String>) -> Vec<Account
                 // Residual/interpolated postings never occur post-booking.
                 continue;
             };
+            // The envelope plugin's postings are bookkeeping against accounts it
+            // owns; letting them through would also inflate their ancestors, so
+            // `Equity` would carry money the user does not have.
+            if is_envelope_account(posting.value.account.as_str()) {
+                continue;
+            }
             *totals
                 .entry(posting.value.account.as_str().to_owned())
                 .or_default()
@@ -2773,4 +2803,70 @@ option \"operating_currency\" \"USD\"
         assert!(ledger_diff_text(&state).is_err());
         assert!(commit_staged(&state, "no repository").is_err());
     }
+    #[test]
+    fn envelope_budget_accounts_stay_out_of_the_app() {
+        let mut fs = rustledger_loader::VirtualFileSystem::new();
+        fs.add_file(
+            "main.beancount",
+            "\
+option \"operating_currency\" \"TRY\"
+
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+2026-01-01 open Equity:Envelope:Groceries
+2026-01-01 open Equity:Envelope:To-Be-Budgeted
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank                     -50.00 TRY
+  Expenses:Food                    50.00 TRY
+
+2026-01-31 * \"Envelope funding 2026-01\" #envelope
+  Equity:Envelope:Groceries       100.00 TRY
+  Equity:Envelope:To-Be-Budgeted -100.00 TRY
+
+2026-01-31 * \"Envelope activity 2026-01\" #envelope
+  Equity:Envelope:Groceries       -50.00 TRY
+  Equity:Envelope:To-Be-Budgeted   50.00 TRY
+",
+        );
+        let ledger = rustledger_loader::load_with_fs(
+            Path::new("main.beancount"),
+            &LoadOptions::default(),
+            Box::new(fs),
+        )
+        .unwrap();
+        assert!(ledger.errors.is_empty(), "errors: {:?}", ledger.errors);
+
+        // The generated accounts are the plugin's own bookkeeping: the tree shows
+        // neither them nor their money.
+        let balances = account_balances(&ledger, &BTreeSet::new());
+        let names: Vec<&str> = balances.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"Assets:Bank"), "{names:?}");
+        assert!(!names.iter().any(|name| name.contains("Envelope")), "{names:?}");
+        let get = |name: &str| {
+            balances
+                .iter()
+                .find(|b| b.name == name)
+                .map(|b| (b.balance.as_str(), b.currency.as_str()))
+        };
+        assert_eq!(get("Assets:Bank"), Some(("-50.00", "TRY")));
+        // Equity only ever held envelope money here, and it is filtered, so no
+        // Equity node is left to report.
+        assert_eq!(get("Equity"), None);
+
+        // The generated entries never reach the register; the user's own entry
+        // does, and keeps its ledger-stream id (the id the editor works from).
+        let root = account_transaction_views(&ledger, &HashMap::new(), "");
+        let narrations: Vec<&str> = root.iter().map(|t| t.narration.as_str()).collect();
+        assert_eq!(narrations, vec!["Groceries"], "{narrations:?}");
+        let index = ledger
+            .balance_view()
+            .iter()
+            .position(|directive| {
+                matches!(directive, Directive::Transaction(tx) if tx.narration.as_str() == "Groceries")
+            })
+            .expect("the user's transaction is in the stream");
+        assert_eq!(root[0].id, u32::try_from(index).unwrap());
+    }
+
 }
