@@ -275,6 +275,33 @@ pins the directive language including every rejection, and the remaining branche
 error paths — most of the residue is defensive code the parser makes unreachable
 (e.g. a `zero` naming a non-expense account) plus `unreachable!()` arms.
 
+## Licence
+
+The plugin's source is **AGPL-3.0-or-later** — the repository's licence, carried
+in the SPDX header of every file.
+
+The *built* `.wasm` is a combined work, and one of the libraries it links is not
+permissive, so the artifact cannot be offered under a more permissive licence
+than the source:
+
+| Bundled | Licence |
+| --- | --- |
+| `rustledger-plugin-types` (the plugin ABI: `PluginInput`/`PluginOutput`, `wasm_plugin_main!`) | GPL-3.0-only |
+| `rust_decimal` | MIT |
+| `regex-lite` | MIT OR Apache-2.0 |
+| their transitive dependencies | permissive (MIT / Apache-2.0), except the above |
+
+`rustledger-loader` and `rustledger-validate` (test-only here) are GPL-3.0-only as
+well. A distributed module therefore carries GPL-3.0 terms — in practice
+AGPL-3.0 *without* the "or later", since an "only" component forbids choosing a
+later version — and the permissive components' notices have to travel with it.
+
+Wanting a permissive plugin (MIT or Apache-2.0) is a different design, not a
+header change: it means dropping the GPL dependency, i.e. declaring the ABI types
+and the `alloc`/`process`/`__rustledger_abi_version` exports by hand (they are
+documented in rustledger's custom-plugins guide, ~200 lines), after which nothing
+GPL-linked remains and the crate can be relicensed freely.
+
 ## How it runs inside rustledger
 
 The plugin is a directive plugin and rustledger runs it in the **post-booking**
