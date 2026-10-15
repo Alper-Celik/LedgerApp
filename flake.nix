@@ -145,7 +145,7 @@
                 {
                   outputHashAlgo = "sha256";
                   outputHashMode = "recursive";
-                  outputHash = "sha256-hXOmJV123vRJGGgtzCeHeowoo2cYE4gUqaxrYUS47Ug=";
+                  outputHash = "sha256-eHAu1DPzYFL2uNsMYRhVo61BP65WEG+/lmJTqVBmT/Y=";
                   nativeBuildInputs = [
                     pkgsAndroid.jdk21_headless
                     androidComposition.androidsdk
