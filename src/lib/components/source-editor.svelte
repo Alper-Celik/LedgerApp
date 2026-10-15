@@ -5,7 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { onMount } from "svelte";
-	import type { editor as MonacoEditor } from "monaco-editor";
+	import type { editor as MonacoEditor, IRange } from "monaco-editor";
 	import { commands } from "../../bindings";
 	import {
 		BEANCOUNT_DARK,
@@ -14,29 +14,40 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		fieldSnippet,
 		registerBeanLanguage,
 	} from "$lib/beancount";
+	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
+	import type { EditorScope } from "$lib/editor-scope.svelte.js";
+	import { cn } from "$lib/utils.js";
 
 	/**
-	 * A transaction's own source lines in a Monaco editor — the second way to
-	 * edit an entry beside the register's in-place cells. Saving hands the whole
-	 * text to `update_transaction_source`, which splices it over the
-	 * transaction's own byte range in the `.bean` file and puts the result
-	 * through the same reload-and-stage pipeline as a cell edit: the loader is
-	 * still the authority on whether the entry is legal, and a refusal leaves
-	 * the file byte-for-byte as it was.
+	 * The ledger's text in a Monaco editor — the second way to edit beside the
+	 * register's in-place cells. `scope` picks how much of it:
 	 *
-	 * The entry's own characters are the only text this component ever shows:
-	 * the syntax highlighting is a tokenizer over them, and Tab fields turns
-	 * them into snippet stops whose defaults are those same characters, so
-	 * inserting the snippet writes the entry back unchanged.
+	 * - `entry` shows the transaction's own lines; saving hands them to
+	 *   `update_transaction_source`, which splices them over the entry's byte
+	 *   range in the `.bean` file.
+	 * - `file` shows the whole `.bean` the entry lives in and opens on the
+	 *   entry (revealed and selected, so Tab fields acts on it); saving hands
+	 *   the whole text to `update_file_source`.
+	 *
+	 * Either way the result goes through the same reload-and-stage pipeline as a
+	 * cell edit: the loader is still the authority on whether the text is a
+	 * legal ledger, and a refusal leaves the file byte-for-byte as it was.
+	 *
+	 * The file's own characters are the only text this component ever shows: the
+	 * syntax highlighting is a tokenizer over them, and Tab fields turns them
+	 * into snippet stops whose defaults are those same characters, so inserting
+	 * the snippet writes them back unchanged.
 	 */
 	let {
 		id,
+		scope,
 		onSaved,
 		onCancel,
 	}: {
 		id: number;
+		scope: EditorScope;
 		onSaved: () => void;
 		onCancel: () => void;
 	} = $props();
@@ -72,33 +83,42 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	}
 
 	/**
-	 * Puts the entry's fields under Tab: the snippet is the entry's current text
-	 * with `${n:…}` stops around the date, the flag, the payee, the narration
-	 * and each posting's amount, each defaulted to the file's own characters, so
-	 * that inserting it writes those same characters back. Tab and Shift+Tab
-	 * walk the stops, a stop whose text is emptied is skipped, and Escape leaves
-	 * snippet mode. Re-entering is the toolbar's `Tab fields` button.
+	 * Puts an entry's fields under Tab: the snippet is the text's current
+	 * characters with `${n:…}` stops around the date, the flag, the payee, the
+	 * narration and each posting's amount, each defaulted to the file's own
+	 * characters, so that inserting it writes those same characters back. Tab
+	 * and Shift+Tab walk the stops, a stop whose text is emptied is skipped, and
+	 * Escape leaves snippet mode. Re-entering is the toolbar's `Tab fields`
+	 * button.
+	 *
+	 * The text it acts on is the whole model in `entry` scope and the selection
+	 * in `file` scope — opening on an entry selects it, so the button targets
+	 * the entry the editor was opened for, never the file's first one.
 	 *
 	 * Text whose first non-comment line is not a dated entry is not something
-	 * this can read: the text is left exactly as it is and the cursor goes to
-	 * the top, because a wrong guess here would edit an entry.
+	 * this can read: the text is left exactly as it is (and, in `entry` scope,
+	 * the cursor goes to the top), because a wrong guess here would edit an
+	 * entry.
 	 */
 	function enterFields() {
 		const model = editor?.getModel();
 		const controller = editor?.getContribution<SnippetController>("snippetController2");
 		if (!editor || !model || !controller) return;
 
-		const template = fieldSnippet(model.getValue());
+		const selection = scope === "file" ? editor.getSelection() : model.getFullModelRange();
+		if (!selection) return;
+
+		const template = fieldSnippet(model.getValueInRange(selection));
 		if (!template) {
-			editor.setPosition({ lineNumber: 1, column: 1 });
+			if (scope !== "file") editor.setPosition({ lineNumber: 1, column: 1 });
 			editor.focus();
 			return;
 		}
 
 		const before = model.getValue();
-		// The snippet carries the whole text, so it replaces the whole text:
-		// with everything selected, the insert changes nothing but the stops.
-		editor.setSelection(model.getFullModelRange());
+		// The snippet carries the text, so it replaces that text: with the range
+		// selected, the insert changes nothing but the stops.
+		editor.setSelection(selection);
 		controller.insert(template, { adjustWhitespace: false });
 		if (model.getValue() !== before) {
 			// Should not happen — `adjustWhitespace: false` keeps Monaco from
@@ -132,11 +152,33 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			// text, and a theme id cannot be switched to before it is defined.
 			registerBeanLanguage(monaco);
 
-			const result = await commands.transactionSource(id);
-			if (disposed) return;
-			if (result.status === "error") {
-				error = result.error;
-				return;
+			// `entry` reads the transaction's own lines, `file` the whole `.bean`
+			// it lives in; both are the file's characters, a different span of
+			// them, and `file` also carries where the entry sits in that span.
+			let text: string;
+			let entry: IRange | null = null;
+			if (scope === "file") {
+				const result = await commands.transactionFile(id);
+				if (disposed) return;
+				if (result.status === "error") {
+					error = result.error;
+					return;
+				}
+				text = result.data.text;
+				entry = {
+					startLineNumber: result.data.start_line,
+					startColumn: result.data.start_column,
+					endLineNumber: result.data.end_line,
+					endColumn: result.data.end_column,
+				};
+			} else {
+				const result = await commands.transactionSource(id);
+				if (disposed) return;
+				if (result.status === "error") {
+					error = result.error;
+					return;
+				}
+				text = result.data;
 			}
 
 			// The app's theme is the `dark` class on `<html>`; Monaco takes an
@@ -144,7 +186,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			const theme = () =>
 				document.documentElement.classList.contains("dark") ? BEANCOUNT_DARK : BEANCOUNT_LIGHT;
 			editor = monaco.editor.create(host, {
-				value: result.data,
+				value: text,
 				language: BEANCOUNT_LANGUAGE,
 				theme: theme(),
 				minimap: { enabled: false },
@@ -155,9 +197,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
 			});
 			ready = true;
-			// Opening on the entry's first field is the snippet the owner asked
-			// for; the text is already the one from the file, so nothing moves.
-			enterFields();
+			if (entry) {
+				// Open on the entry the editor was asked for: brought into view
+				// and selected, so it is both what you see and what Tab fields
+				// acts on. A whole file is not a single entry, so the tab stops
+				// are never laid over all of it.
+				editor.revealRangeInCenter(entry);
+				editor.setSelection(entry);
+				editor.focus();
+			} else {
+				// Opening on the entry's first field is the snippet the owner
+				// asked for; the text is already the one from the file, so
+				// nothing moves.
+				enterFields();
+			}
 			themeObserver = new MutationObserver(() => monaco.editor.setTheme(theme()));
 			themeObserver.observe(document.documentElement, { attributeFilter: ["class"] });
 		})();
@@ -175,7 +228,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		if (!editor) return;
 		saving = true;
 		error = "";
-		const result = await commands.updateTransactionSource(id, editor.getValue());
+		const result =
+			scope === "file"
+				? await commands.updateFileSource(id, editor.getValue())
+				: await commands.updateTransactionSource(id, editor.getValue());
 		saving = false;
 		if (result.status === "error") {
 			error = result.error;
@@ -186,17 +242,33 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	}
 </script>
 
-<div class="border-border/40 flex flex-col gap-2 border-t px-3 py-2">
-	<div bind:this={host} class="border-border/60 h-[200px] overflow-hidden rounded-md border font-mono"></div>
-	<div class="flex items-center gap-2">
+<div class="border-border flex flex-col gap-2 border-t px-3 py-2">
+	<!--
+		The whole file wants the room; the entry's own lines fit in a fold.
+	-->
+	<div
+		bind:this={host}
+		class={cn(
+			"border-border overflow-hidden rounded-md border font-mono",
+			scope === "file" ? "h-[60vh]" : "h-[200px]"
+		)}
+	></div>
+	<div class="flex flex-wrap items-center gap-2">
 		<Button size="sm" onclick={save} disabled={saving || !ready}>Save</Button>
 		<Button size="sm" variant="ghost" onclick={enterFields} disabled={!ready}>Tab fields</Button>
 		<Button size="sm" variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
 		<span class="text-muted-foreground text-xs">
-			Tab and Shift+Tab step through the entry's fields, Esc leaves them.
+			{#if scope === "file"}
+				The whole journal file; the entry opens selected. Tab and Shift+Tab step through its
+				fields, Esc leaves them.
+			{:else}
+				Tab and Shift+Tab step through the entry's fields, Esc leaves them.
+			{/if}
 		</span>
-		{#if error}
-			<span class="text-xs text-red-600 dark:text-red-400">{error}</span>
-		{/if}
 	</div>
+	{#if error}
+		<Alert variant="destructive">
+			<AlertDescription>{error}</AlertDescription>
+		</Alert>
+	{/if}
 </div>

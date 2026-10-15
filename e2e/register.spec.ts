@@ -16,26 +16,28 @@ test("the register renders the fixture ledger and its three styles", async ({ pa
 	await expect(page.getByRole("cell", { name: "Fees and top-up", exact: true })).toBeVisible();
 	await expect(page.getByRole("cell", { name: "Expenses:Fees" })).toBeVisible();
 
-	await page.getByRole("button", { name: "Splits", exact: true }).click();
+	await page.getByRole("radio", { name: "Splits", exact: true }).click();
 	await expect(page.getByRole("columnheader", { name: "Tot Withdrawal" })).toBeVisible();
 	await expect(page.getByText("₺100.00").first()).toBeVisible();
 
-	await page.getByRole("button", { name: "Full", exact: true }).click();
+	await page.getByRole("radio", { name: "Full", exact: true }).click();
 	await expect(page.getByRole("cell", { name: "Expenses:Food:Groceries" }).first()).toBeVisible();
 });
 
 test("an uncommitted entry is marked, and only that one", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
-	const modified = page.getByRole("row", { name: /Fees and top-up/ }).first();
-	const clean = page.getByRole("row", { name: /Migros — weekly groceries/ }).first();
-	await expect(modified).toHaveCSS("background-color", "oklab(0.696 -0.162114 0.0511765 / 0.1)");
-	expect(await clean.evaluate((row) => getComputedStyle(row).backgroundColor)).not.toContain("0.696");
+	// "Marked" is the entry's own left marker; no colour is pinned here, so the
+	// theme can move without this test having to be re-pinned to it.
+	const marker = (name: RegExp) =>
+		page.getByRole("row", { name }).first().getByRole("cell").first();
+	await expect(marker(/Fees and top-up/)).toHaveClass(/border-s-added/);
+	await expect(marker(/Migros — weekly groceries/)).not.toHaveClass(/border-s-added/);
 });
 
 test("editing a cell in place sends exact decimal strings, never floats", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
 	// Amount fields live on the leg rows, which the split styles show.
-	await page.getByRole("button", { name: "Splits", exact: true }).click();
+	await page.getByRole("radio", { name: "Splits", exact: true }).click();
 	await page.getByRole("row", { name: /Migros — weekly groceries/ }).first().dblclick();
 
 	// The row's own cells became fields.

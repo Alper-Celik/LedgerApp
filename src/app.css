@@ -48,6 +48,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	--sidebar-accent-foreground: oklch(0.205 0 0);
 	--sidebar-border: oklch(0.922 0 0);
 	--sidebar-ring: oklch(0.708 0 0);
+	/* Diff tones: a patch reads the same everywhere without a `dark:` override. */
+	--added: oklch(0.52 0.14 155);
+	--removed: oklch(0.55 0.2 25);
 }
 /*
 ---break---
@@ -84,6 +87,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	--sidebar-accent-foreground: oklch(0.985 0 0);
 	--sidebar-border: oklch(1 0 0 / 10%);
 	--sidebar-ring: oklch(0.556 0 0);
+	--added: oklch(0.75 0.15 155);
+	--removed: oklch(0.72 0.18 25);
 }
 /*
 ---break---
@@ -121,6 +126,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	--color-card: var(--card);
 	--color-foreground: var(--foreground);
 	--color-background: var(--background);
+	--color-added: var(--added);
+	--color-removed: var(--removed);
 	--radius-sm: calc(var(--radius) * 0.6);
 	--radius-md: calc(var(--radius) * 0.8);
 	--radius-lg: var(--radius);
@@ -183,4 +190,68 @@ html.sidebar-resizing [data-slot="sidebar-container"] {
 [data-slot="sidebar-container"] {
 	transition-timing-function: var(--motion-ease);
 	transition-duration: var(--motion-duration);
+}
+
+/*
+	Motion presets. Every curve and duration already lives in the theme above;
+	these are the names components use, so no component ever writes a raw value
+	and retiming the app is a change to the tokens, not to the components.
+
+	- `transition-motion` / `transition-motion-fast`: the two transition speeds
+	  (colour, opacity, rotation, transform).
+	- `animate-enter`: content appearing (fade plus a small rise).
+	- `animate-pop`: something small appearing in place (fade plus a slight
+	  scale), for popovers and inline results rather than whole views.
+*/
+@utility transition-motion {
+	transition-duration: var(--motion-duration);
+	transition-timing-function: var(--motion-ease);
+}
+
+@utility transition-motion-fast {
+	transition-duration: var(--motion-duration-fast);
+	transition-timing-function: var(--motion-ease);
+}
+
+@utility animate-enter {
+	animation: motion-enter var(--motion-duration) var(--motion-ease-entering) both;
+}
+
+@utility animate-pop {
+	animation: motion-pop var(--motion-duration-fast) var(--motion-ease) both;
+}
+
+@keyframes motion-enter {
+	from {
+		opacity: 0;
+		translate: 0 0.25rem;
+	}
+	to {
+		opacity: 1;
+		translate: 0 0;
+	}
+}
+
+@keyframes motion-pop {
+	from {
+		opacity: 0;
+		scale: 0.98;
+	}
+	to {
+		opacity: 1;
+		scale: 1;
+	}
+}
+
+/* Reduced motion is handled once, here, instead of at every call site. */
+@media (prefers-reduced-motion: reduce) {
+	.animate-enter,
+	.animate-pop {
+		animation: none;
+	}
+
+	.transition-motion,
+	.transition-motion-fast {
+		transition-duration: 0ms;
+	}
 }

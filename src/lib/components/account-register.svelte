@@ -5,18 +5,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
-	import Braces from "@lucide/svelte/icons/braces";
-	import ChevronRight from "@lucide/svelte/icons/chevron-right";
-	import Pencil from "@lucide/svelte/icons/pencil";
+	import { BracesIcon, ChevronRightIcon, PencilEdit01Icon } from "@hugeicons/core-free-icons";
+	import { HugeiconsIcon } from "@hugeicons/svelte";
 	import { commands, type PostingView, type TransactionView } from "../../bindings";
+	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
+	import { Badge } from "$lib/components/ui/badge/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Table from "$lib/components/ui/table/index.js";
+	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
 	import { isSubAccountOf } from "$lib/accounts.js";
-	import { signOf, sumDecimals } from "$lib/money.js";
-	import { smoothHeight } from "$lib/smooth-height.js";
+	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
-
+	import { signOf, sumDecimals } from "$lib/money.js";
+	import { cn } from "$lib/utils.js";
 
 	/**
 	 * The three register styles, GnuCash's: `effect` is the basic ledger (one
@@ -77,6 +81,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let view = $state<ViewId>(
 		(VIEWS.find((candidate) => candidate.id === localStorage.getItem(VIEW_KEY))?.id ?? "effect") as ViewId
 	);
+	/**
+	 * Both toggles are `single` groups whose pressed segment can be cleared by
+	 * clicking it again. Neither may be empty — a register always has a style
+	 * and the editor always a scope — so an empty value is ignored and the
+	 * stray click is a no-op.
+	 */
 	let mode = $derived(VIEWS.find((candidate) => candidate.id === view) ?? VIEWS[0]);
 
 	/** The register's *current transaction*, as GnuCash highlights it. */
@@ -205,15 +215,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	};
 </script>
 
-{#snippet amounts(values: { units: string; currency: string }[], tone: "in" | "out")}
+{#snippet amounts(values: { units: string; currency: string }[])}
 	<span class="inline-flex flex-wrap justify-end gap-x-2">
 		{#each values as value, index (index)}
-			<MoneyAmount
-				units={value.units}
-				currency={value.currency}
-				signed={false}
-				class={tone === "out" ? "text-red-600 dark:text-red-400" : ""}
-			/>
+			<MoneyAmount units={value.units} currency={value.currency} signed={false} />
 		{/each}
 	</span>
 {/snippet}
@@ -221,344 +226,365 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 {#snippet postingRow(
 	posting: PostingView,
 	affecting: boolean,
-	position: number,
 	index: number,
 	legDraft: { units: string[] } | null
 )}
 	{@const outward = posting.units.startsWith("-")}
-	<!-- Legs: hairline rule, alternating tint so consecutive splits stay countable. -->
-	<tr class="border-border/30 border-t {position % 2 === 0 ? 'bg-foreground/[0.035]' : ''}">
-		<td></td>
-		<td class="border-border/40 border-l"></td>
-		<td class="border-border/40 border-l"></td>
+	<Table.Row>
+		<Table.Cell></Table.Cell>
+		<Table.Cell class="border-s border-border"></Table.Cell>
+		<Table.Cell class="border-s border-border"></Table.Cell>
 		<!--
-			Weight, not opacity, separates the legs that hit this account: an alpha
-			would drop small text under the 4.5:1 contrast floor.
+			Colour, not opacity, separates the legs that hit this account from the
+			ones that do not: an alpha would drop small text under the 4.5:1
+			contrast floor.
 		-->
-		<td
-			class="border-s-2 border-s-muted-foreground/25 truncate py-1 pr-3 pl-3 text-foreground/75
-				{affecting ? 'font-medium' : ''}"
+		<Table.Cell
+			class={cn(
+				"border-s-2 border-s-muted-foreground truncate py-1 pr-3 pl-3",
+				affecting ? "font-medium text-foreground" : "text-muted-foreground"
+			)}
 		>
 			{posting.account}
-		</td>
-		<td class="border-border/40 border-l overflow-hidden px-2 py-1 text-right">
+		</Table.Cell>
+		<Table.Cell class="border-s border-border overflow-hidden px-2 py-1 text-right">
 			{#if legDraft && !outward}
-				<input
-					class="bg-background/70 focus:ring-ring w-full rounded-sm px-1 py-0.5 text-right text-xs tabular-nums outline-none focus:ring-1"
+				<Input
+					class="h-6 px-1 text-right tabular-nums"
 					bind:value={legDraft.units[index]}
 					aria-label={`Amount on ${posting.account}`}
 				/>
 			{:else if !outward}
-				{@render amounts([{ units: posting.units, currency: posting.currency }], "in")}
+				{@render amounts([{ units: posting.units, currency: posting.currency }])}
 			{/if}
-		</td>
-		<td class="border-border/40 border-l overflow-hidden px-2 py-1 pr-3 text-right">
+		</Table.Cell>
+		<Table.Cell class="border-s border-border overflow-hidden px-2 py-1 pr-3 text-right">
 			{#if legDraft && outward}
-				<input
-					class="bg-background/70 focus:ring-ring w-full rounded-sm px-1 py-0.5 text-right text-xs tabular-nums outline-none focus:ring-1"
+				<Input
+					class="h-6 px-1 text-right tabular-nums"
 					bind:value={legDraft.units[index]}
 					aria-label={`Amount on ${posting.account}`}
 				/>
 			{:else if outward}
-				{@render amounts([{ units: posting.units, currency: posting.currency }], "out")}
+				{@render amounts([{ units: posting.units, currency: posting.currency }])}
 			{/if}
-		</td>
-	</tr>
+		</Table.Cell>
+	</Table.Row>
 {/snippet}
 
 <div class="flex flex-col gap-3">
-	<div class="flex items-center justify-end gap-1">
-		{#each VIEWS as option (option.id)}
-			<Button
-				size="sm"
-				variant={view === option.id ? "secondary" : "ghost"}
-				onclick={() => (view = option.id)}
+	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+		<!--
+			What the braces button opens: the entry's own lines, or the whole
+			`.bean` it lives in, opened on the entry. A setting rather than a
+			per-entry choice, so it is chosen once here and followed by every
+			entry after it.
+		-->
+		<div class="flex items-center gap-2">
+			<span class="text-muted-foreground text-xs" title="What the source editor opens"> Source editor </span>
+			<ToggleGroup.Root
+				type="single"
+				value={editorScope.scope}
+				onValueChange={(next) => next && setEditorScope(next as EditorScope)}
+				aria-label="Source editor scope"
 			>
-				{option.label}
-			</Button>
-		{/each}
+				{#each EDITOR_SCOPES as option (option.id)}
+					<ToggleGroup.Item value={option.id} title={option.hint}>{option.label}</ToggleGroup.Item>
+				{/each}
+			</ToggleGroup.Root>
+		</div>
+		<ToggleGroup.Root
+			type="single"
+			value={view}
+			onValueChange={(next) => next && (view = next as ViewId)}
+			aria-label="Register style"
+		>
+			{#each VIEWS as option (option.id)}
+				<ToggleGroup.Item value={option.id}>{option.label}</ToggleGroup.Item>
+			{/each}
+		</ToggleGroup.Root>
 	</div>
 
-	<!--
-		Fixed layout: widths come from the colgroup, never from content, so a long
-		description or an opened entry cannot shift the amount columns.
-	-->
-	<div class="overflow-x-auto">
-		{#key view}
-			<table
-				class="w-full min-w-[44rem] animate-in fade-in table-fixed text-xs duration-[var(--motion-duration)]
-					ease-[var(--motion-ease-entering)] motion-reduce:animate-none"
-			>
-				<colgroup>
-					{#each COLUMNS as width, index (index)}
-						<col style="width: {width}" />
-					{/each}
-				</colgroup>
-				<thead class="text-muted-foreground">
-					<tr>
-						<th></th>
-						<th class="border-border/40 border-l pl-2 text-left font-normal">Date</th>
-						<th class="border-border/40 border-l pl-2 text-left font-normal">Description</th>
-						<th class="border-border/40 border-l pl-2 text-left font-normal">
-							{mode.transferColumn}
-						</th>
-						<th class="border-border/40 border-l px-2 text-right font-normal">
-							{mode.amountColumns[0]}
-						</th>
-						<th class="border-border/40 border-l px-2 pr-3 text-right font-normal">
-							{mode.amountColumns[1]}
-						</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each transactions as tx, index (tx.id)}
-						{@const flow = flows(tx)}
-						{@const legs =
-							mode.legsWhenCurrentOnly && current !== tx.id
-								? []
-								: tx.postings
-										.map((posting, index) => ({ posting, index }))
-										.filter(
-											(leg) =>
-												mode.showAllPostings ||
-												current === tx.id ||
-												isSubAccountOf(leg.posting.account, account)
-										)}
-						<!--
-							Zebra steps are alphas of the foreground, not of `--muted`: the
-							former inverts with the theme (darker on light, lighter on dark),
-							while `--muted` here is lighter than white in light mode, where a
-							tint of it would vanish. Entries carry a slightly stronger tint
-							than their own legs, so the ladder stays entry > its legs in both
-							themes, with the current entry above all of it.
-						-->
-						<!-- Uncommitted entries read green, the way a diff marks additions. -->
-						<tr
-							class="border-border border-t transition-colors duration-[var(--motion-duration-fast)]
-								ease-[var(--motion-ease)] {tx.modified
-								? 'bg-emerald-500/10'
-								: current === tx.id
-									? 'bg-primary/15'
-									: index % 2 === 0
-										? 'bg-foreground/8 hover:bg-foreground/12'
-										: 'bg-foreground/4 hover:bg-foreground/8'}
-								{editing === tx.id ? 'ring-primary/40 ring-1 ring-inset' : ''}"
-							onclick={() => select(tx)}
-							ondblclick={() => startEdit(tx)}
-							data-entry-id={tx.id}
-							onkeydown={(event) => {
-								if (event.key === "Enter") {
-									event.preventDefault();
-									saveEdit(tx);
-								} else if (event.key === "Escape") {
-									event.preventDefault();
-									cancelEdit();
-								}
-							}}
-							onfocusout={(event) => commitOnLeave(event, tx)}
+	{#key view}
+		<!--
+			Fixed layout: widths come from the colgroup, never from content, so a
+			long description or an opened entry cannot shift the amount columns.
+		-->
+		<Table.Root class="table-fixed min-w-[44rem] animate-enter">
+			<colgroup>
+				{#each COLUMNS as width, index (index)}
+					<col style="width: {width}" />
+				{/each}
+			</colgroup>
+			<Table.Header>
+				<Table.Row>
+					<Table.Head class="h-7"></Table.Head>
+					<Table.Head class="h-7 border-s border-border pl-2">Date</Table.Head>
+					<Table.Head class="h-7 border-s border-border pl-2">Description</Table.Head>
+					<Table.Head class="h-7 border-s border-border pl-2">{mode.transferColumn}</Table.Head>
+					<Table.Head class="h-7 border-s border-border px-2 text-right">
+						{mode.amountColumns[0]}
+					</Table.Head>
+					<Table.Head class="h-7 border-s border-border px-2 pr-3 text-right">
+						{mode.amountColumns[1]}
+					</Table.Head>
+				</Table.Row>
+			</Table.Header>
+			<Table.Body>
+				{#each transactions as tx (tx.id)}
+					{@const flow = flows(tx)}
+					{@const legs =
+						mode.legsWhenCurrentOnly && current !== tx.id
+							? []
+							: tx.postings
+									.map((posting, index) => ({ posting, index }))
+									.filter(
+										(leg) =>
+											mode.showAllPostings ||
+											current === tx.id ||
+											isSubAccountOf(leg.posting.account, account)
+									)}
+					<!--
+						Three states, three semantic tints: this entry is the current
+						one (`accent`), or it holds changes not yet committed (the
+						diff's green), or it is a plain entry of the register. The
+						first cell carries the matching left marker, so an entry's
+						state never has to be read from a tint alone.
+					-->
+					<Table.Row
+						class={cn(
+							"transition-motion",
+							tx.modified ? "bg-added/10" : current === tx.id ? "bg-accent" : "",
+							editing === tx.id && "ring-1 ring-inset ring-ring"
+						)}
+						onclick={() => select(tx)}
+						ondblclick={() => startEdit(tx)}
+						data-entry-id={tx.id}
+						onkeydown={(event) => {
+							if (event.key === "Enter") {
+								event.preventDefault();
+								saveEdit(tx);
+							} else if (event.key === "Escape") {
+								event.preventDefault();
+								cancelEdit();
+							}
+						}}
+						onfocusout={(event) => commitOnLeave(event, tx)}
+					>
+						<Table.Cell
+							class={cn(
+								"px-0.5 py-1",
+								tx.modified
+									? "border-s-2 border-s-added"
+									: current === tx.id && "border-s-2 border-s-primary"
+							)}
 						>
-							<td
-								class="py-1.5 {tx.modified
-									? 'border-s-2 border-s-emerald-500/70'
-									: current === tx.id
-										? 'border-s-2 border-s-primary/70'
-										: ''}"
-							>
-								<!--
-									GnuCash's expander, pointing down once the splits
-									show. In the basic ledger nothing of the entry is
-									listed yet, so any entry with more than one posting
-									opens; in the auto-split ledger only entries with
-									legs outside this account can.
-								-->
-								<span class="inline-flex items-center gap-0.5">
-									{#if mode.expandWhen !== "none" &&
-										(mode.expandWhen === "any-entry" ? tx.postings.length > 1 : hiddenCount(tx) > 0)}
-										<Button
-											size="icon-xs"
-											variant="ghost"
-											aria-label={current === tx.id ? "Hide splits" : "Show splits"}
-											aria-expanded={current === tx.id}
-											onclick={(event) => {
-												event.stopPropagation();
-												select(tx);
-											}}
-										>
-											<ChevronRight
-												class="transition-transform duration-[var(--motion-duration-fast)] ease-[var(--motion-ease)]
-													{current === tx.id ? 'rotate-90' : ''}"
-											/>
-										</Button>
-									{/if}
-									<Button
-										size="icon-xs"
-										variant="ghost"
-										aria-label={`Edit ${tx.narration}`}
-										aria-expanded={editing === tx.id}
-										onclick={(event) => {
-											event.stopPropagation();
-											if (editing === tx.id) cancelEdit();
-											else startEdit(tx);
-										}}
-									>
-										<Pencil />
-									</Button>
-									<!--
-										The other way into the same transaction: its whole
-										source text, edited as text.
-									-->
-									<Button
-										size="icon-xs"
-										variant="ghost"
-										aria-label={`Edit the source of ${tx.narration}`}
-										aria-expanded={sourceEditing === tx.id}
-										onclick={(event) => {
-											event.stopPropagation();
-											toggleSourceEdit(tx);
-										}}
-									>
-										<Braces />
-									</Button>
-								</span>
-							</td>
-							<td
-								class="border-border/40 border-l py-1.5 whitespace-nowrap tabular-nums text-muted-foreground {editing ===
-								tx.id
-									? 'px-1'
-									: 'pr-3 pl-2'}"
-							>
-								{#if editing === tx.id && draft}
-									<input
-										class="bg-background/70 focus:ring-ring w-full rounded-sm px-1 py-0.5 text-xs tabular-nums outline-none focus:ring-1"
-										placeholder="YYYY-MM-DD"
-										bind:value={draft.date}
-										aria-label="Date"
-									/>
-								{:else}
-									{tx.date}
-								{/if}
-							</td>
-							<td class="border-border/40 border-l truncate py-1.5 pr-3 pl-2 font-medium">
-								{#if editing === tx.id && draft}
-									<span class="flex min-w-0 items-center gap-1">
-										<input
-											class="bg-background/70 focus:ring-ring min-w-0 flex-1 rounded-sm px-1 py-0.5 text-xs font-medium outline-none focus:ring-1"
-											placeholder="Payee"
-											bind:value={draft.payee}
-											aria-label="Payee"
-										/>
-										<span class="text-muted-foreground">—</span>
-										<input
-											class="bg-background/70 focus:ring-ring min-w-0 flex-[2] rounded-sm px-1 py-0.5 text-xs font-medium outline-none focus:ring-1"
-											placeholder="Narration"
-											bind:value={draft.narration}
-											aria-label="Narration"
-										/>
-									</span>
-								{:else if tx.payee && tx.payee !== tx.narration}
-									<span class="font-medium">{tx.payee}</span>
-									<span class="text-muted-foreground">— {tx.narration}</span>
-								{:else}
-									{tx.narration}
-								{/if}
-							</td>
 							<!--
-								The basic ledger names the other side; the split styles
-								instead say how many legs are still hidden, so an entry that
-								can be opened is obvious without hunting for the chevron.
+								GnuCash's expander, pointing down once the splits
+								show. In the basic ledger nothing of the entry is
+								listed yet, so any entry with more than one posting
+								opens; in the auto-split ledger only entries with
+								legs outside this account can.
 							-->
-							<td class="border-border/40 border-l truncate py-1.5 pr-3 pl-2 text-muted-foreground">
-								{#if mode.namesOtherSide}
-									{transferLabel(tx)}
-								{:else if !mode.showAllPostings && hiddenCount(tx) > 0 && current !== tx.id}
-									<span
-										class="rounded bg-foreground/10 px-1.5 py-0.5 text-[0.7rem] font-medium text-foreground/75"
+							<span class="inline-flex items-center gap-0.5">
+								{#if mode.expandWhen !== "none" &&
+									(mode.expandWhen === "any-entry" ? tx.postings.length > 1 : hiddenCount(tx) > 0)}
+									<Button
+										size="icon-xs"
+										variant="ghost"
+										aria-label={current === tx.id ? "Hide splits" : "Show splits"}
+										aria-expanded={current === tx.id}
+										onclick={(event) => {
+											event.stopPropagation();
+											select(tx);
+										}}
 									>
-										{hiddenCount(tx)} more{hiddenCount(tx) === 1 ? "" : "s"}
-									</span>
+										<HugeiconsIcon
+											icon={ChevronRightIcon}
+											strokeWidth={2}
+											class={cn("transition-motion-fast", current === tx.id && "rotate-90")}
+										/>
+									</Button>
 								{/if}
-							</td>
-							<td class="border-border/40 border-l overflow-hidden px-2 py-1.5 text-right font-medium">
-								{@render amounts(flow.deposits, "in")}
-							</td>
-							<td class="border-border/40 border-l overflow-hidden px-2 py-1.5 pr-3 text-right font-medium">
-								{@render amounts(flow.withdrawals, "out")}
-							</td>
-						</tr>
-						{#if editing === tx.id && editError}
-							<tr>
-								<td
-									colspan={COLUMNS.length}
-									class="py-1 pr-3 pl-2 text-xs text-red-600 dark:text-red-400"
+								<Button
+									size="icon-xs"
+									variant="ghost"
+									aria-label={`Edit ${tx.narration}`}
+									aria-expanded={editing === tx.id}
+									onclick={(event) => {
+										event.stopPropagation();
+										if (editing === tx.id) cancelEdit();
+										else startEdit(tx);
+									}}
 								>
-									{editError}
-								</td>
-							</tr>
-						{/if}
+									<HugeiconsIcon icon={PencilEdit01Icon} strokeWidth={2} />
+								</Button>
+								<!--
+									The other way into the same transaction: its whole
+									source text, edited as text.
+								-->
+								<Button
+									size="icon-xs"
+									variant="ghost"
+									aria-label={`Edit the source of ${tx.narration}`}
+									aria-expanded={sourceEditing === tx.id}
+									onclick={(event) => {
+										event.stopPropagation();
+										toggleSourceEdit(tx);
+									}}
+								>
+									<HugeiconsIcon icon={BracesIcon} strokeWidth={2} />
+								</Button>
+							</span>
+						</Table.Cell>
+						<Table.Cell
+							class={cn(
+								"border-s border-border py-1.5 tabular-nums text-muted-foreground",
+								editing === tx.id ? "px-1" : "pr-3 pl-2"
+							)}
+						>
+							{#if editing === tx.id && draft}
+								<Input
+									class="h-6 px-1 tabular-nums"
+									placeholder="YYYY-MM-DD"
+									bind:value={draft.date}
+									aria-label="Date"
+								/>
+							{:else}
+								{tx.date}
+							{/if}
+						</Table.Cell>
+						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
+							{#if editing === tx.id && draft}
+								<span class="flex min-w-0 items-center gap-1">
+									<Input
+										class="h-6 min-w-0 flex-1 px-1"
+										placeholder="Payee"
+										bind:value={draft.payee}
+										aria-label="Payee"
+									/>
+									<span class="text-muted-foreground">—</span>
+									<Input
+										class="h-6 min-w-0 flex-[2] px-1"
+										placeholder="Narration"
+										bind:value={draft.narration}
+										aria-label="Narration"
+									/>
+								</span>
+							{:else if tx.payee && tx.payee !== tx.narration}
+								<span class="font-medium">{tx.payee}</span>
+								<span class="text-muted-foreground">— {tx.narration}</span>
+							{:else}
+								{tx.narration}
+							{/if}
+						</Table.Cell>
 						<!--
-							The source editor spans every column, the way GnuCash's
-							register opens a fold: the text is the entry's own lines,
-							not a cell's value.
+							The basic ledger names the other side; the split styles
+							instead say how many legs are still hidden, so an entry that
+							can be opened is obvious without hunting for the chevron.
 						-->
-						{#if sourceEditing === tx.id}
-							<tr>
-								<td colspan={COLUMNS.length} class="p-0">
+						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 text-muted-foreground">
+							{#if mode.namesOtherSide}
+								{transferLabel(tx)}
+							{:else if !mode.showAllPostings && hiddenCount(tx) > 0 && current !== tx.id}
+								<Badge variant="secondary">
+									{hiddenCount(tx)} more{hiddenCount(tx) === 1 ? "" : "s"}
+								</Badge>
+							{/if}
+						</Table.Cell>
+						<Table.Cell
+							class="border-s border-border overflow-hidden px-2 py-1.5 text-right font-medium"
+						>
+							{@render amounts(flow.deposits)}
+						</Table.Cell>
+						<Table.Cell
+							class="border-s border-border overflow-hidden px-2 py-1.5 pr-3 text-right font-medium"
+						>
+							{@render amounts(flow.withdrawals)}
+						</Table.Cell>
+					</Table.Row>
+					{#if editing === tx.id && editError}
+						<Table.Row>
+							<Table.Cell colspan={COLUMNS.length} class="py-1 pr-3 pl-2">
+								<Alert variant="destructive">
+									<AlertDescription>{editError}</AlertDescription>
+								</Alert>
+							</Table.Cell>
+						</Table.Row>
+					{/if}
+					<!--
+						The source editor spans every column, the way GnuCash's
+						register opens a fold: the text is the entry's own lines,
+						not a cell's value.
+					-->
+					{#if sourceEditing === tx.id}
+						<Table.Row>
+							<Table.Cell colspan={COLUMNS.length} class="p-0">
+								{#key editorScope.scope}
 									<SourceEditor
 										id={tx.id}
+										scope={editorScope.scope}
 										onSaved={() => {
 											sourceEditing = null;
 											invalidateAll();
 										}}
 										onCancel={() => (sourceEditing = null)}
 									/>
-								</td>
-							</tr>
-						{/if}
-						<!--
-							One holder row per entry, always mounted: its block grows
-							from zero to the legs' own height (and back), so opening
-							an entry expands those legs in place instead of the whole
-							register being clipped and revealed.
-						-->
-						<tr
-							data-entry-id={tx.id}
-							onkeydown={(event) => {
-								if (event.key === "Enter") {
-									event.preventDefault();
-									saveEdit(tx);
-								} else if (event.key === "Escape") {
-									event.preventDefault();
-									cancelEdit();
-								}
-							}}
-							onfocusout={(event) => commitOnLeave(event, tx)}
-						>
-							<td colspan={COLUMNS.length} class="p-0">
-								<div use:smoothHeight class="overflow-hidden">
-									<table class="w-full table-fixed">
+								{/key}
+							</Table.Cell>
+						</Table.Row>
+					{/if}
+					<!--
+						One holder row per entry, always mounted: its block folds
+						from zero height to the legs' own height (and back), so
+						opening an entry expands those legs in place instead of the
+						whole register being clipped and revealed.
+					-->
+					<Table.Row
+						class="border-b-0"
+						data-entry-id={tx.id}
+						onkeydown={(event) => {
+							if (event.key === "Enter") {
+								event.preventDefault();
+								saveEdit(tx);
+							} else if (event.key === "Escape") {
+								event.preventDefault();
+								cancelEdit();
+							}
+						}}
+						onfocusout={(event) => commitOnLeave(event, tx)}
+					>
+						<Table.Cell colspan={COLUMNS.length} class="p-0">
+							<div
+								class={cn(
+									"grid transition-motion",
+									current === tx.id ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+								)}
+							>
+								<div class="overflow-hidden">
+									<Table.Root class="table-fixed">
 										<colgroup>
 											{#each COLUMNS as width, index (index)}
 												<col style="width: {width}" />
 											{/each}
 										</colgroup>
-										<tbody>
-											{#each legs as leg, position (leg.index)}
+										<Table.Body>
+											{#each legs as leg (leg.index)}
 												{@render postingRow(
 													leg.posting,
 													isSubAccountOf(leg.posting.account, account),
-													position,
 													leg.index,
 													editing === tx.id ? draft : null
 												)}
 											{/each}
-										</tbody>
-									</table>
+										</Table.Body>
+									</Table.Root>
 								</div>
-							</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
-		{/key}
-	</div>
+							</div>
+						</Table.Cell>
+					</Table.Row>
+				{/each}
+			</Table.Body>
+		</Table.Root>
+	{/key}
 </div>
