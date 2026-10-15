@@ -47,11 +47,13 @@
 //!
 //! # Currency
 //!
-//! Nothing is ever converted. A posting consumes the commodity of its weight
-//! (`units × cost`, else `units × price`, else `units`), and every figure is
-//! tracked per commodity: a category funded in TRY and spent in USD reports two
-//! balances, and `To-Be-Budgeted` can be short in one commodity while long in
-//! another.
+//! Nothing is ever converted, and every figure is tracked per commodity, so a
+//! category funded in TRY and spent in USD reports two balances and
+//! `To-Be-Budgeted` can be short in one commodity while long in another.
+//! Spending consumes a posting's weight (`units × cost`, else `units × price`,
+//! else `units`) — what the expense cost; the money side measures what an
+//! account *holds*, its units, so buying USD with TRY puts USD in the pool
+//! rather than the TRY the USD cost.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -171,7 +173,14 @@ pub struct Assertion {
 struct Movement {
     month: Month,
     account: String,
-    value: Money,
+    /// What the account holds, in the commodity it holds it in: an FX purchase
+    /// must show the currency it bought, not that currency's cost.
+    units: Money,
+    /// What the posting was worth, in the commodity it was worth in — its
+    /// weight, which is what spending consumes. `None` when a cost or price
+    /// makes that unreadable, in which case the posting is not an expense the
+    /// budget can value.
+    weight: Option<Money>,
     filename: Option<String>,
     lineno: Option<u32>,
 }
@@ -231,23 +240,28 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         if accounts::is_generated(&movement.account) {
             continue;
         }
-        let category = category_for(config, &mappings, &movement.account);
-        if let Some(category) = &category {
+        if let Some(category) = category_for(config, &mappings, &movement.account) {
+            let Some(weight) = &movement.weight else {
+                continue;
+            };
             let month = per_month_activity
                 .entry(movement.month.index())
                 .or_default();
-            let inventory = month.entry(category.clone()).or_default();
-            inventory.add(&movement.value.currency, movement.value.value);
+            month
+                .entry(category)
+                .or_default()
+                .add(&weight.currency, weight.value);
             continue;
         }
         if matches(budget_accounts.as_slice(), &movement.account) {
+            let units = &movement.units;
             if movement.month < config.start {
-                pre_horizon.add(&movement.value.currency, movement.value.value);
+                pre_horizon.add(&units.currency, units.value);
             } else if movement.month <= *horizon.last().expect("horizon is never empty") {
                 per_month_money
                     .entry(movement.month.index())
                     .or_default()
-                    .add(&movement.value.currency, movement.value.value);
+                    .add(&units.currency, units.value);
             }
         }
     }
@@ -640,16 +654,20 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
             continue;
         };
         for posting in &transaction.postings {
-            let Some(value) = posting_value(posting) else {
+            let Some(units) = posting.units.as_ref() else {
                 continue;
             };
-            if value.is_zero() {
+            let Ok(quantity) = Decimal::from_str(units.number.trim()) else {
+                continue;
+            };
+            if quantity.is_zero() {
                 continue;
             }
             movements.push(Movement {
                 month,
                 account: posting.account.clone(),
-                value,
+                units: Money::new(quantity, units.currency.clone()),
+                weight: posting_value(posting),
                 filename: directive.filename.clone(),
                 lineno: directive.lineno,
             });
@@ -662,8 +680,8 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
 ///
 /// `units × cost` when a cost spec carries a value, else `units × price` when a
 /// price annotation does, else the units themselves. Nothing is converted: this
-/// is the same figure beancount uses to balance the transaction, so the budget
-/// always agrees with the ledger.
+/// is the same figure beancount uses to balance the transaction, so an expense
+/// always costs the envelope exactly what the ledger says it cost.
 fn posting_value(posting: &PostingData) -> Option<Money> {
     let units = posting.units.as_ref()?;
     let quantity = Decimal::from_str(units.number.trim()).ok()?;
@@ -1936,6 +1954,63 @@ mod tests {
         assert_eq!(
             category_for(&config("2026-01", 1), &[], "Expenses:Food:Groceries").as_deref(),
             Some("Equity:Envelope:Food:Groceries")
+        );
+    }
+    #[test]
+    fn buying_currency_shows_the_currency_it_bought() {
+        // The acquired leg of an FX purchase carries a price, so its *weight* is
+        // TRY. What the budget has to see is the commodity the account now
+        // holds — otherwise a USD envelope could never be funded from a USD
+        // purchase, and every USD category would look permanently short.
+        let mut config = config("2026-01", 1);
+        config.funds.push(Fund {
+            month: Month::new(2026, 1),
+            node: "Expenses:Vps".to_string(),
+            amount: money("20.00", "USD"),
+        });
+        let mut bought = txn(
+            "2026-01-03",
+            &[
+                ("Assets:Bank:US", "100.00", "USD"),
+                ("Assets:Bank", "-3500.00", "TRY"),
+            ],
+        );
+        if let DirectiveData::Transaction(transaction) = &mut bought.data {
+            transaction.postings[0].price = Some(price("35.00", "TRY", false));
+        }
+        let spent = txn(
+            "2026-01-25",
+            &[
+                ("Expenses:Vps", "20.00", "USD"),
+                ("Assets:Bank:US", "-20.00", "USD"),
+            ],
+        );
+
+        let plan = plan(&config, &[bought, spent]);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Money),
+            vec![
+                "Equity:Envelope:Money 3500.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -3500.00 TRY",
+                "Equity:Envelope:Money -80.00 USD",
+                "Equity:Envelope:To-Be-Budgeted 80.00 USD",
+            ]
+        );
+        // The USD assignment is covered by the USD that was bought; the TRY
+        // shortfall is real, because that TRY was spent without being assigned.
+        let messages: Vec<&str> = plan
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert!(
+            messages.iter().any(|message| message.contains("TRY")),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message.contains("USD")),
+            "{messages:?}"
         );
     }
 }

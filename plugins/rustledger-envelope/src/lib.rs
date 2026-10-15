@@ -279,6 +279,146 @@ mod tests {
             output.errors
         );
     }
+    /// The worked example in `README.md`, pinned: if the docs and the plugin
+    /// ever disagree, this test fails.
+    #[test]
+    fn the_readme_worked_example_holds() {
+        use rustledger_plugin_types::{OpenData, PluginOutput};
+
+        fn open(account: &str) -> DirectiveWrapper {
+            DirectiveWrapper {
+                directive_type: "open".to_string(),
+                date: "2026-01-01".to_string(),
+                filename: None,
+                lineno: None,
+                data: DirectiveData::Open(OpenData {
+                    account: account.to_string(),
+                    currencies: Vec::new(),
+                    booking: None,
+                    metadata: Vec::new(),
+                }),
+            }
+        }
+
+        let directives = vec![
+            open("Assets:Bank"),
+            open("Expenses:Groceries"),
+            open("Expenses:Fees"),
+            open("Income:Salary"),
+            custom("2026-01-01", vec![text("start date"), text("2026-01")]),
+            custom("2026-01-01", vec![text("end date"), text("2026-02")]),
+            custom(
+                "2026-01-01",
+                vec![text("budget account"), text("^Assets:Bank")],
+            ),
+            custom(
+                "2026-01-01",
+                vec![
+                    text("fund"),
+                    account("Expenses:Groceries"),
+                    amount("4000.00", "TRY"),
+                ],
+            ),
+            custom(
+                "2026-01-01",
+                vec![
+                    text("fund"),
+                    account("Expenses:Fees"),
+                    amount("200.00", "TRY"),
+                ],
+            ),
+            custom(
+                "2026-01-01",
+                vec![
+                    text("rollover"),
+                    account("Expenses:Fees"),
+                    MetaValueData::Bool(false),
+                ],
+            ),
+            txn(
+                "2026-01-02",
+                &[
+                    ("Assets:Bank", "30000.00", "TRY"),
+                    ("Income:Salary", "-30000.00", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-01-10",
+                &[
+                    ("Expenses:Groceries", "2500.00", "TRY"),
+                    ("Assets:Bank", "-2500.00", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-01-20",
+                &[
+                    ("Expenses:Fees", "40.00", "TRY"),
+                    ("Assets:Bank", "-40.00", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-02-06",
+                &[
+                    ("Expenses:Groceries", "4600.00", "TRY"),
+                    ("Assets:Bank", "-4600.00", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-02-20",
+                &[
+                    ("Expenses:Fees", "40.00", "TRY"),
+                    ("Assets:Bank", "-40.00", "TRY"),
+                ],
+            ),
+        ];
+
+        let output: PluginOutput = process(PluginInput {
+            directives,
+            options: options(),
+            config: None,
+        });
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+        let mut lines: Vec<String> = Vec::new();
+        for op in &output.ops {
+            let PluginOp::Insert(wrapper) = op else {
+                continue;
+            };
+            match &wrapper.data {
+                DirectiveData::Open(open) => lines.push(format!("open {}", open.account)),
+                DirectiveData::Balance(balance) => lines.push(format!(
+                    "{} balance {} {} {}",
+                    wrapper.date, balance.account, balance.amount.number, balance.amount.currency
+                )),
+                DirectiveData::Transaction(transaction) => {
+                    lines.push(format!("{} {}", wrapper.date, transaction.narration));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "open Equity:Envelope:Fees",
+                "open Equity:Envelope:Groceries",
+                "open Equity:Envelope:Money",
+                "open Equity:Envelope:To-Be-Budgeted",
+                "2026-01-31 Envelope backing 2026-01",
+                "2026-01-31 Envelope funding 2026-01",
+                "2026-01-31 Envelope activity 2026-01",
+                "2026-01-31 Envelope rollover 2026-01",
+                "2026-02-28 Envelope backing 2026-02",
+                "2026-02-28 Envelope funding 2026-02",
+                "2026-02-28 Envelope activity 2026-02",
+                "2026-02-28 Envelope rollover 2026-02",
+                // January's fees sweep back to the pool, its groceries carry.
+                "2026-02-01 balance Equity:Envelope:Groceries 1500.00 TRY",
+                "2026-02-01 balance Equity:Envelope:To-Be-Budgeted 25960.00 TRY",
+                "2026-03-01 balance Equity:Envelope:Groceries 900.00 TRY",
+                "2026-03-01 balance Equity:Envelope:To-Be-Budgeted 21920.00 TRY",
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

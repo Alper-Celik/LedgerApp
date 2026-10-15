@@ -16,7 +16,7 @@ that make the ledger behave like an envelope budget: every category gets a
 rather than by hand.
 
 ```beancount
-plugin "envelope.wasm"
+plugin "rustledger_envelope.wasm"
 
 2026-10-01 custom "envelope" "start date" "2026-10"
 2026-10-01 custom "envelope" "budget account" "Assets:Cash"
@@ -69,6 +69,92 @@ Every generated transaction carries the tag `#envelope` and the metadata
 (`2026-10`), so a query or a UI can find, group or hide them without parsing
 narrations.
 
+## Worked example
+
+Two months, one category that carries and one that resets, all in TRY:
+
+```beancount
+plugin "rustledger_envelope.wasm"
+
+2026-01-01 custom "envelope" "start date" "2026-01"
+2026-01-01 custom "envelope" "end date" "2026-02"
+2026-01-01 custom "envelope" "budget account" "^Assets:Bank"
+
+2026-01-01 custom "envelope" "fund" Expenses:Groceries 4000.00 TRY
+2026-01-01 custom "envelope" "fund" Expenses:Fees 200.00 TRY
+2026-01-01 custom "envelope" "rollover" Expenses:Fees FALSE
+```
+
+with five ordinary transactions in your ledger: a 30000.00 TRY salary on
+2026-01-02, 2500.00 TRY of groceries on 2026-01-10, a 40.00 TRY bank fee on
+2026-01-20, 4600.00 TRY of groceries on 2026-02-06 and another 40.00 TRY fee on
+2026-02-20. Nothing else changes in your file.
+
+The plugin opens its own accounts and inserts four transactions per month:
+
+```beancount
+2026-01-01 open Equity:Envelope:Fees
+2026-01-01 open Equity:Envelope:Groceries
+2026-01-01 open Equity:Envelope:Money
+2026-01-01 open Equity:Envelope:To-Be-Budgeted
+
+2026-01-31 * "Envelope backing 2026-01" #envelope
+  Equity:Envelope:Money                 -27460.00 TRY  ; the month's change in on-budget money…
+  Equity:Envelope:To-Be-Budgeted         27460.00 TRY  ; …mirrored, so the pool is real money
+
+2026-01-31 * "Envelope funding 2026-01" #envelope
+  Equity:Envelope:Fees                     200.00 TRY
+  Equity:Envelope:To-Be-Budgeted          -200.00 TRY
+  Equity:Envelope:Groceries               4000.00 TRY
+  Equity:Envelope:To-Be-Budgeted         -4000.00 TRY
+
+2026-01-31 * "Envelope activity 2026-01" #envelope
+  Equity:Envelope:Fees                     -40.00 TRY
+  Equity:Envelope:To-Be-Budgeted            40.00 TRY
+  Equity:Envelope:Groceries              -2500.00 TRY
+  Equity:Envelope:To-Be-Budgeted          2500.00 TRY
+
+2026-01-31 * "Envelope rollover 2026-01" #envelope
+  Equity:Envelope:Fees                    -160.00 TRY  ; `rollover FALSE`: reset to zero…
+  Equity:Envelope:To-Be-Budgeted           160.00 TRY  ; …so the unspent 160 goes back
+```
+
+and asserts the month-end balances a day later, where rustledger's own validation
+checks them (`assert` defaults to `TRUE`):
+
+| Date | Account | Balance |
+| --- | --- | --- |
+| 2026-02-01 | `Equity:Envelope:Groceries` | 1500.00 TRY |
+| 2026-02-01 | `Equity:Envelope:To-Be-Budgeted` | 25960.00 TRY |
+| 2026-03-01 | `Equity:Envelope:Groceries` | 900.00 TRY |
+| 2026-03-01 | `Equity:Envelope:To-Be-Budgeted` | 21920.00 TRY |
+
+Read as the budget table, which is just a query over those accounts:
+
+| Month | Category | Budgeted | Spent | Balance |
+| --- | --- | --- | --- | --- |
+| 2026-01 | Groceries | 4000.00 | −2500.00 | **1500.00** |
+| 2026-01 | Fees | 200.00 | −40.00 | 0.00 (reset, 160.00 back to the pool) |
+| 2026-02 | Groceries | 4000.00 | −4600.00 | **900.00** (1500.00 carried) |
+| 2026-02 | Fees | 200.00 | −40.00 | 0.00 |
+| 2026-02 | To-Be-Budgeted | — | — | **21920.00** |
+
+`Groceries` shows the carry (`rollover` defaults to `TRUE`), `Fees` shows the
+reset, and `To-Be-Budgeted` is an account balance rather than a figure someone
+has to recompute. These exact numbers are pinned by the
+`the_readme_worked_example_holds` test, so the documentation cannot drift from
+the plugin.
+
+Other things the same mechanism gives you:
+
+| You want | You write |
+| --- | --- |
+| move 500 TRY of Groceries back to the pool this month | `2026-12-01 custom "envelope" "adjust" Expenses:Groceries -500.00 TRY` |
+| empty an old category at year end | `2026-12-31 custom "envelope" "zero" Expenses:Old-Stuff` |
+| say "this category holds 250 EUR on 2027-01-01 and make it so" | `2027-01-01 custom "envelope" "pad" Expenses:Travel 250.00 EUR` |
+| only carry up to 5000 TRY of Fun | `2026-10-01 custom "envelope" "rollover" Expenses:Fun 5000.00 TRY` |
+| fund a USD envelope from USD you bought, not from TRY | `2026-10-01 custom "envelope" "fund" Expenses:Vps 20.00 USD` (the USD pool is fed by the FX purchase itself) |
+
 ## Directives
 
 All keys are `custom "envelope"` directives. Dated: for every key, the newest
@@ -104,12 +190,20 @@ before one `balance` — the last two mirroring beancount's `E2003` / `E2004`.
 
 ## Currencies are never converted
 
-An envelope holds positions per commodity, exactly like a beancount account. A
-posting consumes the commodity of its weight — `units × cost`, else
-`units × price`, else `units` — so a 150 USD purchase in an AAPL lot consumes USD,
-and a TRY envelope never quietly absorbs a USD figure. Buying currency to fund a
-foreign-currency envelope is an ordinary on-budget transfer, and if you fund USD
-beyond the USD you hold, the warning says so in USD while TRY stays untouched.
+An envelope holds positions per commodity, exactly like a beancount account, and
+the two sides of the budget are measured differently on purpose:
+
+* **spending** consumes a posting's weight — `units × cost`, else `units × price`,
+  else `units` — so a 10 AAPL purchase at 150.00 USD consumes 1500.00 USD, and a
+  USD expense in a TRY ledger never quietly lands in a TRY envelope;
+* **money on hand** is measured in what the account *holds* (its units), so
+  buying 100.00 USD with 3500.00 TRY puts **100.00 USD** in the pool, not the TRY
+  that USD cost. Otherwise a USD envelope could never be funded from a USD
+  purchase and every USD category would look permanently short.
+
+Because of that, funding USD beyond the USD you hold is reported in USD while TRY
+stays untouched — which is precisely the case you fix by buying currency, an
+ordinary on-budget transfer in your ledger.
 
 ## Building
 
