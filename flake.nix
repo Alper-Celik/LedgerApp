@@ -79,7 +79,13 @@
               config.allowUnfree = true;
             };
             androidComposition = pkgsAndroid.androidenv.composeAndroidPackages {
-              platformVersions = [ "37" ];
+              # 37: the app's compileSdk. 36: the tauri-android library
+              # subproject pins its own compileSdk, so the platform must exist
+              # for its javac too.
+              platformVersions = [
+                "37"
+                "36"
+              ];
               buildToolsVersions = [
                 "37.0.0"
                 "36.0.0"
