@@ -41,4 +41,7 @@ src/lib/paraglide
 # Plugin crates
 /plugins/*/target/
 
+# Nix build output
+/result
+
 project.inlang/cache/

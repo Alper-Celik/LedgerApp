@@ -229,15 +229,31 @@ tried without becoming `latest`. To build it yourself instead, see
 
 ## Building
 
+The plugin is a nix package:
+
 ```sh
-nix develop                       # provides cargo, rustc and lld
-cargo build --target wasm32-unknown-unknown --release
-# target/wasm32-unknown-unknown/release/rustledger_envelope.wasm
+nix build .#rustledger-envelope       # → result/lib/rustledger_envelope.wasm
 ```
 
-The nix `rustc` ships the `wasm32-unknown-unknown` standard library but no
-`rust-lld`, which is why the devShell carries `lld` and `.cargo/config.toml` points
-the wasm target at `wasm-ld`.
+The derivation is offline and reproducible: its inputs are pinned by the crate's
+`Cargo.lock` (vendored by `rustPlatform.importCargoLock`), the compiler is
+nixpkgs' rustc — which already ships the `wasm32-unknown-unknown` standard library,
+so no rust overlay is needed — and the link step uses `lld`'s `wasm-ld`, because
+that rustc has no `rust-lld` of its own. The crate's test suite runs inside the
+build (`doCheck`), so a successful `nix build` means the tests passed *and* the
+module is the very file a release carries.
+
+To work on the crate without the app's heavy shell (webkit, gtk, node):
+
+```sh
+nix develop .#plugin
+cargo test                                                    # native
+cargo build --release --target wasm32-unknown-unknown         # the plugin
+```
+
+With a plain Rust toolchain instead: `rustup target add wasm32-unknown-unknown &&
+cargo build --release --target wasm32-unknown-unknown` — rustup's rustc finds its
+own `rust-lld`, so nothing else is required.
 
 ## Coverage
 
