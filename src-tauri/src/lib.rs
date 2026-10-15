@@ -116,6 +116,12 @@ pub struct TransactionFile {
 /// are measured against.
 struct Loaded {
     ledger: Ledger,
+    /// The journal this session was opened with — the file the user pointed at,
+    /// with its `include`s followed. Every edit reloads *this*, never the file
+    /// it just wrote: an included file on its own carries none of the `open`
+    /// directives that live in its parent, so reloading it alone reports every
+    /// account it touches as never opened.
+    root: PathBuf,
     /// Every file's text as this session first saw it, keyed by path. It stands
     /// in wherever git has no HEAD blob for the file: a ledger that is not
     /// committed yet — a fresh journal, a directory that was never added — is
@@ -124,10 +130,12 @@ struct Loaded {
 }
 
 impl Loaded {
-    /// Wrap a freshly loaded ledger, recording what its files look like now.
-    fn fresh(ledger: Ledger) -> Self {
+    /// Wrap a freshly loaded ledger taken from `root`, recording what its files
+    /// look like now.
+    fn fresh(ledger: Ledger, root: PathBuf) -> Self {
         let mut loaded = Self {
             ledger,
+            root,
             baseline: HashMap::new(),
         };
         loaded.remember_files();
@@ -150,7 +158,7 @@ impl Loaded {
 /// app and a reload after an edit agree on what "changed" means.
 fn load_baselined(path: &Path) -> Result<Loaded, String> {
     rustledger_loader::load(path, &LoadOptions::default())
-        .map(Loaded::fresh)
+        .map(|ledger| Loaded::fresh(ledger, path.to_path_buf()))
         .map_err(|e| e.to_string())
 }
 
@@ -721,12 +729,24 @@ fn apply_file_edit(
         ));
     }
 
+    // Reload the journal this session was opened with, not the file just
+    // written: an included file on its own has none of the `open` directives
+    // its parent carries, so reloading it alone would report every account it
+    // touches as never opened and refuse a perfectly good edit.
+    let root = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|loaded| loaded.root.clone())
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
     fs::write(path, rewritten.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
-    let reloaded = match rustledger_loader::load(path, &LoadOptions::default()) {
+    let reloaded = match rustledger_loader::load(&root, &LoadOptions::default()) {
         Ok(ledger) => ledger,
         Err(e) => {
             let _ = fs::write(path, &previous_bytes);
-            return Err(format!("{}: {e}", path.display()));
+            return Err(format!("{}: {e}", root.display()));
         }
     };
     let raised = new_errors(&reported, error_signatures(&reloaded.errors));
@@ -741,9 +761,10 @@ fn apply_file_edit(
     match guard.as_mut() {
         Some(loaded) => {
             loaded.ledger = reloaded;
+            loaded.root = root;
             loaded.remember_files();
         }
-        None => *guard = Some(Loaded::fresh(reloaded)),
+        None => *guard = Some(Loaded::fresh(reloaded, root)),
     }
     stage_file(path)
 }
@@ -1884,6 +1905,66 @@ option \"operating_currency\" \"USD\"
             payee: None,
             narration: narration.to_string(),
             postings,
+        }
+    }
+
+    /// A journal split across files — the root holds the `open` directives, an
+    /// included file the entries — is editable like any other: the reload after
+    /// a write has to follow the `include`, or the included file on its own
+    /// reports every account it touches as never opened and the edit is refused.
+    #[test]
+    fn an_edit_to_an_included_file_reloads_the_whole_journal() {
+        let dir = TempDir::new("included");
+        let root = dir.file("main.bean");
+        let entries = dir.file("2026.bean");
+        fs::write(
+            &root,
+            "\
+option \"operating_currency\" \"USD\"
+
+include \"2026.bean\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+",
+        )
+        .unwrap();
+        fs::write(
+            &entries,
+            "\
+2026-01-10 * \"Groceries\"
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food
+",
+        )
+        .unwrap();
+        repo_with_commit(&dir, &["main.bean", "2026.bean"]);
+
+        let state = loaded_state(&root);
+        let id = view_id(&state, "Groceries");
+        edit_transaction(
+            &state,
+            edit_of(
+                id,
+                "2026-01-10",
+                "Groceries and coffee",
+                vec![posting(0, "-25.00")],
+            ),
+        )
+        .unwrap();
+
+        // Only the included file changed, and the root is untouched.
+        let written = fs::read_to_string(&entries).unwrap();
+        assert!(written.contains("Groceries and coffee"), "entries: {written}");
+        assert!(written.contains("-25.00"), "entries: {written}");
+        assert!(fs::read_to_string(&root).unwrap().contains("include \"2026.bean\""));
+
+        // The ledger the app now holds is the whole journal, and it is clean.
+        {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let loaded = guard.as_ref().unwrap();
+            assert_eq!(loaded.root, root);
+            assert!(loaded.ledger.errors.is_empty(), "errors: {:?}", loaded.ledger.errors);
         }
     }
 
