@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 shadcn-svelte contributors <https://github.com/huntabyte/shadcn-svelte>
+//
+// SPDX-License-Identifier: MIT
 import Action from "./alert-action.svelte";
 import Description from "./alert-description.svelte";
 import Title from "./alert-title.svelte";

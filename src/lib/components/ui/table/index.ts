@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 shadcn-svelte contributors <https://github.com/huntabyte/shadcn-svelte>
+//
+// SPDX-License-Identifier: MIT
 import Body from "./table-body.svelte";
 import Caption from "./table-caption.svelte";
 import Cell from "./table-cell.svelte";

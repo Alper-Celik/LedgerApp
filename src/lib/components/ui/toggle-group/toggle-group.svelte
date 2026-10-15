@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 shadcn-svelte contributors <https://github.com/huntabyte/shadcn-svelte>
+
+SPDX-License-Identifier: MIT
+-->
 <script lang="ts" module>
 	import { getContext, setContext } from "svelte";
 	import { toggleVariants } from "$lib/components/ui/toggle/index.js";
