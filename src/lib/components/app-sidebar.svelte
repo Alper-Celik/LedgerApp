@@ -12,6 +12,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		ChevronRightIcon,
 		FileDiffIcon,
 		GitCommitIcon,
+		Settings01Icon,
 	} from "@hugeicons/core-free-icons";
 	import { commands, type AccountBalance } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
@@ -22,6 +23,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		type AccountNode,
 	} from "$lib/accounts.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
+	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import {
 		SIDEBAR_WIDTH_STORAGE_KEY,
@@ -31,6 +33,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
+
+	/**
+	 * The accounts the backend marks uncommitted, by full name. Its flag is
+	 * already rolled up every ancestor, so a row asks by its own name — and the
+	 * virtual root row, which stands for all of them, asks whether the set has
+	 * anything in it.
+	 */
+	const modifiedAccounts = $derived(
+		new Set(accounts.filter((account) => account.modified).map((account) => account.name))
+	);
 
 	/**
 	 * Non-account views. Future budget and dashboard views belong in this group
@@ -112,6 +124,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	-->
 	<span class="flex min-w-0 flex-1 items-center gap-2">
 		<span class="min-w-0 truncate">{node.name}</span>
+		<UncommittedMark modified={modifiedAccounts.has(node.fullName)} />
 		{#if node.balance}
 			<MoneyAmount
 				units={node.balance.units}
@@ -199,9 +212,48 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 {/snippet}
 
 <Sidebar.Root>
-	<Sidebar.Header>test</Sidebar.Header>
+	<Sidebar.Header>
+		<Sidebar.Menu>
+			<Sidebar.MenuItem>
+				<Sidebar.MenuButton size="lg" isActive={page.url.pathname === resolve("/")}>
+					{#snippet child({ props })}
+						<a {...props} href={resolve("/")}>
+							<span class="min-w-0 flex-1 truncate">Ledger</span>
+						</a>
+					{/snippet}
+				</Sidebar.MenuButton>
+			</Sidebar.MenuItem>
+		</Sidebar.Menu>
+	</Sidebar.Header>
 
 	<Sidebar.Content>
+		<Sidebar.Group>
+			<Sidebar.GroupLabel class="rounded-none">Git</Sidebar.GroupLabel>
+			<Sidebar.GroupContent>
+				<Sidebar.Menu>
+					{#each GIT_VIEWS as item (item.href)}
+						<Sidebar.MenuItem>
+							<Sidebar.MenuButton
+								size="sm"
+								class="rounded-none"
+								isActive={page.url.pathname === resolve(item.href)}
+							>
+								{#snippet child({ props })}
+									<a {...props} href={resolve(item.href)}>
+										<HugeiconsIcon
+											icon={item.icon}
+											strokeWidth={2}
+											data-icon="inline-start"
+										/>
+										<span class="min-w-0 flex-1 truncate">{item.label}</span>
+									</a>
+								{/snippet}
+							</Sidebar.MenuButton>
+						</Sidebar.MenuItem>
+					{/each}
+				</Sidebar.Menu>
+			</Sidebar.GroupContent>
+		</Sidebar.Group>
 		{#each sections as entry (entry.section.label)}
 			<Sidebar.Group>
 				<Sidebar.GroupContent>
@@ -237,7 +289,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							>
 								{#snippet child({ props })}
 									<a {...props} href={resolve("/ledger")}>
-										<span class="min-w-0 flex-1 truncate">{entry.section.label}</span>
+										<span class="flex min-w-0 flex-1 items-center gap-2">
+											<span class="min-w-0 truncate">{entry.section.label}</span>
+											<UncommittedMark modified={modifiedAccounts.size > 0} />
+										</span>
 									</a>
 								{/snippet}
 							</Sidebar.MenuButton>
@@ -256,35 +311,29 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Sidebar.GroupContent>
 			</Sidebar.Group>
 		{/each}
-		<Sidebar.Group>
-			<Sidebar.GroupLabel class="rounded-none">Git</Sidebar.GroupLabel>
-			<Sidebar.GroupContent>
-				<Sidebar.Menu>
-					{#each GIT_VIEWS as item (item.href)}
-						<Sidebar.MenuItem>
-							<Sidebar.MenuButton
-								size="sm"
-								class="rounded-none"
-								isActive={page.url.pathname === resolve(item.href)}
-							>
-								{#snippet child({ props })}
-									<a {...props} href={resolve(item.href)}>
-										<HugeiconsIcon
-											icon={item.icon}
-											strokeWidth={2}
-											data-icon="inline-start"
-										/>
-										<span class="min-w-0 flex-1 truncate">{item.label}</span>
-									</a>
-								{/snippet}
-							</Sidebar.MenuButton>
-						</Sidebar.MenuItem>
-					{/each}
-				</Sidebar.Menu>
-			</Sidebar.GroupContent>
-		</Sidebar.Group>
 	</Sidebar.Content>
-	<Sidebar.Footer />
+	<Sidebar.Footer>
+		<Sidebar.Menu>
+			<Sidebar.MenuItem>
+				<Sidebar.MenuButton
+					size="sm"
+					class="rounded-none"
+					isActive={page.url.pathname === resolve("/settings")}
+				>
+					{#snippet child({ props })}
+						<a {...props} href={resolve("/settings")}>
+							<HugeiconsIcon
+								icon={Settings01Icon}
+								strokeWidth={2}
+								data-icon="inline-start"
+							/>
+							<span class="min-w-0 flex-1 truncate">Settings</span>
+						</a>
+					{/snippet}
+				</Sidebar.MenuButton>
+			</Sidebar.MenuItem>
+		</Sidebar.Menu>
+	</Sidebar.Footer>
 
 	<!--
 		Desktop-only resize handle. It sits inside the fixed sidebar container,

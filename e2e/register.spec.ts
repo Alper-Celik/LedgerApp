@@ -13,7 +13,11 @@ test("the register renders the fixture ledger and its three styles", async ({ pa
 
 	// Basic ledger: one line per entry, the counter-account named.
 	await expect(page.getByRole("heading", { name: "Assets:Bank" })).toBeVisible();
-	await expect(page.getByRole("cell", { name: "Fees and top-up", exact: true })).toBeVisible();
+	// Actions, Date, Description: the description cell carries the narration and,
+	// for an uncommitted entry, the marker beside it — so it is matched on the
+	// narration it contains rather than on its exact accessible name.
+	const entry = page.getByRole("row", { name: /Fees and top-up/ }).first();
+	await expect(entry.getByRole("cell").nth(2)).toContainText("Fees and top-up");
 	await expect(page.getByRole("cell", { name: "Expenses:Fees" })).toBeVisible();
 
 	await page.getByRole("radio", { name: "Splits", exact: true }).click();
@@ -26,12 +30,16 @@ test("the register renders the fixture ledger and its three styles", async ({ pa
 
 test("an uncommitted entry is marked, and only that one", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
+	const markedRow = page.getByRole("row", { name: /Fees and top-up/ }).first();
+	const cleanRow = page.getByRole("row", { name: /Migros — weekly groceries/ }).first();
 	// "Marked" is the entry's own left marker; no colour is pinned here, so the
 	// theme can move without this test having to be re-pinned to it.
-	const marker = (name: RegExp) =>
-		page.getByRole("row", { name }).first().getByRole("cell").first();
-	await expect(marker(/Fees and top-up/)).toHaveClass(/border-s-added/);
-	await expect(marker(/Migros — weekly groceries/)).not.toHaveClass(/border-s-added/);
+	await expect(markedRow.getByRole("cell").first()).toHaveClass(/border-s-added/);
+	await expect(cleanRow.getByRole("cell").first()).not.toHaveClass(/border-s-added/);
+	// The marker proper: the dot the sidebar's account tree draws, one on the
+	// uncommitted entry and none on the clean one.
+	await expect(markedRow.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
+	await expect(cleanRow.locator('[data-slot="uncommitted-mark"]')).toHaveCount(0);
 });
 
 test("editing a cell in place sends exact decimal strings, never floats", async ({ page }) => {
@@ -85,11 +93,13 @@ test("the diff and commit views use the backend's diff, and commit the message",
 
 test("the sidebar carries the git views and survives a failing backend", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
-	await expect(page.getByRole("link", { name: "Diff" })).toBeVisible();
-	await expect(page.getByRole("link", { name: "Commit" })).toBeVisible();
+	// `exact` because the account rows' names now carry "Uncommitted", which
+	// contains "Commit" — the sidebar's own link is the one named exactly that.
+	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
+	await expect(page.getByRole("link", { name: "Commit", exact: true })).toBeVisible();
 
 	// A backend that rejects must leave the app standing: no thrown render.
 	await page.goto("/ledger?fail=1");
 	await expect(page.getByText("no ledger")).toBeVisible();
-	await expect(page.getByRole("link", { name: "Diff" })).toBeVisible();
+	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
 });

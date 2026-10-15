@@ -16,6 +16,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
+	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
@@ -463,6 +464,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							{/if}
 						</Table.Cell>
 						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
+							<!--
+								The uncommitted state, said in the sidebar's own
+								words: one dot in the diff's green, named for the
+								entry so it is not silent. It rides in the
+								description cell — the column that absorbs the
+								slack — because the actions column is already
+								full: an expander, a pencil and the braces fill
+								it to the pixel, and a fourth child would spill
+								over its border.
+							-->
+							<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
 							{#if editing === tx.id && draft}
 								<span class="flex min-w-0 items-center gap-1">
 									<Input
