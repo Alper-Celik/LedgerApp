@@ -51,6 +51,21 @@ export const commands = {
 	 */
 	updateTransactionSource: (id: number, text: string) => typedError<null, string>(__TAURI_INVOKE("update_transaction_source", { id, text })),
 	/**
+	 *  The whole ledger file a transaction lives in, together with the entry's own
+	 *  position inside it — the file editor's way in. The entire `.bean` is handed
+	 *  over (a transaction may share its file with everything else), and the entry
+	 *  is where the editor opens.
+	 */
+	transactionFile: (id: number) => typedError<TransactionFile, string>(__TAURI_INVOKE("transaction_file", { id })),
+	/**
+	 *  Replace a ledger file's entire source text with `text` — the file editor's
+	 *  way out — through the same pipeline as [`update_transaction_source`]: the
+	 *  loader, not this function, is the authority on whether arbitrary text is a
+	 *  legal ledger, a refusal puts the file back byte-for-byte, and a success
+	 *  stages it for a later commit.
+	 */
+	updateFileSource: (id: number, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_source", { id, text })),
+	/**
 	 *  Unified diff of the ledger's files against HEAD, index and working tree
 	 *  together, for the diff view: git's own patch text under a `=== path ===`
 	 *  header per changed file.
@@ -122,6 +137,22 @@ export type TransactionEdit = {
 	narration: string,
 	/**  Posting amount edits, by the posting's index inside the transaction. */
 	postings: PostingEdit[],
+};
+
+/**
+ *  A whole ledger file as the source editor sees it: the text the editor is
+ *  handed, the path it came from, and the transaction's position in it. Line and
+ *  column are 1-based and in Monaco's coordinates (`column` counts UTF-16 code
+ *  units, which is how a Monaco model measures a line), so the editor can reveal
+ *  the entry without re-deriving anything from byte offsets.
+ */
+export type TransactionFile = {
+	path: string,
+	text: string,
+	start_line: number,
+	start_column: number,
+	end_line: number,
+	end_column: number,
 };
 
 /**  A transaction that touches an account, with every posting it contains. */

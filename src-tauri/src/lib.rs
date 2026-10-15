@@ -14,6 +14,14 @@ use rustledger_core::{Decimal, Directive, IncompleteAmount, Span, Spanned, Trans
 use rustledger_loader::{Ledger, LedgerError, LoadOptions, SourceFile};
 use tauri::State;
 
+/// The runtime this app runs on: the Qt runtime (Qt windowing + QtWebEngine)
+/// on Linux, wry everywhere else — or on Linux too when built with
+/// `--features wry`.
+#[cfg(all(target_os = "linux", not(feature = "wry")))]
+pub type AppRuntime = tauri_runtime_qt::QtRuntime;
+#[cfg(any(not(target_os = "linux"), feature = "wry"))]
+pub type AppRuntime = tauri::Wry;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 #[specta::specta]
@@ -83,6 +91,21 @@ pub struct TransactionEdit {
 pub struct PostingEdit {
     pub index: u32,
     pub units: String,
+}
+
+/// A whole ledger file as the source editor sees it: the text the editor is
+/// handed, the path it came from, and the transaction's position in it. Line and
+/// column are 1-based and in Monaco's coordinates (`column` counts UTF-16 code
+/// units, which is how a Monaco model measures a line), so the editor can reveal
+/// the entry without re-deriving anything from byte offsets.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct TransactionFile {
+    pub path: String,
+    pub text: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 /// A loaded ledger together with the baseline the register's `modified` flags
@@ -265,6 +288,27 @@ fn update_transaction_source(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     edit_transaction_source(&state, id, &text)
+}
+
+/// The whole ledger file a transaction lives in, together with the entry's own
+/// position inside it — the file editor's way in. The entire `.bean` is handed
+/// over (a transaction may share its file with everything else), and the entry
+/// is where the editor opens.
+#[tauri::command]
+#[specta::specta]
+fn transaction_file(id: u32, state: State<'_, AppState>) -> Result<TransactionFile, String> {
+    transaction_file_view(&state, id)
+}
+
+/// Replace a ledger file's entire source text with `text` — the file editor's
+/// way out — through the same pipeline as [`update_transaction_source`]: the
+/// loader, not this function, is the authority on whether arbitrary text is a
+/// legal ledger, a refusal puts the file back byte-for-byte, and a success
+/// stages it for a later commit.
+#[tauri::command]
+#[specta::specta]
+fn update_file_source(id: u32, text: String, state: State<'_, AppState>) -> Result<(), String> {
+    edit_file_source(&state, id, &text)
 }
 
 /// Unified diff of the ledger's files against HEAD, index and working tree
@@ -538,6 +582,58 @@ fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> Result<(), 
     };
 
     apply_file_edit(state, &path, &previous, rewritten, reported)
+}
+
+/// The body of [`transaction_file`]: the file the entry came from, its whole
+/// text, and the entry's own position in it (1-based line, UTF-16 column).
+fn transaction_file_view(state: &AppState, id: u32) -> Result<TransactionFile, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+    let (source, _, file) = source_of_transaction(&loaded.ledger, id)?;
+    let (start_line, start_column) = line_column(&file.source, source.span.start);
+    let (end_line, end_column) = line_column(&file.source, source.span.end);
+    Ok(TransactionFile {
+        path: file.path.display().to_string(),
+        text: file.source.to_string(),
+        start_line,
+        start_column,
+        end_line,
+        end_column,
+    })
+}
+
+/// The body of [`update_file_source`]: the whole file text replaces the loaded
+/// copy, and the result goes through the same pipeline as
+/// [`edit_transaction_source`] — [`apply_file_edit`] reloads, reverts on a new
+/// loader error, and stages what survives.
+fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<(), String> {
+    let (path, previous, reported) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let ledger = &loaded.ledger;
+        // The entry is only how the editor knows which file it is editing; it
+        // need not still exist in `text`, the file is the unit being written.
+        let (_, _, file) = source_of_transaction(ledger, id)?;
+        (
+            file.path.clone(),
+            file.source.to_string(),
+            error_signatures(&ledger.errors),
+        )
+    };
+
+    apply_file_edit(state, &path, &previous, text.to_string(), reported)
+}
+
+/// The 1-based line and UTF-16 column of `byte` in `text` — Monaco's own
+/// coordinates. A byte offset that is not a character boundary (or past the
+/// end) answers for the largest boundary before it, so a stale offset can never
+/// panic.
+fn line_column(text: &str, byte: usize) -> (u32, u32) {
+    let head = text.get(..byte.min(text.len())).unwrap_or(text);
+    let line = head.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+    let line_start = head.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let column = text[line_start..head.len()].chars().map(char::len_utf16).sum::<usize>() as u32 + 1;
+    (line, column)
 }
 
 /// Write a transaction edit's `rewritten` file text over the loaded copy at
@@ -1324,7 +1420,7 @@ fn new_errors(before: &[String], after: Vec<String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = Builder::<tauri::Wry>::new()
+    let builder = Builder::<AppRuntime>::new()
         // Then register them (separated by a comma)
         .commands(collect_commands![
             greet,
@@ -1334,6 +1430,8 @@ pub fn run() {
             update_transaction,
             transaction_source,
             update_transaction_source,
+            transaction_file,
+            update_file_source,
             ledger_diff,
             commit_ledger,
         ]);
@@ -1344,10 +1442,18 @@ pub fn run() {
         .export(Typescript::default(), "../src/bindings.ts")
         .expect("Failed to export typescript bindings");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::<AppRuntime>::default()
         .manage(AppState::new())
         // and finally tell Tauri how to invoke them
-        .invoke_handler(builder.invoke_handler())
+        .invoke_handler(builder.invoke_handler());
+
+    // QtWebEngine never hands over custom-protocol POST bodies, so the Qt
+    // runtime carries the invoke payload in a header instead. Without this,
+    // every `invoke()` from the frontend silently fails to reach Rust.
+    #[cfg(all(target_os = "linux", not(feature = "wry")))]
+    let builder = builder.invoke_system(tauri_runtime_qt::INVOKE_SYSTEM_SCRIPT);
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1359,7 +1465,7 @@ mod tests {
 
     #[test]
     fn export_bindings() {
-        Builder::<tauri::Wry>::new()
+        Builder::<AppRuntime>::new()
             .commands(collect_commands![
                 greet,
                 accounts,
@@ -1368,6 +1474,8 @@ mod tests {
                 update_transaction,
                 transaction_source,
                 update_transaction_source,
+                transaction_file,
+                update_file_source,
                 ledger_diff,
                 commit_ledger,
             ])
