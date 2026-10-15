@@ -29,6 +29,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <span class={cn("inline-flex items-baseline tabular-nums", amountColorClass(units), className)}>
 	{#each moneySegments(units, currency, { signed }) as segment, index (index)}
-		<span class={segment.kind === "symbol" ? "font-semibold text-foreground" : ""}>{segment.text}</span>
+		<span class={cn(segment.kind === "symbol" && "font-semibold text-foreground")}>
+			{segment.text}
+		</span>
 	{/each}
 </span>

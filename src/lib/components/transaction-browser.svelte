@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import type { TransactionView } from "../../bindings";
+	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import AccountRegister from "$lib/components/account-register.svelte";
@@ -16,7 +17,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * empty (the sidebar's virtual root). Filters are global, so a chart can
 	 * zoom a date range and this view follows it.
 	 */
-	let { account, transactions }: { account: string; transactions: TransactionView[] } = $props();
+	let { account, transactions, error = "" }: {
+		account: string;
+		transactions: TransactionView[];
+		error?: string;
+	} = $props();
 	let visible = $derived(transactions.filter(matchesFilters));
 </script>
 
@@ -31,7 +36,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</div>
 
 	<div class="flex flex-wrap items-center gap-2">
-		<Input class="h-8 max-w-xs text-xs" placeholder="Search transactions…" bind:value={filters.query} />
+		<Input
+			class="h-8 max-w-xs"
+			placeholder="Search transactions…"
+			aria-label="Search transactions"
+			bind:value={filters.query}
+		/>
 		{#if filters.from || filters.to}
 			<!-- A chart sets this range on the shared filters and the register follows it. -->
 			<span class="text-muted-foreground text-xs">
@@ -43,7 +53,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{/if}
 	</div>
 
-	{#if visible.length === 0}
+	{#if error}
+		<Alert variant="destructive">{error}</Alert>
+	{:else if visible.length === 0}
 		<p class="text-muted-foreground text-sm">
 			{transactions.length === 0
 				? `No transactions${account ? " touch this account" : ""}.`

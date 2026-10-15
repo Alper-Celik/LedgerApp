@@ -6,6 +6,11 @@ import type { PageLoad } from "./$types";
 
 /** Staged ledger changes, shown for review before committing. */
 export const load: PageLoad = async () => {
-	const result = await commands.ledgerDiff();
-	return result.status === "ok" ? { diff: result.data, error: "" } : { diff: "", error: result.error };
+	try {
+		const result = await commands.ledgerDiff();
+		return result.status === "ok" ? { diff: result.data, error: "" } : { diff: "", error: result.error };
+	} catch (cause) {
+		console.error("ledgerDiff failed", cause);
+		return { diff: "", error: cause instanceof Error ? cause.message : String(cause) };
+	}
 };

@@ -4,8 +4,12 @@
 import { commands } from "../../bindings";
 import type { PageLoad } from "./$types";
 
-/** The whole ledger: the virtual root's register, read-only. */
-export const load: PageLoad = async () => ({
-	account: "",
-	transactions: await commands.accountTransactions(""),
-});
+/** The whole ledger, or an explanatory error instead of a thrown one. */
+export const load: PageLoad = async () => {
+	try {
+		return { account: "", transactions: await commands.accountTransactions(""), error: "" };
+	} catch (cause) {
+		console.error("accountTransactions failed", cause);
+		return { account: "", transactions: [], error: cause instanceof Error ? cause.message : String(cause) };
+	}
+};

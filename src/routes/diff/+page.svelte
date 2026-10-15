@@ -6,6 +6,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
 	import { resolve } from "$app/paths";
+	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import GitDiff from "$lib/components/git-diff.svelte";
 	import type { PageProps } from "./$types";
@@ -24,7 +25,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</div>
 
 	{#if data.error}
-		<p class="text-sm text-red-600 dark:text-red-400">{data.error}</p>
+		<Alert variant="destructive">{data.error}</Alert>
 	{:else if data.diff.trim() === ""}
 		<p class="text-muted-foreground text-sm">No uncommitted changes.</p>
 	{:else}

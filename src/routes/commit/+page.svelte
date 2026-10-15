@@ -6,7 +6,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
 	import { commands } from "../../bindings";
+	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Textarea } from "$lib/components/ui/textarea/index.js";
 	import GitDiff from "$lib/components/git-diff.svelte";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import type { PageProps } from "./$types";
@@ -57,12 +59,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</div>
 
 	<form class="flex max-w-2xl flex-col gap-2" onsubmit={commit}>
-		<textarea
-			class="border-input bg-background min-h-20 rounded-md border px-3 py-2 font-mono text-xs"
+		<Textarea
+			class="min-h-20"
 			placeholder="Commit message"
 			bind:value={message}
 			aria-label="Commit message"
-		></textarea>
+		/>
 		<div class="flex items-center gap-2">
 			<Button size="sm" type="submit" disabled={!changed || message.trim() === "" || committing}>
 				Commit staged changes
@@ -72,7 +74,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			{/if}
 		</div>
 		{#if error}
-			<p class="text-xs text-red-600 dark:text-red-400">{error}</p>
+			<Alert variant="destructive">{error}</Alert>
 		{/if}
 	</form>
 

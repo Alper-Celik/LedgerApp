@@ -10,4 +10,4 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let { data }: PageProps = $props();
 </script>
 
-<TransactionBrowser account={data.account} transactions={data.transactions} />
+<TransactionBrowser account={data.account} transactions={data.transactions} error={data.error} />

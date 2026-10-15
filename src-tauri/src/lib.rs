@@ -8,12 +8,19 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rustledger_core::{Decimal, Directive, IncompleteAmount, Span, Spanned, Transaction};
 use rustledger_loader::{Ledger, LedgerError, LoadOptions, SourceFile};
 use tauri::State;
+
+/// The runtime this app runs on: the Qt runtime (Qt windowing + QtWebEngine)
+/// on Linux, wry everywhere else — or on Linux too when built with
+/// `--features wry`.
+#[cfg(all(target_os = "linux", not(feature = "wry")))]
+pub type AppRuntime = tauri_runtime_qt::QtRuntime;
+#[cfg(any(not(target_os = "linux"), feature = "wry"))]
+pub type AppRuntime = tauri::Wry;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -35,6 +42,10 @@ pub struct AccountBalance {
     /// Beancount commodity of `balance`, e.g. `USD` or `TRY` — the code the
     /// frontend needs to place a symbol or code next to the amount.
     pub currency: String,
+    /// True when at least one transaction in this account's subtree is
+    /// uncommitted — the same flag [`TransactionView::modified`] carries, rolled
+    /// up the account tree so the sidebar can mark a branch.
+    pub modified: bool,
 }
 
 /// One posting as shown on an account page.
@@ -84,6 +95,21 @@ pub struct TransactionEdit {
 pub struct PostingEdit {
     pub index: u32,
     pub units: String,
+}
+
+/// A whole ledger file as the source editor sees it: the text the editor is
+/// handed, the path it came from, and the transaction's position in it. Line and
+/// column are 1-based and in Monaco's coordinates (`column` counts UTF-16 code
+/// units, which is how a Monaco model measures a line), so the editor can reveal
+/// the entry without re-deriving anything from byte offsets.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct TransactionFile {
+    pub path: String,
+    pub text: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 
 /// A loaded ledger together with the baseline the register's `modified` flags
@@ -194,9 +220,10 @@ fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSummary, 
         directive_count: u32::try_from(loaded.ledger.directives.len()).unwrap_or(u32::MAX),
         error_count: u32::try_from(loaded.ledger.errors.len()).unwrap_or(u32::MAX),
     };
-    // `parking_lot` never poisons: a command that panicked mid-write left the
-    // lock free, so this load simply takes it.
-    *state.loaded.write() = Some(loaded);
+    // A poisoned lock means an earlier command panicked while holding the ledger;
+    // its contents are still consistent, so recover rather than propagating it as
+    // a permanent failure to every later command.
+    *state.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
     Ok(summary)
 }
 
@@ -205,11 +232,58 @@ fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSummary, 
 #[tauri::command]
 #[specta::specta]
 fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
-    let guard = state.loaded.read();
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()
-        .map(|loaded| account_balances(&loaded.ledger))
+        .map(|loaded| {
+            let modified = modified_accounts(&loaded.ledger, &loaded.baseline);
+            account_balances(&loaded.ledger, &modified)
+        })
         .unwrap_or_default()
+}
+
+/// The accounts touched by at least one uncommitted transaction, with every
+/// colon-prefix ancestor of each — the same "changed since HEAD or since this
+/// session's baseline" test [`account_transaction_views`] runs per row, rolled
+/// up so a parent branch reads as changed when anything under it is.
+///
+/// Like the per-row flag, the whole walk is skipped when the working tree has
+/// nothing to report, so a clean ledger costs one diff.
+fn modified_accounts(
+    ledger: &Ledger,
+    baseline: &HashMap<PathBuf, Arc<str>>,
+) -> BTreeSet<String> {
+    let changed = working_tree_changes(ledger, baseline);
+    let mut marked = BTreeSet::new();
+    if changed.is_empty() {
+        return marked;
+    }
+    let view = ledger.balance_view();
+    let sources = source_directive_index(ledger, &view);
+    let mut line_starts: HashMap<u16, Vec<usize>> = HashMap::new();
+    for (id, directive) in view.iter().enumerate() {
+        let Directive::Transaction(tx) = directive else {
+            continue;
+        };
+        let modified = sources.get(id).copied().flatten().is_some_and(|index| {
+            touches_changes(ledger, &changed, &mut line_starts, &ledger.directives[index])
+        });
+        if !modified {
+            continue;
+        }
+        for posting in &tx.postings {
+            let mut prefix = String::new();
+            for part in posting.value.account.as_str().split(':') {
+                prefix = if prefix.is_empty() {
+                    part.to_owned()
+                } else {
+                    format!("{prefix}:{part}")
+                };
+                marked.insert(prefix.clone());
+            }
+        }
+    }
+    marked
 }
 
 /// Transactions touching `account` — the account itself or any sub-account —
@@ -219,7 +293,7 @@ fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
 #[tauri::command]
 #[specta::specta]
 fn account_transactions(account: String, state: State<'_, AppState>) -> Vec<TransactionView> {
-    let guard = state.loaded.read();
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()
         .map(|loaded| account_transaction_views(&loaded.ledger, &loaded.baseline, &account))
@@ -265,6 +339,27 @@ fn update_transaction_source(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     edit_transaction_source(&state, id, &text)
+}
+
+/// The whole ledger file a transaction lives in, together with the entry's own
+/// position inside it — the file editor's way in. The entire `.bean` is handed
+/// over (a transaction may share its file with everything else), and the entry
+/// is where the editor opens.
+#[tauri::command]
+#[specta::specta]
+fn transaction_file(id: u32, state: State<'_, AppState>) -> Result<TransactionFile, String> {
+    transaction_file_view(&state, id)
+}
+
+/// Replace a ledger file's entire source text with `text` — the file editor's
+/// way out — through the same pipeline as [`update_transaction_source`]: the
+/// loader, not this function, is the authority on whether arbitrary text is a
+/// legal ledger, a refusal puts the file back byte-for-byte, and a success
+/// stages it for a later commit.
+#[tauri::command]
+#[specta::specta]
+fn update_file_source(id: u32, text: String, state: State<'_, AppState>) -> Result<(), String> {
+    edit_file_source(&state, id, &text)
 }
 
 /// Unified diff of the ledger's files against HEAD, index and working tree
@@ -358,7 +453,7 @@ fn account_transaction_views(
 /// Accumulate per-(account, currency) units over the pad-merged transaction
 /// stream, roll each account's totals up into its ancestors, then report one
 /// entry per tree node.
-fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
+fn account_balances(ledger: &Ledger, modified: &BTreeSet<String>) -> Vec<AccountBalance> {
     let mut totals: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
     for directive in ledger.balance_view() {
         let Directive::Transaction(tx) = directive else {
@@ -402,6 +497,7 @@ fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
                 name: name.clone(),
                 balance: units.to_string(),
                 currency,
+                modified: modified.contains(name),
             }
         })
         .collect();
@@ -480,7 +576,7 @@ fn source_of_transaction<'a>(
 fn edit_transaction(state: &AppState, edit: TransactionEdit) -> Result<(), String> {
     // Read-only pass: work out the new file text from the loaded copy.
     let (path, previous, rewritten, reported) = {
-        let guard = state.loaded.read();
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("no ledger loaded")?;
         let ledger = &loaded.ledger;
         let (source, tx, file) = source_of_transaction(ledger, edit.id)?;
@@ -500,7 +596,7 @@ fn edit_transaction(state: &AppState, edit: TransactionEdit) -> Result<(), Strin
 /// The body of [`transaction_source`], split out like [`edit_transaction`]: the
 /// transaction's own lines exactly as they stand in the loaded copy of its file.
 fn transaction_source_text(state: &AppState, id: u32) -> Result<String, String> {
-    let guard = state.loaded.read();
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     let loaded = guard.as_ref().ok_or("no ledger loaded")?;
     let (source, _, file) = source_of_transaction(&loaded.ledger, id)?;
     file.source
@@ -515,7 +611,7 @@ fn transaction_source_text(state: &AppState, id: u32) -> Result<String, String> 
 /// whether arbitrary text is a legal transaction.
 fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> Result<(), String> {
     let (path, previous, rewritten, reported) = {
-        let guard = state.loaded.read();
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("no ledger loaded")?;
         let ledger = &loaded.ledger;
         let (source, _, file) = source_of_transaction(ledger, id)?;
@@ -538,6 +634,58 @@ fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> Result<(), 
     };
 
     apply_file_edit(state, &path, &previous, rewritten, reported)
+}
+
+/// The body of [`transaction_file`]: the file the entry came from, its whole
+/// text, and the entry's own position in it (1-based line, UTF-16 column).
+fn transaction_file_view(state: &AppState, id: u32) -> Result<TransactionFile, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+    let (source, _, file) = source_of_transaction(&loaded.ledger, id)?;
+    let (start_line, start_column) = line_column(&file.source, source.span.start);
+    let (end_line, end_column) = line_column(&file.source, source.span.end);
+    Ok(TransactionFile {
+        path: file.path.display().to_string(),
+        text: file.source.to_string(),
+        start_line,
+        start_column,
+        end_line,
+        end_column,
+    })
+}
+
+/// The body of [`update_file_source`]: the whole file text replaces the loaded
+/// copy, and the result goes through the same pipeline as
+/// [`edit_transaction_source`] — [`apply_file_edit`] reloads, reverts on a new
+/// loader error, and stages what survives.
+fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<(), String> {
+    let (path, previous, reported) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let ledger = &loaded.ledger;
+        // The entry is only how the editor knows which file it is editing; it
+        // need not still exist in `text`, the file is the unit being written.
+        let (_, _, file) = source_of_transaction(ledger, id)?;
+        (
+            file.path.clone(),
+            file.source.to_string(),
+            error_signatures(&ledger.errors),
+        )
+    };
+
+    apply_file_edit(state, &path, &previous, text.to_string(), reported)
+}
+
+/// The 1-based line and UTF-16 column of `byte` in `text` — Monaco's own
+/// coordinates. A byte offset that is not a character boundary (or past the
+/// end) answers for the largest boundary before it, so a stale offset can never
+/// panic.
+fn line_column(text: &str, byte: usize) -> (u32, u32) {
+    let head = text.get(..byte.min(text.len())).unwrap_or(text);
+    let line = head.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+    let line_start = head.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let column = text[line_start..head.len()].chars().map(char::len_utf16).sum::<usize>() as u32 + 1;
+    (line, column)
 }
 
 /// Write a transaction edit's `rewritten` file text over the loaded copy at
@@ -589,7 +737,7 @@ fn apply_file_edit(
 
     // The reload is the ledger the app now holds; the baseline keeps what the
     // session started from, so this edit reads as a change.
-    let mut guard = state.loaded.write();
+    let mut guard = state.loaded.write().unwrap_or_else(|e| e.into_inner());
     match guard.as_mut() {
         Some(loaded) => {
             loaded.ledger = reloaded;
@@ -602,7 +750,7 @@ fn apply_file_edit(
 
 /// The body of [`ledger_diff`]: the ledger's files against HEAD.
 fn ledger_diff_text(state: &AppState) -> Result<String, String> {
-    let guard = state.loaded.read();
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     let loaded = guard.as_ref().ok_or("no ledger loaded")?;
     let ledger = &loaded.ledger;
     let (repo, _) = ledger_repo(ledger).ok_or("the ledger is not inside a git repository")?;
@@ -637,7 +785,7 @@ fn commit_staged(state: &AppState, message: &str) -> Result<String, String> {
     if message.trim().is_empty() {
         return Err("commit message must not be empty".to_string());
     }
-    let guard = state.loaded.read();
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     let loaded = guard.as_ref().ok_or("no ledger loaded")?;
     let ledger = &loaded.ledger;
     let (repo, _) = ledger_repo(ledger).ok_or("the ledger is not inside a git repository")?;
@@ -924,7 +1072,7 @@ fn rewrite_transaction(
     tx: &Transaction,
     edit: &TransactionEdit,
 ) -> Result<String, String> {
-    let mut replacements = vec![header_replacement(text, span, edit)?];
+    let mut replacements = header_replacement(text, span, edit)?;
     for posting in &edit.postings {
         replacements.push(posting_replacement(text, tx, posting)?);
     }
@@ -948,13 +1096,22 @@ fn rewrite_transaction(
 }
 
 /// The header rewrite: `DATE FLAG "payee" "narration"`, with whatever follows on
-/// the line — tags, links, a comment — left exactly as it was. A payee the
-/// narration already covers, or none at all, collapses to the narration alone.
+/// the line — tags, links, a comment — left exactly as it was.
+///
+/// The edit is surgical: the date, the flag and the description's literals are
+/// located as tokens in the line, and only the ones whose value the edit
+/// changes have their bytes replaced. Every other byte keeps the file's own
+/// spelling — the line's indent, the widths of the separators, a literal's
+/// quoting and escapes. The single-literal `"payee|narration"` and two-literal
+/// `"payee" "narration"` forms are converted into one another only when the
+/// edit forces it (a distinct payee where the source spelled neither a payee
+/// nor a `|`), never because a value was merely re-typed. A payee the narration
+/// already covers, or none at all, collapses to the narration alone.
 fn header_replacement(
     text: &str,
     span: Span,
     edit: &TransactionEdit,
-) -> Result<Replacement, String> {
+) -> Result<Vec<Replacement>, String> {
     let start = text[..span.start.min(text.len())]
         .rfind('\n')
         .map_or(0, |at| at + 1);
@@ -962,22 +1119,105 @@ fn header_replacement(
         .find('\n')
         .map_or(text.len(), |at| start + at);
     let line = &text[start..end];
-    let keep = header_strings_end(line)
+    let header = header_tokens(line)
         .ok_or_else(|| "the transaction's header line has no payee or narration".to_string())?;
     let date = checked_date(&edit.date)?;
     let flag = checked_flag(&edit.flag)?;
-    let narration = quote_beancount(&edit.narration);
-    let description = match &edit.payee {
-        Some(payee) if *payee != edit.narration => {
-            format!("{} {narration}", quote_beancount(payee))
-        }
-        _ => narration,
+    let payee = edit.payee.as_deref().filter(|payee| !payee.is_empty());
+    let distinct_payee = payee.filter(|payee| *payee != edit.narration);
+    let narration = edit.narration.as_str();
+    let replace = |range: (usize, usize), text: String| Replacement {
+        start: start + range.0,
+        end: start + range.1,
+        text,
     };
-    Ok(Replacement {
-        start,
-        end: start + keep,
-        text: format!("{date} {flag} {description}"),
-    })
+
+    let mut replacements = Vec::new();
+
+    // The date and the flag are single tokens: replace each only when the bytes
+    // it spells are no longer the bytes the edit asks for.
+    if &line[header.date.0..header.date.1] != date.as_str() {
+        replacements.push(replace(header.date, date));
+    }
+    match header.flag {
+        Some(flag_range) if &line[flag_range.0..flag_range.1] != flag => {
+            replacements.push(replace(flag_range, flag.to_string()));
+        }
+        Some(_) => {}
+        // No flag token to replace: put one after the date, leaving the
+        // whitespace that already separated the date from the description.
+        None => replacements.push(replace((header.date.1, header.date.1), format!(" {flag}"))),
+    }
+
+    // The description is either two literals (`"payee" "narration"`) or one
+    // (`"payee|narration"`, or just the narration). Touch each literal whose
+    // value changed; convert between the forms only when the edit's payee
+    // forces a form the source did not spell.
+    match header.strings.len() {
+        2 => {
+            let payee_range = header.strings[0];
+            let narration_range = header.strings[1];
+            let payee_literal = &line[payee_range.0..payee_range.1];
+            let narration_literal = &line[narration_range.0..narration_range.1];
+            match distinct_payee {
+                Some(payee) => {
+                    if unquote_beancount(payee_literal) != payee {
+                        replacements.push(replace(payee_range, quote_beancount(payee)));
+                    }
+                    if unquote_beancount(narration_literal) != narration {
+                        replacements.push(replace(narration_range, quote_beancount(narration)));
+                    }
+                }
+                // The edit drops the payee, so the two-literal form has to give
+                // way to one: withdraw the payee literal and the whitespace that
+                // joined it to the narration, leaving an untouched narration its
+                // own bytes.
+                None => {
+                    replacements.push(replace((payee_range.0, narration_range.0), String::new()));
+                    if unquote_beancount(narration_literal) != narration {
+                        replacements.push(replace(narration_range, quote_beancount(narration)));
+                    }
+                }
+            }
+        }
+        1 => {
+            let range = header.strings[0];
+            let value = unquote_beancount(&line[range.0..range.1]);
+            match distinct_payee {
+                // A single literal that already spelled `payee|narration` keeps
+                // that form; one spelled without a `|` has to grow into two.
+                Some(payee) if value.contains('|') => {
+                    let rewritten = format!("{payee}|{narration}");
+                    if rewritten != value {
+                        replacements.push(replace(range, quote_beancount(&rewritten)));
+                    }
+                }
+                Some(payee) => replacements.push(replace(
+                    range,
+                    format!("{} {}", quote_beancount(payee), quote_beancount(narration)),
+                )),
+                None => {
+                    if value != narration {
+                        replacements.push(replace(range, quote_beancount(narration)));
+                    }
+                }
+            }
+        }
+        // A header cannot describe three literals; whatever was loaded, rewrite
+        // the whole description as the tokens the edit asks for.
+        _ => {
+            let last = *header.strings.last().expect("header_tokens keeps at least one");
+            let description = match distinct_payee {
+                Some(payee) => {
+                    format!("{} {}", quote_beancount(payee), quote_beancount(narration))
+                }
+                None => quote_beancount(narration),
+            };
+            replacements.push(replace((header.strings[0].0, last.1), description));
+        }
+    }
+
+    Ok(replacements)
 }
 
 /// The units rewrite for one posting: the new figure spliced in where the amount
@@ -1081,25 +1321,82 @@ fn quote_beancount(value: &str) -> String {
     quoted
 }
 
-/// The byte offset in a transaction header just past its narration — where the
-/// tags, links and comment begin.
+/// A transaction header's editable tokens, as byte ranges within its line: the
+/// date, the flag (when the line spells one) and the description literals.
+struct HeaderTokens {
+    /// The date token, past the line's indent.
+    date: (usize, usize),
+    /// The flag token, if the line has one.
+    flag: Option<(usize, usize)>,
+    /// The description: a single `"payee|narration"` (or narration) literal, or
+    /// a payee literal and a narration literal.
+    strings: Vec<(usize, usize)>,
+}
+
+/// Locate a header line's tokens so an edit can replace one and leave the rest
+/// of the line's bytes alone.
 ///
-/// The quoted strings are the header's first tokens (`DATE FLAG|txn "payee"
-/// "narration"`), so the run of strings that starts at the first quote is
-/// exactly the payee and narration; a header written without a flag works out
-/// the same way. A quote further along the line — inside a comment, say — is not
-/// part of that run, because something other than whitespace separates it.
-fn header_strings_end(line: &str) -> Option<usize> {
-    let mut end = end_of_string(line, line.find('"')?)?;
+/// `None` when the line carries no description literal — a header an edit
+/// cannot address. The line's indent, the whitespace between tokens and
+/// anything after the description (tags, links, a comment) are deliberately
+/// absent from every range.
+fn header_tokens(line: &str) -> Option<HeaderTokens> {
+    let date_start = line.len() - line.trim_start().len();
+    let date_end = date_start
+        + line[date_start..]
+            .find(char::is_whitespace)
+            .unwrap_or(line.len() - date_start);
+    let first_quote = date_end + line[date_end..].find('"')?;
+    let between = &line[date_end..first_quote];
+    let flag = between.find(|character: char| !character.is_whitespace()).map(|offset| {
+        let from = date_end + offset;
+        (from, from + between[offset..].trim_end().len())
+    });
+    // The header's quoted strings are its first tokens, and a header has at
+    // most two; a quote further along the line — inside a comment, say — is not
+    // part of the run, because something other than whitespace separates it.
+    let mut strings = Vec::new();
+    let mut at = first_quote;
     loop {
-        let rest = &line[end..];
-        let next = match rest.find('"') {
-            Some(at) if rest[..at].trim().is_empty() => end + at,
+        let string_end = end_of_string(line, at)?;
+        strings.push((at, string_end));
+        let rest = &line[string_end..];
+        match rest.find('"') {
+            Some(next) if rest[..next].trim().is_empty() => at = string_end + next,
             _ => break,
-        };
-        end = end_of_string(line, next)?;
+        }
     }
-    Some(end)
+    Some(HeaderTokens {
+        date: (date_start, date_end),
+        flag,
+        strings,
+    })
+}
+
+/// The value a header string literal spells, with beancount's escapes undone —
+/// the inverse of `quote_beancount`, so an edit's value can be compared with a
+/// literal without rewriting the literal when the two agree.
+fn unquote_beancount(literal: &str) -> String {
+    let inner = literal
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(literal);
+    let mut value = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            value.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('n') => value.push('\n'),
+            Some('r') => value.push('\r'),
+            Some('t') => value.push('\t'),
+            Some(escaped) => value.push(escaped),
+            None => value.push('\\'),
+        }
+    }
+    value
 }
 
 /// The byte offset just past the quoted string that starts at `start`.
@@ -1175,7 +1472,7 @@ fn new_errors(before: &[String], after: Vec<String>) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = Builder::<tauri::Wry>::new()
+    let builder = Builder::<AppRuntime>::new()
         // Then register them (separated by a comma)
         .commands(collect_commands![
             greet,
@@ -1185,6 +1482,8 @@ pub fn run() {
             update_transaction,
             transaction_source,
             update_transaction_source,
+            transaction_file,
+            update_file_source,
             ledger_diff,
             commit_ledger,
         ]);
@@ -1195,10 +1494,18 @@ pub fn run() {
         .export(Typescript::default(), "../src/bindings.ts")
         .expect("Failed to export typescript bindings");
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::<AppRuntime>::default()
         .manage(AppState::new())
         // and finally tell Tauri how to invoke them
-        .invoke_handler(builder.invoke_handler())
+        .invoke_handler(builder.invoke_handler());
+
+    // QtWebEngine never hands over custom-protocol POST bodies, so the Qt
+    // runtime carries the invoke payload in a header instead. Without this,
+    // every `invoke()` from the frontend silently fails to reach Rust.
+    #[cfg(all(target_os = "linux", not(feature = "wry")))]
+    let builder = builder.invoke_system(tauri_runtime_qt::INVOKE_SYSTEM_SCRIPT);
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -1210,7 +1517,7 @@ mod tests {
 
     #[test]
     fn export_bindings() {
-        Builder::<tauri::Wry>::new()
+        Builder::<AppRuntime>::new()
             .commands(collect_commands![
                 greet,
                 accounts,
@@ -1219,6 +1526,8 @@ mod tests {
                 update_transaction,
                 transaction_source,
                 update_transaction_source,
+                transaction_file,
+                update_file_source,
                 ledger_diff,
                 commit_ledger,
             ])
@@ -1270,7 +1579,7 @@ option \"operating_currency\" \"USD\"
         .unwrap();
         assert!(ledger.errors.is_empty(), "errors: {:?}", ledger.errors);
 
-        let balances = account_balances(&ledger);
+        let balances = account_balances(&ledger, &BTreeSet::new());
         let get = |name: &str| {
             balances
                 .iter()
@@ -1547,7 +1856,7 @@ option \"operating_currency\" \"USD\"
 
     /// Every transaction of the held ledger, as the register sees them.
     fn views(state: &AppState) -> Vec<TransactionView> {
-        let guard = state.loaded.read();
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().unwrap();
         account_transaction_views(&loaded.ledger, &loaded.baseline, "")
     }
@@ -1645,7 +1954,7 @@ option \"operating_currency\" \"USD\"
 
         // The reloaded ledger — the one the app now holds — is clean.
         {
-            let guard = state.loaded.read();
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
             let errors = &guard.as_ref().unwrap().ledger.errors;
             assert!(errors.is_empty(), "errors: {errors:?}");
         }
@@ -1782,7 +2091,7 @@ option \"operating_currency\" \"USD\"
         // The reloaded ledger is clean, the edited transaction kept its id, and
         // it is the only row reporting itself modified.
         {
-            let guard = state.loaded.read();
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
             let errors = &guard.as_ref().unwrap().ledger.errors;
             assert!(errors.is_empty(), "errors: {errors:?}");
         }
@@ -1860,7 +2169,7 @@ option \"operating_currency\" \"USD\"
 
         // One past the last entry of the directive stream the ids index.
         let missing = {
-            let guard = state.loaded.read();
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
             u32::try_from(guard.as_ref().unwrap().ledger.balance_view().len()).unwrap()
         };
         assert!(transaction_source_text(&state, missing)
@@ -1933,6 +2242,203 @@ option \"operating_currency\" \"USD\"
 2026-01-14 * \"Stock\"
   Assets:Stock                     12.00 FOO {2.50 USD}
   Assets:Bank:Checking            -30.00 USD
+"
+        );
+    }
+
+    /// A header edit touches only the token the edit changed. The line keeps its
+    /// indent, its separator widths, its single-literal `payee|narration` form
+    /// and its trailing comment; only the narration literal's content moves.
+    #[test]
+    fn a_header_edit_keeps_the_files_own_formatting() {
+        let dir = TempDir::new("header-format");
+        let (_, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Corner Shop|Groceries\"  ; weekly
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+",
+        );
+        let state = loaded_state(&path);
+        let id = views(&state)[0].id;
+
+        // Only the narration changes; the edit goes through the same
+        // `edit_transaction` the `update_transaction` command calls.
+        edit_transaction(
+            &state,
+            TransactionEdit {
+                payee: Some("Corner Shop".to_string()),
+                ..edit_of(id, "2026-01-10", "Groceries and coffee", Vec::new())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Corner Shop|Groceries and coffee\"  ; weekly
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+"
+        );
+    }
+
+    /// A posting-only edit changes nothing about the header, so the header line
+    /// comes back exactly as the file spelled it — separators, form and comment.
+    #[test]
+    fn a_posting_edit_leaves_the_header_byte_identical() {
+        let dir = TempDir::new("header-untouched");
+        let (_, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Corner Shop|Groceries\"  ; weekly
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+",
+        );
+        let state = loaded_state(&path);
+        let id = views(&state)[0].id;
+
+        edit_transaction(
+            &state,
+            TransactionEdit {
+                payee: Some("Corner Shop".to_string()),
+                ..edit_of(
+                    id,
+                    "2026-01-10",
+                    "Groceries",
+                    vec![posting(0, "-25.00"), posting(1, "25.00")],
+                )
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Corner Shop|Groceries\"  ; weekly
+  Assets:Bank:Checking            -25.00 USD
+  Expenses:Food                    25.00 USD
+"
+        );
+    }
+
+    /// When the edit genuinely forces a form change — a distinct payee where the
+    /// source spelled a single literal with no `|` — only the description's
+    /// tokens are rewritten: the indent and the trailing comment stay put.
+    #[test]
+    fn a_header_form_change_keeps_the_indent_and_comment() {
+        let dir = TempDir::new("header-form");
+        let (_, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Groceries\"  ; weekly
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+",
+        );
+        let state = loaded_state(&path);
+        let id = views(&state)[0].id;
+
+        edit_transaction(
+            &state,
+            TransactionEdit {
+                payee: Some("Corner Shop".to_string()),
+                ..edit_of(id, "2026-01-10", "Groceries", Vec::new())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+  2026-01-10  *  \"Corner Shop\" \"Groceries\"  ; weekly
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+"
+        );
+
+        // The rewritten header still describes what the edit asked for: the
+        // payee is now explicit and the narration is unchanged.
+        let view = views(&state).into_iter().next().unwrap();
+        assert_eq!(view.payee.as_deref(), Some("Corner Shop"));
+        assert_eq!(view.narration, "Groceries");
+    }
+
+    /// A units edit replaces only the figure's bytes: the run of spaces that
+    /// aligns the amount under the account survives, as does everything else.
+    #[test]
+    fn a_units_edit_keeps_column_alignment() {
+        let dir = TempDir::new("column-aligned");
+        let (_, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank:Checking                    -20.00 USD
+  Expenses:Food                             20.00 USD
+",
+        );
+        let state = loaded_state(&path);
+        let id = view_id(&state, "Groceries");
+
+        edit_transaction(
+            &state,
+            edit_of(
+                id,
+                "2026-01-10",
+                "Groceries",
+                vec![posting(0, "-21.50"), posting(1, "21.50")],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank:Checking                    -21.50 USD
+  Expenses:Food                             21.50 USD
 "
         );
     }

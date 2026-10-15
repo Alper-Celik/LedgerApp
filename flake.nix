@@ -21,6 +21,36 @@
       ];
       perSystem =
         { pkgs, self', ... }:
+        let
+          isLinux = pkgs.stdenv.hostPlatform.isLinux;
+
+          # qtwebengine installs into its own prefix; `qt-build-utils` (used by
+          # tauri-runtime-qt) resolves modules through `qmake -query`, which only
+          # knows qtbase's. Merge the module prefixes and shim qmake so module
+          # lookups see the merged tree (TauriQt docs/nix-qt-gotchas.md).
+          qtMerged = pkgs.symlinkJoin {
+            name = "qt-merged";
+            paths = with pkgs.kdePackages; [
+              qtbase
+              qtwebengine
+              qtdeclarative
+              qtwebchannel
+              qtpositioning
+            ];
+          };
+
+          qmakeMerged = pkgs.writeShellScriptBin "qmake" ''
+            real="${pkgs.kdePackages.qtbase}/bin/qmake"
+            base="${pkgs.kdePackages.qtbase}"
+            merged="${qtMerged}"
+            if [ "''${1:-}" = "-query" ]; then
+              v="$("$real" -query "''${2:-}")"
+              echo "''${v//$base/$merged}"
+            else
+              exec "$real" "$@"
+            fi
+          '';
+        in
         {
           # `nix build .#rustledger-envelope` (or plain `nix build`) produces the
           # plugin as a WASM module, built offline from the crate's Cargo.lock and
@@ -122,11 +152,27 @@
               rustc # Needed for dev server (npm tauri dev)
               lld # wasm32-unknown-unknown linker for plugins/rustledger-envelope
               gst_all_1.gst-plugins-base # Optional, if you get `GStreamer element appsink not found. Please install it.`
+            ] ++ pkgs.lib.optionals isLinux [
+              # Qt toolchain for the Qt runtime: the merged tree plus the shim.
+              qmakeMerged
+              qtMerged
+              cmake
             ];
 
             buildInputs = with pkgs; [
               librsvg
+            ] ++ pkgs.lib.optionals isLinux [
+              # tauri-runtime links the GTK stack unconditionally on Linux, so
+              # these .pc files must be on PKG_CONFIG_PATH for the -sys crates
+              # (`atk` is not implied by gtk3). QtWebEngine comes with the Qt
+              # runtime.
+              glib
+              gtk3
               webkitgtk_4_1
+              atk
+              kdePackages.qtbase
+              kdePackages.qtwebengine
+              libGL
             ];
 
             shellHook = ''
@@ -136,6 +182,10 @@
               # lld's wasm-ld, which this shell provides (the package and
               # `devShells.plugin` set the same thing).
               export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER=wasm-ld
+            '' + pkgs.lib.optionalString isLinux ''
+              # qt-build-utils prefers $QMAKE over PATH and searches for qmake6
+              # first, so pin the shim explicitly rather than rely on PATH order.
+              export QMAKE="${qmakeMerged}/bin/qmake"
             '';
           };
         };

@@ -45,3 +45,10 @@ src/lib/paraglide
 /result
 
 project.inlang/cache/
+
+# The ledger itself: private data, and its own git repository.
+books/
+
+# Playwright artifacts.
+test-results/
+playwright-report/

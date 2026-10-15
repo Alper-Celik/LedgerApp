@@ -22,7 +22,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# The runtime is chosen at the type level (`AppRuntime` in src/lib.rs): tauri's
+# default features include `wry`, so they are off here and only the
+# runtime-independent ones are kept. The Linux build takes tauri-runtime-qt
+# below; Windows/macOS re-add `wry` in their target section.
+tauri = { version = "2", default-features = false, features = [
+    "compression",
+    "common-controls-v6",
+    "dynamic-acl",
+    "x11",
+] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,12 +43,25 @@ rustledger-parser = "0.24.0"
 rustledger-loader = "0.24.0"
 rustledger-query = "0.24.0"
 rust_decimal = "1"
-# Locks without the poisoning error path: no `unwrap` at every lock site.
-parking_lot = "0.12"
 # libgit2 bindings for staging and diffing the ledger against HEAD. Default
 # features stay off: this app only ever touches a local repository, so the SSH
 # and HTTPS transports (and their OpenSSL/libssh2 build chain) are dead weight.
 git2 = { version = "0.21", default-features = false }
+
+# Linux: the Qt runtime from the TauriQt repo — Qt windowing (QWindow/QWidget)
+# replaces tao and QtWebEngine replaces webkit2gtk. Follows `main`; Cargo.lock
+# pins the exact commit.
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-runtime-qt = { git = "https://github.com/Alper-Celik/TauriQt" }
+
+# Windows / macOS: the stock wry runtime. Enabling `wry` only here keeps
+# WebView2/WKWebView out of the Linux build and Qt out of the others.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tauri = { version = "2", default-features = false, features = ["wry"] }
+
+[features]
+# Escape hatch: build the Linux app on wry instead (e.g. to compare engines).
+wry = ["tauri/wry"]
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

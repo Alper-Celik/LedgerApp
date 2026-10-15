@@ -7,9 +7,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { resolve } from "$app/paths";
 	import { page } from "$app/state";
 	import { onMount } from "svelte";
-	import ChevronRight from "@lucide/svelte/icons/chevron-right";
-	import FileDiff from "@lucide/svelte/icons/file-diff";
-	import GitCommit from "@lucide/svelte/icons/git-commit";
+	import { HugeiconsIcon } from "@hugeicons/svelte";
+	import {
+		ChevronRightIcon,
+		FileDiffIcon,
+		GitCommitIcon,
+	} from "@hugeicons/core-free-icons";
 	import { commands, type AccountBalance } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import {
@@ -25,6 +28,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		setSidebarWidth,
 		sidebarWidth,
 	} from "$lib/sidebar-width.svelte.js";
+	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
 
@@ -33,9 +37,23 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * (or a sibling group) the same way.
 	 */
 	const GIT_VIEWS = [
-		{ href: "/diff", label: "Diff", icon: FileDiff },
-		{ href: "/commit", label: "Commit", icon: GitCommit },
+		{ href: "/diff", label: "Diff", icon: FileDiffIcon },
+		{ href: "/commit", label: "Commit", icon: GitCommitIcon },
 	] as const;
+
+	/**
+	 * Balances, or an empty list if the backend cannot answer — a rejected or
+	 * failing command must leave the sidebar standing, not throw out of the
+	 * render that called it.
+	 */
+	async function loadAccounts() {
+		try {
+			return await commands.accounts();
+		} catch (cause) {
+			console.error("accounts failed", cause);
+			return [];
+		}
+	}
 
 	/** Folded subtrees by account name; everything opens by default. */
 	let folded = $state<Record<string, boolean>>({});
@@ -76,14 +94,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	);
 
 	onMount(async () => {
-		accounts = await commands.accounts();
+		accounts = await loadAccounts();
 	});
 
 	$effect(() => {
 		// Balances are fetched once per page load, so an edit saved elsewhere (or a
 		// commit) has to bump the revision to bring this list back in step.
 		if (ledgerRevision.value === 0) return;
-		commands.accounts().then((result) => (accounts = result));
+		loadAccounts();
 	});
 </script>
 
@@ -105,25 +123,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 {/snippet}
 
 {#snippet renderAccounts(nodes: AccountNode[], depth: number)}
-	{#each nodes as node, i (node.fullName)}
+	{#each nodes as node (node.fullName)}
 		{@const href = resolve("/account/[id]", { id: node.fullName })}
-		{#if depth !== 0 || i > 0}
-			<!--
-				Rule starts one indent level out — at the item start of the row
-				that owns this subtree — and keeps its right end at the rows'
-				right edge, so it always spans the amounts. Inline width is
-				needed: the class list ends up with both `w-full` and `w-auto`,
-				and a margin alone cannot widen it.
-			-->
-			<Sidebar.MenuSubItem>
-				<Sidebar.Separator
-					class="mx-0"
-					style="margin-left: {depth === 0 ? 0 : -15}px; width: {depth === 0
-						? '100%'
-						: 'calc(100% + 15px)'}"
-				/>
-			</Sidebar.MenuSubItem>
-		{/if}
 		{#if node.children.length > 0}
 			<Sidebar.MenuItem class="flex items-center">
 				<Sidebar.MenuButton
@@ -133,9 +134,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					aria-expanded={!folded[node.fullName]}
 					onclick={() => toggleFold(node.fullName)}
 				>
-					<ChevronRight
-						class="transition-transform duration-[var(--motion-duration-fast)] ease-[var(--motion-ease)]
-							{folded[node.fullName] ? '' : 'rotate-90'}"
+					<HugeiconsIcon
+						icon={ChevronRightIcon}
+						strokeWidth={2}
+						data-icon="inline-start"
+						class={cn(
+							"transition-transform transition-motion-fast",
+							folded[node.fullName] ? "" : "rotate-90"
+						)}
 					/>
 				</Sidebar.MenuButton>
 				<Sidebar.MenuButton size="sm" class="rounded-none" isActive={page.url.pathname === href}>
@@ -153,9 +159,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				here).
 			-->
 			<div
-				class="grid transition-[grid-template-rows] duration-[var(--motion-duration)] ease-[var(--motion-ease)] {folded[node.fullName]
-					? 'grid-rows-[0fr]'
-					: 'grid-rows-[1fr]'}"
+				class={cn("fold", !folded[node.fullName] && "fold-open")}
 			>
 				<div class="overflow-hidden">
 					<!--
@@ -209,46 +213,45 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							its label and the fold control.
 						-->
 						<Sidebar.MenuItem class="flex items-center">
-								<Sidebar.MenuButton
-									size="sm"
-									class="w-auto rounded-none px-1.5"
-									aria-label={`Toggle ${entry.section.label}`}
-									aria-expanded={!folded[entry.section.label]}
-									onclick={() => toggleFold(entry.section.label)}
-								>
-									<ChevronRight
-										class="transition-transform duration-[var(--motion-duration-fast)]
-											ease-[var(--motion-ease)] {folded[entry.section.label]
-											? ''
-											: 'rotate-90'}"
-									/>
-								</Sidebar.MenuButton>
-								<Sidebar.MenuButton
-									size="sm"
-									class="rounded-none"
-									isActive={page.url.pathname === resolve("/ledger")}
-								>
-									{#snippet child({ props })}
-										<a {...props} href={resolve("/ledger")}>
-											<span class="min-w-0 flex-1 truncate">{entry.section.label}</span>
-										</a>
-									{/snippet}
-								</Sidebar.MenuButton>
-							</Sidebar.MenuItem>
-							<div
-								class="grid transition-[grid-template-rows] duration-[var(--motion-duration)] ease-[var(--motion-ease)] {folded[
-									entry.section.label
-								]
-									? 'grid-rows-[0fr]'
-									: 'grid-rows-[1fr]'}"
+							<Sidebar.MenuButton
+								size="sm"
+								class="w-auto rounded-none px-1.5"
+								aria-label={`Toggle ${entry.section.label}`}
+								aria-expanded={!folded[entry.section.label]}
+								onclick={() => toggleFold(entry.section.label)}
 							>
-								<div class="overflow-hidden">
-									<!-- Accounts are children of the virtual root, one level in. -->
-									<Sidebar.MenuSub class="ml-3.5 mr-0 translate-x-0 gap-0 py-0 pl-0 pr-0">
-										{@render renderAccounts(entry.tree, 1)}
-									</Sidebar.MenuSub>
-								</div>
+								<HugeiconsIcon
+									icon={ChevronRightIcon}
+									strokeWidth={2}
+									data-icon="inline-start"
+									class={cn(
+										"transition-transform transition-motion-fast",
+										folded[entry.section.label] ? "" : "rotate-90"
+									)}
+								/>
+							</Sidebar.MenuButton>
+							<Sidebar.MenuButton
+								size="sm"
+								class="rounded-none"
+								isActive={page.url.pathname === resolve("/ledger")}
+							>
+								{#snippet child({ props })}
+									<a {...props} href={resolve("/ledger")}>
+										<span class="min-w-0 flex-1 truncate">{entry.section.label}</span>
+									</a>
+								{/snippet}
+							</Sidebar.MenuButton>
+						</Sidebar.MenuItem>
+						<div
+							class={cn("fold", !folded[entry.section.label] && "fold-open")}
+						>
+							<div class="overflow-hidden">
+								<!-- Accounts are children of the virtual root, one level in. -->
+								<Sidebar.MenuSub class="ml-3.5 mr-0 translate-x-0 gap-0 py-0 pl-0 pr-0">
+									{@render renderAccounts(entry.tree, 1)}
+								</Sidebar.MenuSub>
 							</div>
+						</div>
 					</Sidebar.Menu>
 				</Sidebar.GroupContent>
 			</Sidebar.Group>
@@ -266,7 +269,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							>
 								{#snippet child({ props })}
 									<a {...props} href={resolve(item.href)}>
-										<item.icon />
+										<HugeiconsIcon
+											icon={item.icon}
+											strokeWidth={2}
+											data-icon="inline-start"
+										/>
 										<span class="min-w-0 flex-1 truncate">{item.label}</span>
 									</a>
 								{/snippet}
@@ -287,7 +294,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		type="button"
 		aria-label="Resize sidebar"
 		tabindex={-1}
-		class="absolute inset-y-0 end-0 z-20 hidden w-1.5 cursor-col-resize touch-none bg-transparent transition-colors select-none hover:bg-sidebar-border md:block"
+		class="absolute inset-y-0 end-0 z-20 hidden w-1.5 cursor-col-resize touch-none bg-transparent transition-colors transition-motion-fast select-none hover:bg-sidebar-border md:block"
 		onpointerdown={startResize}
 		onpointermove={moveResize}
 		onpointerup={endResize}
