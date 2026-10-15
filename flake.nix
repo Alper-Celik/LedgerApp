@@ -114,13 +114,16 @@
               fi
             '';
 
-            # Gradle fetches the wrapper dist, AGP, the Kotlin plugin and the
-            # androidx artifacts from the network. A fixed-output derivation
-            # captures the whole GRADLE_USER_HOME so the (sandboxed, offline)
-            # APK build resolves everything from the cache. The cache embeds
-            # host-specific paths, so the hash is the x86_64 build's own: a
-            # mismatch (e.g. after a tauri-cli/gradle version bump) prints the
-            # expected hash — paste it into outputHash.
+            # Gradle fetches the wrapper distribution, AGP, the Kotlin plugin
+            # and the androidx artifacts from the network. Gradle's own cache
+            # cannot be hashed: its index stores (module metadata, file hashes,
+            # execution history) embed host paths and timestamps, so a hash over
+            # the whole GRADLE_USER_HOME changes between identical runs. This
+            # derivation instead emits only reproducible bytes — the downloaded
+            # artifacts in plain maven layout, plus the extracted gradle
+            # distribution — and the APK build resolves against the layout
+            # through the init script below, so no cache index is involved and
+            # the hash is stable by construction.
             gradleDeps =
               pkgsAndroid.runCommand "ledgerapp-gradle-deps"
                 {
@@ -130,28 +133,51 @@
                   nativeBuildInputs = [ pkgsAndroid.jdk21_headless ];
                 }
                 ''
+                  set -euo pipefail
                   export HOME=$TMPDIR/home
                   mkdir -p "$HOME"
                   cp -r ${./src-tauri/gen/android} gradle-project
                   chmod -R u+w gradle-project
                   cd gradle-project
                   # tauri-build generates these during the cargo build (they wire
-                  # the tauri .aar subprojects); the FOD only seeds the maven
-                  # cache, so empty stubs are enough to configure the build.
+                  # the tauri .aar subprojects); this derivation only downloads
+                  # dependencies, so empty stubs are enough to configure here.
                   touch tauri.settings.gradle app/tauri.build.gradle.kts
-                  export GRADLE_USER_HOME=$out
+
+                  # A throwaway cache: it is where gradle downloads into, and it
+                  # is deliberately not part of the output.
+                  export GRADLE_USER_HOME=$TMPDIR/gradle-home
                   ./gradlew --no-daemon \
                     -PabiList=${lib.concatStringsSep "," androidAbis} \
                     -ParchList=${lib.concatStringsSep "," androidArchs} \
                     -PtargetList=${lib.concatStringsSep "," androidTargets} \
                     :app:dependencies
-                  # Drop the regenerable, host-dependent state (daemon logs,
-                  # script-class caches, profiles) so the hashed cache content is
-                  # host-independent; the offline build recreates all of it.
-                  rm -rf "$GRADLE_USER_HOME"/daemon "$GRADLE_USER_HOME"/kotlin-profile \
-                    "$GRADLE_USER_HOME"/notifications "$GRADLE_USER_HOME"/native \
-                    "$GRADLE_USER_HOME"/android "$GRADLE_USER_HOME"/caches/jars-9 \
-                    "$GRADLE_USER_HOME"/caches/cc-keystore "$GRADLE_USER_HOME"/caches/journal-1
+
+                  # The gradle distribution the wrapper script needs. Extracted
+                  # from the distribution zip, so it is byte-reproducible.
+                  mkdir -p $out
+                  cp -r "$GRADLE_USER_HOME/wrapper" $out/wrapper
+
+                  # Re-lay the downloaded artifacts as a maven repository:
+                  #   cache: <group>/<artifact>/<version>/<sha1>/<file>
+                  #   repo:  <group as path>/<artifact>/<version>/<file>
+                  # Only the artifacts survive — jars, aars, poms, gradle
+                  # module metadata — all of them immutable downloads.
+                  base="$GRADLE_USER_HOME/caches/modules-2/files-2.1"
+                  find "$base" -type f > "$TMPDIR/artifacts.txt"
+                  while IFS= read -r f; do
+                    rel=''${f#"$base"/}
+                    file=''${rel##*/}
+                    rest=''${rel%/*}                     # group/artifact/version/sha1
+                    gav=''${rest%/*}                     # group/artifact/version
+                    version=''${gav##*/}
+                    ga=''${gav%/*}                       # group/artifact
+                    artifact=''${ga##*/}
+                    group=''${ga%/*}                     # com.example
+                    groupPath=''$(printf '%s' "$group" | tr '.' '/')
+                    mkdir -p "$out/maven/$groupPath/$artifact/$version"
+                    cp -p "$f" "$out/maven/$groupPath/$artifact/$version/$file"
+                  done < "$TMPDIR/artifacts.txt"
                 '';
 
             # The APK itself: `tauri android build` drives gradle, which drives
@@ -206,9 +232,36 @@
                 export HOME=$TMPDIR/home
                 mkdir -p "$HOME"
 
+                # The gradle distribution comes from the deps derivation, and an
+                # init script points every repository at its maven layout, so
+                # resolution is fully local and no gradle cache index is needed.
                 export GRADLE_USER_HOME=$TMPDIR/gradle-home
-                cp -r ${gradleDeps}/. "$GRADLE_USER_HOME/"
-                chmod -R u+w "$GRADLE_USER_HOME"
+                mkdir -p "$GRADLE_USER_HOME/init.d"
+                cp -r ${gradleDeps}/wrapper "$GRADLE_USER_HOME/wrapper"
+                chmod -R u+w "$GRADLE_USER_HOME/wrapper"
+                cat > "$GRADLE_USER_HOME/init.d/local-repo.gradle" <<'GRADLE_INIT'
+                // Replace every remote repository with the maven layout the flake
+                // fetched, and keep the build offline: the sandbox has no network.
+                def localRepo = uri("${gradleDeps}/maven")
+
+                gradle.beforeSettings { settings ->
+                  settings.pluginManagement.repositories.clear()
+                  settings.pluginManagement.repositories.maven { url = localRepo }
+                  settings.dependencyResolutionManagement.repositories.clear()
+                  settings.dependencyResolutionManagement.repositories.maven { url = localRepo }
+                }
+
+                gradle.settingsEvaluated { settings ->
+                  settings.gradle.startParameter.offline = true
+                }
+
+                allprojects {
+                  repositories.clear()
+                  repositories.maven { url = localRepo }
+                  buildscript.repositories.clear()
+                  buildscript.repositories.maven { url = localRepo }
+                }
+                GRADLE_INIT
 
                 export CARGO_HOME=$TMPDIR/cargo-home
                 mkdir -p "$CARGO_HOME"
