@@ -270,6 +270,16 @@
                     groupPath=''$(printf '%s' "$group" | tr '.' '/')
                     mkdir -p "$out/maven/$groupPath/$artifact/$version"
                     cp -p "$f" "$out/maven/$groupPath/$artifact/$version/$file"
+                    # Serve module-style names too: gradle may resolve the
+                    # artifact through the POM default name (<module>-<version>
+                    # .<ext>) while the cache stored it under the metadata's
+                    # physical name (they differ for androidx -android
+                    # modules). Same bytes, one extra link.
+                    ext=''${file##*.}
+                    modName="$artifact-$version.$ext"
+                    if [ "$modName" != "$file" ]; then
+                      cp -p "$f" "$out/maven/$groupPath/$artifact/$version/$modName"
+                    fi
                   done < "$TMPDIR/artifacts.txt"
                 '';
 
