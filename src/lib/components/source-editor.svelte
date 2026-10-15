@@ -64,6 +64,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let editor: MonacoEditor.IStandaloneCodeEditor | null = null;
 
 	/**
+	 * The entry's own range in `file` scope, as a Monaco decoration so it
+	 * follows the text through edits — the cursor can then be anywhere in the
+	 * file and `Tab fields` (or Tab) still knows which entry it means.
+	 */
+	let entryRange: MonacoEditor.IEditorDecorationsCollection | null = null;
+
+	/**
 	 * The snippet contribution, as much of it as this component uses. Monaco
 	 * 0.57 no longer registers the `insertSnippet` command the older examples
 	 * trigger, so the controller is taken off the editor; `getContribution`
@@ -91,9 +98,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * Escape leaves snippet mode. Re-entering is the toolbar's `Tab fields`
 	 * button.
 	 *
-	 * The text it acts on is the whole model in `entry` scope and the selection
-	 * in `file` scope — opening on an entry selects it, so the button targets
-	 * the entry the editor was opened for, never the file's first one.
+	 * The text it acts on is the whole model in `entry` scope and the entry's
+	 * own tracked range in `file` scope — never the selection, so it works
+	 * wherever the cursor happens to be, and still works after the entry has
+	 * been edited.
 	 *
 	 * Text whose first non-comment line is not a dated entry is not something
 	 * this can read: the text is left exactly as it is (and, in `entry` scope,
@@ -105,7 +113,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		const controller = editor?.getContribution<SnippetController>("snippetController2");
 		if (!editor || !model || !controller) return;
 
-		const selection = scope === "file" ? editor.getSelection() : model.getFullModelRange();
+		const selection =
+			scope === "file"
+				? (entryRange?.getRange(0) ?? editor.getSelection())
+				: model.getFullModelRange();
 		if (!selection) return;
 
 		const template = fieldSnippet(model.getValueInRange(selection));
@@ -128,6 +139,37 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			model.setValue(before);
 		}
 		editor.focus();
+	}
+
+	/**
+	 * Keys the toolbar's buttons also answer to, bound on the way down so they
+	 * win over both Monaco's own bindings and the browser's:
+	 *
+	 * - Ctrl/Cmd+S saves, the way every editor does.
+	 * - Tab, in `file` scope with the cursor inside the entry and no snippet
+	 *   running, starts the field stops — the same thing `Tab fields` does, so
+	 *   the whole file is still edited with the keyboard. Anywhere else in the
+	 *   file Tab keeps Monaco's own meaning (indent, or step through a snippet
+	 *   that is already running).
+	 */
+	function onKeydown(event: KeyboardEvent) {
+		if (!editor) return;
+		if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+			event.preventDefault();
+			save();
+			return;
+		}
+		if (event.key !== "Tab" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) {
+			return;
+		}
+		if (scope !== "file") return;
+		const controller = editor.getContribution<SnippetController>("snippetController2");
+		if (controller?.isInSnippet()) return;
+		const entry = entryRange?.getRange(0);
+		const position = editor.getPosition();
+		if (!entry || !position || !entry.containsPosition(position)) return;
+		event.preventDefault();
+		enterFields();
 	}
 
 	onMount(() => {
@@ -200,8 +242,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			if (entry) {
 				// Open on the entry the editor was asked for: brought into view
 				// and selected, so it is both what you see and what Tab fields
-				// acts on. A whole file is not a single entry, so the tab stops
-				// are never laid over all of it.
+				// acts on. The decoration is what keeps that range true as the
+				// entry is edited; a whole file is not a single entry, so the
+				// tab stops are never laid over all of it.
+				entryRange = editor.createDecorationsCollection([
+					{
+						range: entry,
+						options: {
+							stickiness: monaco.editor.TrackedRangeStickiness.GrowsOnlyWhenTypingAfter,
+						},
+					},
+				]);
 				editor.revealRangeInCenter(entry);
 				editor.setSelection(entry);
 				editor.focus();
@@ -218,6 +269,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		return () => {
 			disposed = true;
 			themeObserver?.disconnect();
+			entryRange?.clear();
+			entryRange = null;
 			editor?.getModel()?.dispose();
 			editor?.dispose();
 			editor = null;
@@ -225,24 +278,37 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	});
 
 	async function save() {
-		if (!editor) return;
+		if (!editor || saving) return;
 		saving = true;
 		error = "";
-		const result =
-			scope === "file"
-				? await commands.updateFileSource(id, editor.getValue())
-				: await commands.updateTransactionSource(id, editor.getValue());
-		saving = false;
-		if (result.status === "error") {
-			error = result.error;
+		try {
+			const result =
+				scope === "file"
+					? await commands.updateFileSource(id, editor.getValue())
+					: await commands.updateTransactionSource(id, editor.getValue());
+			if (result.status === "error") {
+				error = result.error;
+				return;
+			}
+		} catch (cause) {
+			// A rejection that is not the command's own error string — a missing
+			// command, a payload the webview's IPC refused — arrives as a thrown
+			// Error. It has to be shown and `saving` has to come back down, or the
+			// button stays disabled and says nothing about why.
+			error = cause instanceof Error ? cause.message : String(cause);
 			return;
+		} finally {
+			saving = false;
 		}
 		bumpLedgerRevision();
 		onSaved();
 	}
 </script>
 
-<div class="border-border flex flex-col gap-2 border-t px-3 py-2">
+<div
+	class="border-border flex flex-col gap-2 border-t px-3 py-2"
+	onkeydowncapture={onKeydown}
+>
 	<!--
 		The whole file wants the room; the entry's own lines fit in a fold.
 	-->
@@ -259,10 +325,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		<Button size="sm" variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
 		<span class="text-muted-foreground text-xs">
 			{#if scope === "file"}
-				The whole journal file; the entry opens selected. Tab and Shift+Tab step through its
-				fields, Esc leaves them.
+				The whole journal file; the entry opens selected. Tab on an entry starts its fields,
+				Tab and Shift+Tab step through them, Esc leaves them. ⌘/Ctrl+S saves.
 			{:else}
-				Tab and Shift+Tab step through the entry's fields, Esc leaves them.
+				Tab and Shift+Tab step through the entry's fields, Esc leaves them. ⌘/Ctrl+S saves.
 			{/if}
 		</span>
 	</div>
