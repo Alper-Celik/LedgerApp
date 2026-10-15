@@ -117,17 +117,16 @@
             # Gradle fetches the wrapper dist, AGP, the Kotlin plugin and the
             # androidx artifacts from the network. A fixed-output derivation
             # captures the whole GRADLE_USER_HOME so the (sandboxed, offline)
-            # APK build resolves everything from the cache. The cache is pure
-            # JVM output, so the hash can be reproduced on any host with:
-            #   JAVA_HOME=<jdk-home> GRADLE_USER_HOME=/tmp/gradle-home \
-            #   ./gradlew --no-daemon -PabiList=arm64-v8a -ParchList=arm64 \
-            #   -PtargetList=aarch64 :app:dependencies
+            # APK build resolves everything from the cache. The cache embeds
+            # host-specific paths, so the hash is the x86_64 build's own: a
+            # mismatch (e.g. after a tauri-cli/gradle version bump) prints the
+            # expected hash — paste it into outputHash.
             gradleDeps =
               pkgsAndroid.runCommand "ledgerapp-gradle-deps"
                 {
                   outputHashAlgo = "sha256";
                   outputHashMode = "recursive";
-                  outputHash = "sha256-s+7K4SWDgeIpzC7LMWv2EcYyxgxT/UZBp5/pvM48ya0=";
+                  outputHash = "sha256-10t7sfmfpzkFqKmKodJuVOp+tlblp71zx/0ZTKo/pzA=";
                   nativeBuildInputs = [ pkgsAndroid.jdk21_headless ];
                 }
                 ''
