@@ -92,6 +92,12 @@ export type AccountBalance = {
 	 *  frontend needs to place a symbol or code next to the amount.
 	 */
 	currency: string,
+	/**
+	 *  True when at least one transaction in this account's subtree is
+	 *  uncommitted — the same flag [`TransactionView::modified`] carries, rolled
+	 *  up the account tree so the sidebar can mark a branch.
+	 */
+	modified: boolean,
 };
 
 /**  Summary of a successful ledger load. */

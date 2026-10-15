@@ -23,10 +23,10 @@ declare global {
 }
 
 export const accounts: AccountBalance[] = [
-	{ name: "Assets", balance: "60386.05", currency: "TRY" },
-	{ name: "Assets:Bank", balance: "1500.00", currency: "USD" },
-	{ name: "Assets:Bank:Checking", balance: "-123.45", currency: "TRY" },
-	{ name: "Liabilities:KYK", balance: "-45000.00", currency: "TRY" },
+	{ name: "Assets", balance: "60386.05", currency: "TRY", modified: true },
+	{ name: "Assets:Bank", balance: "1500.00", currency: "USD", modified: true },
+	{ name: "Assets:Bank:Checking", balance: "-123.45", currency: "TRY", modified: true },
+	{ name: "Liabilities:KYK", balance: "-45000.00", currency: "TRY", modified: false },
 ];
 
 export const transactions: TransactionView[] = [

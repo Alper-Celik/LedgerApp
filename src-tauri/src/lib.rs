@@ -42,6 +42,10 @@ pub struct AccountBalance {
     /// Beancount commodity of `balance`, e.g. `USD` or `TRY` — the code the
     /// frontend needs to place a symbol or code next to the amount.
     pub currency: String,
+    /// True when at least one transaction in this account's subtree is
+    /// uncommitted — the same flag [`TransactionView::modified`] carries, rolled
+    /// up the account tree so the sidebar can mark a branch.
+    pub modified: bool,
 }
 
 /// One posting as shown on an account page.
@@ -231,8 +235,55 @@ fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
     let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()
-        .map(|loaded| account_balances(&loaded.ledger))
+        .map(|loaded| {
+            let modified = modified_accounts(&loaded.ledger, &loaded.baseline);
+            account_balances(&loaded.ledger, &modified)
+        })
         .unwrap_or_default()
+}
+
+/// The accounts touched by at least one uncommitted transaction, with every
+/// colon-prefix ancestor of each — the same "changed since HEAD or since this
+/// session's baseline" test [`account_transaction_views`] runs per row, rolled
+/// up so a parent branch reads as changed when anything under it is.
+///
+/// Like the per-row flag, the whole walk is skipped when the working tree has
+/// nothing to report, so a clean ledger costs one diff.
+fn modified_accounts(
+    ledger: &Ledger,
+    baseline: &HashMap<PathBuf, Arc<str>>,
+) -> BTreeSet<String> {
+    let changed = working_tree_changes(ledger, baseline);
+    let mut marked = BTreeSet::new();
+    if changed.is_empty() {
+        return marked;
+    }
+    let view = ledger.balance_view();
+    let sources = source_directive_index(ledger, &view);
+    let mut line_starts: HashMap<u16, Vec<usize>> = HashMap::new();
+    for (id, directive) in view.iter().enumerate() {
+        let Directive::Transaction(tx) = directive else {
+            continue;
+        };
+        let modified = sources.get(id).copied().flatten().is_some_and(|index| {
+            touches_changes(ledger, &changed, &mut line_starts, &ledger.directives[index])
+        });
+        if !modified {
+            continue;
+        }
+        for posting in &tx.postings {
+            let mut prefix = String::new();
+            for part in posting.value.account.as_str().split(':') {
+                prefix = if prefix.is_empty() {
+                    part.to_owned()
+                } else {
+                    format!("{prefix}:{part}")
+                };
+                marked.insert(prefix.clone());
+            }
+        }
+    }
+    marked
 }
 
 /// Transactions touching `account` — the account itself or any sub-account —
@@ -402,7 +453,7 @@ fn account_transaction_views(
 /// Accumulate per-(account, currency) units over the pad-merged transaction
 /// stream, roll each account's totals up into its ancestors, then report one
 /// entry per tree node.
-fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
+fn account_balances(ledger: &Ledger, modified: &BTreeSet<String>) -> Vec<AccountBalance> {
     let mut totals: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
     for directive in ledger.balance_view() {
         let Directive::Transaction(tx) = directive else {
@@ -446,6 +497,7 @@ fn account_balances(ledger: &Ledger) -> Vec<AccountBalance> {
                 name: name.clone(),
                 balance: units.to_string(),
                 currency,
+                modified: modified.contains(name),
             }
         })
         .collect();
@@ -1527,7 +1579,7 @@ option \"operating_currency\" \"USD\"
         .unwrap();
         assert!(ledger.errors.is_empty(), "errors: {:?}", ledger.errors);
 
-        let balances = account_balances(&ledger);
+        let balances = account_balances(&ledger, &BTreeSet::new());
         let get = |name: &str| {
             balances
                 .iter()
