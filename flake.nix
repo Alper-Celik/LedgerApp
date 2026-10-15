@@ -129,7 +129,7 @@
                 {
                   outputHashAlgo = "sha256";
                   outputHashMode = "recursive";
-                  outputHash = "sha256-10t7sfmfpzkFqKmKodJuVOp+tlblp71zx/0ZTKo/pzA=";
+                  outputHash = "sha256-oGXS2ztfvQQK4tkC9q2eogkpdchHhV3gwedLk4OUZOQ=";
                   nativeBuildInputs = [ pkgsAndroid.jdk21_headless ];
                 }
                 ''
