@@ -170,7 +170,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		bumpLedgerRevision();
 		await invalidateAll();
 	}
-	let select = (tx: TransactionView) => (current = current === tx.id ? null : tx.id);
+	/**
+	 * The entry whose legs are still mounted while its fold closes. Collapsing
+	 * removes the legs from `current` in the same tick the grid track starts
+	 * going to 0fr, so without this the content is already gone and the row
+	 * snaps shut instead of animating. One entry is enough — opening another
+	 * closes only this one — and the fold's own `transitionend` releases it.
+	 */
+	let closing = $state<number | null>(null);
+
+	function select(tx: TransactionView) {
+		if (current !== null) closing = current;
+		current = current === tx.id ? null : tx.id;
+	}
 
 	$effect(() => {
 		localStorage.setItem(VIEW_KEY, view);
@@ -305,7 +317,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		<ToggleGroup.Root
 			type="single"
 			value={view}
-			onValueChange={(next) => next && (view = next as ViewId)}
+			onValueChange={(next) => {
+				if (!next) return;
+				view = next as ViewId;
+				// The table remounts with the style; nothing is left to close.
+				closing = null;
+			}}
 			aria-label="Register style"
 		>
 			{#each VIEWS as option (option.id)}
@@ -342,15 +359,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Table.Body>
 				{#each transactions as tx (tx.id)}
 					{@const flow = flows(tx)}
+					<!--
+						`shown` is `current` plus the row that is closing: its legs have
+						to survive one more transition for the fold to have anything
+						to shrink. Everything that *looks* like the current entry
+						below still reads `current` alone.
+					-->
+					{@const shown = current === tx.id || closing === tx.id}
 					{@const legs =
-						mode.legsWhenCurrentOnly && current !== tx.id
+						mode.legsWhenCurrentOnly && !shown
 							? []
 							: tx.postings
 									.map((posting, index) => ({ posting, index }))
 									.filter(
 										(leg) =>
 											mode.showAllPostings ||
-											current === tx.id ||
+											shown ||
 											isSubAccountOf(leg.posting.account, account)
 									)}
 					<!--
@@ -577,6 +601,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						<Table.Cell colspan={COLUMNS.length} class="p-0">
 							<div
 								class={cn("fold", current === tx.id && "fold-open")}
+								ontransitionend={() => {
+									if (closing === tx.id) closing = null;
+								}}
 							>
 								<div class="overflow-hidden">
 									<Table.Root class="table-fixed">
