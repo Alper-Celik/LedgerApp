@@ -187,6 +187,7 @@
                   # app's kotlin compile needs them, so do the same here: the
                   # same substitutions (package, cdylib name; the per-class
                   # extension/init hooks default to empty, which compiles fine).
+                  wryKotlin=""
                   for d in "${cargoVendor}"/wry-*; do
                     if [ -d "$d/src/android/kotlin" ]; then wryKotlin="$wryKotlin $d/src/android/kotlin"; fi
                   done
