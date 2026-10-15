@@ -146,7 +146,10 @@
                   outputHashAlgo = "sha256";
                   outputHashMode = "recursive";
                   outputHash = "sha256-3XXiEHKB1tnXaZHMH00jeUmIs4IhqtM5m2oSzhsIDIw=";
-                  nativeBuildInputs = [ pkgsAndroid.jdk21_headless ];
+                  nativeBuildInputs = [
+                    pkgsAndroid.jdk21_headless
+                    androidComposition.androidsdk
+                  ];
                 }
                 ''
                   set -euo pipefail
@@ -198,11 +201,21 @@
                   # A throwaway cache: it is where gradle downloads into, and it
                   # is deliberately not part of the output.
                   export GRADLE_USER_HOME=$TMPDIR/gradle-home
+                  # A real assemble forces every lazy resolution (navigation
+                  # resources pull com.google.android.material at execution
+                  # time; :app:dependencies only renders the trees). The rust
+                  # task is excluded: it would call back into cargo, and the
+                  # .so it produces is a local file, not a fetched artifact.
+                  export ANDROID_HOME="${androidHome}"
+                  export NDK_HOME="${ndkHome}"
+                  # Same aapt2 override as the real build: AGP would otherwise
+                  # use the unpatched maven aapt2.
+                  export GRADLE_OPTS="-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidHome}/build-tools/37.0.0/aapt2 -Dorg.gradle.daemon=false"
                   ./gradlew --no-daemon \
                     -PabiList=${lib.concatStringsSep "," androidAbis} \
                     -ParchList=${lib.concatStringsSep "," androidArchs} \
                     -PtargetList=${lib.concatStringsSep "," androidTargets} \
-                    :app:dependencies
+                    :app:assembleUniversalDebug -x rustBuildUniversalDebug
 
                   # The gradle distribution the wrapper script needs. Extracted
                   # from the distribution zip, so it is byte-reproducible.
