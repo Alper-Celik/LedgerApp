@@ -279,6 +279,14 @@
                 chmod -R u+w "$npm_config_cache"
                 npm ci --offline --ignore-scripts
 
+                # npm ci --ignore-scripts leaves the JS entry points with
+                # `#!/usr/bin/env node` shebangs, and the sandbox has no
+                # /usr/bin/env — point them at the node from PATH. The two files
+                # are everything the android build execs: the tauri CLI shim and
+                # vite (its beforeBuildCommand runs `npm run build`).
+                patchShebangs node_modules/@tauri-apps/cli/tauri.js \
+                  node_modules/vite/bin/vite.js
+
                 runHook postConfigure
               '';
 
