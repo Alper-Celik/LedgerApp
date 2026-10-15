@@ -97,6 +97,25 @@ jobs:
             rustledger_envelope.wasm rustledger_envelope.wasm.sha256 \
             --clobber
 
+  # The APK derivation runs on the x86_64 runner: the Android SDK/NDK exist
+  # only as x86_64-linux binaries. Debug APK — installable without signing
+  # keys; the artifact is what a phone sideloads.
+  android:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: nix build
+        run: nix build .#ledgerapp-android
+      - name: The artifact is an APK
+        run: find -L result -name '*.apk' | grep .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ledger-app-android-apk
+          path: result/
+          if-no-files-found: error
+
   reuse:
     if: github.event_name != 'release'
     runs-on: ubuntu-latest
