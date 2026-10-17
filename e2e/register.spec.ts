@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, test } from "@playwright/test";
-import { addedEntry, editArgument, invokes, stubIpc, suggestedFor } from "./stub";
+import { addedAccount, addedEntry, argsOf, editArgument, invokes, stubIpc, suggestedFor } from "./stub";
 
 test.beforeEach(async ({ page }) => {
 	await stubIpc(page);
@@ -132,6 +132,69 @@ test("an empty register still takes a new entry", async ({ page }) => {
 	await page.getByRole("button", { name: "New transaction" }).click();
 	await expect(page.getByLabel("Narration")).toBeVisible();
 	await expect(page.getByLabel("Posting 1 amount")).toBeVisible();
+});
+
+test("the file tab lists the journal's files, and opens one as entries and as text", async ({ page }) => {
+	await page.goto("/account/Assets:Bank");
+	await page.getByRole("radio", { name: "Files" }).click();
+
+	// The explorer: every file the journal holds, with what it carries and
+	// whether it is committed — main.bean writes nothing, 2026.bean two entries
+	// and is uncommitted.
+	await expect(page.getByRole("row", { name: /main\.bean/ }).getByRole("cell").nth(2)).toHaveText("0");
+	const entries = page.getByRole("row", { name: /2026\.bean/ });
+	await expect(entries.getByRole("cell").nth(2)).toHaveText("2");
+	await expect(entries.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
+
+	// Opening one shows its transactions, through the register's own view: the
+	// rows are asked for the file, and the entry is the register's.
+	await page.getByRole("button", { name: "2026.bean" }).click();
+	await expect.poll(async () => (await invokes(page)).length).toBeGreaterThan(0);
+	await expect.poll(async () => argsOf(await invokes(page), "file_transactions")?.file).toBe(
+		"/books/2026.bean"
+	);
+	await expect(page.getByRole("row", { name: /Fees and top-up/ })).toBeVisible();
+	// Every leg, not just the header row: a file is read, so it has no current
+	// entry to hide the other accounts behind.
+	await expect(page.getByRole("cell", { name: "Expenses:Fees", exact: true })).toBeVisible();
+	await expect(page.getByRole("cell", { name: "Assets:Bank:Emergency", exact: true })).toBeVisible();
+
+	// The text mode reads the file itself, and saving hands it back to the same
+	// one-file pipeline — the text in the payload is the file's, which only the
+	// backend ever held.
+	await page.getByRole("radio", { name: "Text" }).click();
+	await page.getByRole("button", { name: "Save" }).click();
+	await expect.poll(async () => argsOf(await invokes(page), "update_file_text")?.file).toBe(
+		"/books/2026.bean"
+	);
+	const saved = argsOf(await invokes(page), "update_file_text");
+	expect(saved?.text).toContain("weekly groceries");
+});
+
+test("an account is opened from the sidebar, in the file its family lives in", async ({ page }) => {
+	await page.goto("/account/Assets:Bank");
+	await page.getByRole("button", { name: "Add account" }).click();
+
+	// The form is inline in the tree, on today's date, and the file follows the
+	// name as it is typed.
+	await expect(page.getByLabel("Opened on")).not.toHaveValue("");
+	await page.getByLabel("Account name").fill("Expenses:Coffee");
+	await expect
+		.poll(async () => argsOf(await invokes(page), "suggest_account_file")?.name)
+		.toBe("Expenses:Coffee");
+	await expect(page.getByRole("combobox", { name: "File" })).toHaveValue("/books/2026.bean");
+
+	await page.getByLabel("Commodities").fill("USD, EUR");
+	await page.getByRole("button", { name: "Open account" }).click();
+
+	await expect.poll(async () => addedAccount(await invokes(page))).toMatchObject({
+		file: "/books/2026.bean",
+		name: "Expenses:Coffee",
+		currencies: ["USD", "EUR"],
+	});
+	// The form is gone, and the tree it was opened from is still standing.
+	await expect(page.getByLabel("Account name")).toHaveCount(0);
+	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
 });
 
 test("the diff and commit views use the backend's diff, and commit the message", async ({ page }) => {

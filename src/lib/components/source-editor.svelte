@@ -22,14 +22,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/**
 	 * The ledger's text in a Monaco editor — the second way to edit beside the
-	 * register's in-place cells. `scope` picks how much of it:
+	 * register's in-place cells. Which text it is comes from the two props, one
+	 * of which is given:
 	 *
-	 * - `entry` shows the transaction's own lines; saving hands them to
-	 *   `update_transaction_source`, which splices them over the entry's byte
-	 *   range in the `.bean` file.
-	 * - `file` shows the whole `.bean` the entry lives in and opens on the
-	 *   entry (revealed and selected, so Tab fields acts on it); saving hands
-	 *   the whole text to `update_file_source`.
+	 * - `id`, with `scope: "entry"`, shows the transaction's own lines; saving
+	 *   hands them to `update_transaction_source`, which splices them over the
+	 *   entry's byte range in the `.bean` file.
+	 * - `id`, with `scope: "file"`, shows the whole `.bean` the entry lives in and
+	 *   opens on the entry (revealed and selected, so Tab fields acts on it);
+	 *   saving hands the whole text to `update_file_source`.
+	 * - `file` shows that journal file entire, with no entry to put tab stops on
+	 *   — what the file explorer's text mode asks for; saving hands the text to
+	 *   `update_file_text`.
 	 *
 	 * Either way the result goes through the same reload-and-stage pipeline as a
 	 * cell edit: the loader is still the authority on whether the text is a
@@ -41,15 +45,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * the snippet writes them back unchanged.
 	 */
 	let {
-		id,
-		scope,
-		onSaved,
-		onCancel,
+		id = undefined,
+		file = undefined,
+		scope = "entry",
+		onSaved = undefined,
+		onCancel = undefined,
 	}: {
-		id: number;
-		scope: EditorScope;
-		onSaved: () => void;
-		onCancel: () => void;
+		/** The transaction to edit, when the editor is opened from an entry. */
+		id?: number;
+		/** The journal file to edit entire, when it is opened by path instead. */
+		file?: string;
+		scope?: EditorScope;
+		onSaved?: () => void;
+		onCancel?: () => void;
 	} = $props();
 
 	/** Where Monaco mounts. */
@@ -197,9 +205,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			// `entry` reads the transaction's own lines, `file` the whole `.bean`
 			// it lives in; both are the file's characters, a different span of
 			// them, and `file` also carries where the entry sits in that span.
+			// A path instead of an id is a whole file and nothing else in it.
 			let text: string;
 			let entry: IRange | null = null;
-			if (scope === "file") {
+			if (file !== undefined) {
+				const result = await commands.fileText(file);
+				if (disposed) return;
+				if (result.status === "error") {
+					error = result.error;
+					return;
+				}
+				text = result.data;
+			} else if (id === undefined) {
+				error = "no file to edit";
+				return;
+			} else if (scope === "file") {
 				const result = await commands.transactionFile(id);
 				if (disposed) return;
 				if (result.status === "error") {
@@ -256,7 +276,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				editor.revealRangeInCenter(entry);
 				editor.setSelection(entry);
 				editor.focus();
-			} else {
+			} else if (id !== undefined) {
 				// Opening on the entry's first field is the snippet the owner
 				// asked for; the text is already the one from the file, so
 				// nothing moves.
@@ -282,10 +302,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		saving = true;
 		error = "";
 		try {
+			const text = editor.getValue();
 			const result =
-				scope === "file"
-					? await commands.updateFileSource(id, editor.getValue())
-					: await commands.updateTransactionSource(id, editor.getValue());
+				file !== undefined
+					? await commands.updateFileText(file, text)
+					: id === undefined
+						? { status: "error" as const, error: "no file to save" }
+						: scope === "file"
+							? await commands.updateFileSource(id, text)
+							: await commands.updateTransactionSource(id, text);
 			if (result.status === "error") {
 				error = result.error;
 				return;
@@ -301,7 +326,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			saving = false;
 		}
 		bumpLedgerRevision();
-		onSaved();
+		onSaved?.();
 	}
 </script>
 
@@ -316,15 +341,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		bind:this={host}
 		class={cn(
 			"border-border overflow-hidden rounded-md border font-mono",
-			scope === "file" ? "editor-pane-tall" : "editor-pane"
+			scope === "file" || file !== undefined ? "editor-pane-tall" : "editor-pane"
 		)}
 	></div>
 	<div class="flex flex-wrap items-center gap-2">
 		<Button size="sm" onclick={save} disabled={saving || !ready}>Save</Button>
-		<Button size="sm" variant="ghost" onclick={enterFields} disabled={!ready}>Tab fields</Button>
-		<Button size="sm" variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
+		{#if id !== undefined}
+			<Button size="sm" variant="ghost" onclick={enterFields} disabled={!ready}>Tab fields</Button>
+		{/if}
+		{#if onCancel}
+			<Button size="sm" variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
+		{/if}
 		<span class="text-muted-foreground text-xs">
-			{#if scope === "file"}
+			{#if file !== undefined}
+				The whole journal file. ⌘/Ctrl+S saves.
+			{:else if scope === "file"}
 				The whole journal file; the entry opens selected. Tab on an entry starts its fields,
 				Tab and Shift+Tab step through them, Esc leaves them. ⌘/Ctrl+S saves.
 			{:else}

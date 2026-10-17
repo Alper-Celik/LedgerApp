@@ -29,6 +29,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import SourceEditor from "$lib/components/source-editor.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { isSubAccountOf } from "$lib/accounts.js";
+	import { today } from "$lib/dates.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { signOf, sumDecimals } from "$lib/money.js";
@@ -107,7 +108,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * and the editor always a scope — so an empty value is ignored and the
 	 * stray click is a no-op.
 	 */
-	let mode = $derived(VIEWS.find((candidate) => candidate.id === view) ?? VIEWS[0]);
+	let mode = $derived(VIEWS.find((candidate) => candidate.id === style) ?? VIEWS[0]);
 
 	/** The register's *current transaction*, as GnuCash highlights it. */
 	let current = $state<number | null>(null);
@@ -199,7 +200,30 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		localStorage.setItem(VIEW_KEY, view);
 	});
 
-	let { account, transactions }: { account: string; transactions: TransactionView[] } = $props();
+	let {
+		account,
+		transactions,
+		fixedView = null,
+		newEntryFile = null,
+		expandAll = false,
+	}: {
+		account: string;
+		transactions: TransactionView[];
+		/** The style to render when it is not the reader's to choose — a file's own view. */
+		fixedView?: ViewId | null;
+		/** The file a new entry goes into when the view is one file's. */
+		newEntryFile?: string | null;
+		/**
+		 * Whether every entry shows all of its legs without being opened. A
+		 * register hides them behind the current entry because an account is
+		 * asked about one entry at a time; a file is read, so its legs are its
+		 * content.
+		 */
+		expandAll?: boolean;
+	} = $props();
+
+	/** What the table renders: the reader's style, or the one the view is fixed to. */
+	let style = $derived(fixedView ?? view);
 
 	/**
 	 * Composing an entry that is not in the ledger yet, inline: the draft's rows
@@ -257,13 +281,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** The narration field, focused as the draft opens: it is the one with no default. */
 	let narrationInput = $state<HTMLInputElement | null>(null);
 
-	/** Today, in the `YYYY-MM-DD` the ledger writes dates in. */
-	const today = () => {
-		const now = new Date();
-		const pad = (value: number) => String(value).padStart(2, "0");
-		return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-	};
-
 	/**
 	 * Ask the backend which file this entry belongs in, and ask again whenever the
 	 * accounts change: they are what say which neighbours the entry has. One ask
@@ -303,7 +320,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		compose.payee = "";
 		compose.narration = "";
 		compose.postings = [draftPosting(account), draftPosting("")];
-		chosen = null;
+		chosen = newEntryFile;
 		suggested = null;
 		composeError = "";
 		saving = false;
@@ -516,21 +533,28 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				<HugeiconsIcon icon={Add01Icon} strokeWidth={2} data-icon="inline-start" />
 				New transaction
 			</Button>
-			<ToggleGroup.Root
-				type="single"
-				value={view}
-				onValueChange={(next) => {
-					if (!next) return;
-					view = next as ViewId;
-					// The table remounts with the style; nothing is left to close.
-					closing = null;
-				}}
-				aria-label="Register style"
-			>
-				{#each VIEWS as option (option.id)}
-					<ToggleGroup.Item value={option.id}>{option.label}</ToggleGroup.Item>
-				{/each}
-			</ToggleGroup.Root>
+			{#if fixedView === null}
+				<!--
+					The style is the reader's choice, except in a view that has only
+					one sensible one — a file's, where the amount columns would have
+					no account to total.
+				-->
+				<ToggleGroup.Root
+					type="single"
+					value={view}
+					onValueChange={(next) => {
+						if (!next) return;
+						view = next as ViewId;
+						// The table remounts with the style; nothing is left to close.
+						closing = null;
+					}}
+					aria-label="Register style"
+				>
+					{#each VIEWS as option (option.id)}
+						<ToggleGroup.Item value={option.id}>{option.label}</ToggleGroup.Item>
+					{/each}
+				</ToggleGroup.Root>
+			{/if}
 		</div>
 	</div>
 
@@ -594,7 +618,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		</datalist>
 	{/if}
 
-	{#key view}
+	{#key style}
 		<!--
 			Fixed layout: widths come from the colgroup, never from content, so a
 			long description or an opened entry cannot shift the amount columns.
@@ -968,7 +992,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					>
 						<Table.Cell colspan={COLUMNS.length} class="p-0">
 							<div
-								class={cn("fold", current === tx.id && "fold-open")}
+								class={cn("fold", (expandAll || current === tx.id) && "fold-open")}
 								ontransitionend={() => {
 									if (closing === tx.id) closing = null;
 								}}

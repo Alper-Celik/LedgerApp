@@ -315,3 +315,21 @@ html.sidebar-resizing [data-slot="sidebar-container"] {
 @utility col-amount {
 	width: 7rem;
 }
+
+/* The file explorer's own table: the name is worth reading in full, the path is
+	the one that gives way, the count needs its digits and the mark its dot. */
+@utility col-file-name {
+	width: 12rem;
+}
+
+@utility col-file-path {
+	width: minmax(0, 1fr);
+}
+
+@utility col-file-count {
+	width: 6rem;
+}
+
+@utility col-file-mark {
+	width: 2.5rem;
+}

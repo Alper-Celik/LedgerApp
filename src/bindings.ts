@@ -84,6 +84,36 @@ export const commands = {
 	 */
 	addTransaction: (entry: NewTransaction) => typedError<null, string>(__TAURI_INVOKE("add_transaction", { entry })),
 	/**
+	 *  Every transaction one journal file writes, newest first, each carrying all of
+	 *  its postings — the file view's transaction mode. The rows are the register's
+	 *  own, ids included, so an entry opened from here edits and stages exactly as
+	 *  it does from an account page.
+	 */
+	fileTransactions: (file: string) => typedError<TransactionView[], string>(__TAURI_INVOKE("file_transactions", { file })),
+	/**
+	 *  A journal file's whole source text — the file view's text mode reads the file
+	 *  as it is on disk, from the copy this session holds.
+	 */
+	fileText: (file: string) => typedError<string, string>(__TAURI_INVOKE("file_text", { file })),
+	/**
+	 *  Replace a journal file's whole source text — the text mode's way out —
+	 *  through the same pipeline as every other edit: the loader is the authority on
+	 *  whether the text is a legal ledger, a refusal puts the file back
+	 *  byte-for-byte, and a success stages it for a later commit.
+	 */
+	updateFileText: (file: string, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_text", { file, text })),
+	/**
+	 *  Append an `open` directive to one of the journal's files — the new-account
+	 *  form's way in — through the same reload, refusal and staging pipeline as
+	 *  every other edit.
+	 */
+	addAccount: (account: NewAccount) => typedError<null, string>(__TAURI_INVOKE("add_account", { account })),
+	/**
+	 *  The journal file a new account should be opened in, given its name — the
+	 *  new-account form's default. `None` only when no ledger is loaded.
+	 */
+	suggestAccountFile: (name: string) => __TAURI_INVOKE<string | null>("suggest_account_file", { name }),
+	/**
 	 *  Unified diff of the ledger's files against HEAD, index and working tree
 	 *  together, for the diff view: git's own patch text under a `=== path ===`
 	 *  header per changed file.
@@ -121,7 +151,7 @@ export type AccountBalance = {
 /**
  *  One file of the loaded journal — the journal the session was opened with and
  *  every file it pulls in with `include`. These are the files a new transaction
- *  may be written into.
+ *  may be written into, and what the file explorer lists.
  */
 export type JournalFile = {
 	/**
@@ -135,6 +165,17 @@ export type JournalFile = {
 	 *  file lives under it, else the path as it stands.
 	 */
 	label: string,
+	/**
+	 *  How many transactions the file itself writes — every entry in it, the
+	 *  ones the register hides included, since this is a fact about the file
+	 *  rather than about a view of the ledger.
+	 */
+	transactions: number,
+	/**
+	 *  Whether any of the file's own lines are uncommitted, the same measure
+	 *  [`TransactionView::modified`] takes from an entry.
+	 */
+	modified: boolean,
 };
 
 /**  Summary of a successful ledger load. */
@@ -148,6 +189,21 @@ export type LoadSummary = {
 	 *  loaded and usable.
 	 */
 	error_count: number,
+};
+
+/**
+ *  An account the ledger does not have yet, as the new-account form fills it
+ *  out. What it becomes is one `open` directive.
+ */
+export type NewAccount = {
+	/**  Path of the journal file to append to, as [`journal_files`] reported it. */
+	file: string,
+	/**  The account's full name, e.g. `Expenses:Coffee`. */
+	name: string,
+	/**  The day it is opened, `YYYY-MM-DD`. */
+	date: string,
+	/**  The commodities it may hold. Empty is beancount's "any of them". */
+	currencies: string[],
 };
 
 /**  One posting of a new transaction: the account, and what it is worth. */
