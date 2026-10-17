@@ -5,9 +5,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
-	import { BracesIcon, ChevronRightIcon, PencilEdit01Icon } from "@hugeicons/core-free-icons";
+	import {
+		Add01Icon,
+		BracesIcon,
+		ChevronRightIcon,
+		Delete02Icon,
+		PencilEdit01Icon,
+	} from "@hugeicons/core-free-icons";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
-	import { commands, type PostingView, type TransactionView } from "../../bindings";
+	import {
+		commands,
+		type JournalFile,
+		type PostingView,
+		type TransactionView,
+	} from "../../bindings";
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Badge } from "$lib/components/ui/badge/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -190,6 +201,187 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	let { account, transactions }: { account: string; transactions: TransactionView[] } = $props();
 
+	/**
+	 * Composing an entry that is not in the ledger yet, inline: the draft's rows
+	 * sit at the top of the register — where a date-sorted register puts today's
+	 * entry — and *are* the form. The date and the description occupy the cells
+	 * the register reads them from, each posting gets a row of its own, and Enter
+	 * saves while Escape leaves, the keys the in-place editor already answers to.
+	 */
+	let composing = $state(false);
+	let saving = $state(false);
+	/** The loader's or the backend's complaint about the draft, shown under it. */
+	let composeError = $state("");
+
+	/** One posting row of the draft: the account, and what it is worth. */
+	type DraftPosting = { id: number; account: string; units: string; currency: string };
+	/** Hands out the draft rows' ids; only ever grows, so a removed row's id is never reused. */
+	let draftRows = 0;
+	const draftPosting = (name: string): DraftPosting => ({
+		id: draftRows++,
+		account: name,
+		units: "",
+		currency: "",
+	});
+
+	let compose = $state({
+		date: "",
+		flag: "*",
+		payee: "",
+		narration: "",
+		postings: [] as DraftPosting[],
+	});
+
+	/** The flags an entry can carry: cleared, or flagged for review. */
+	const FLAGS = [
+		{ flag: "*", label: "Cleared" },
+		{ flag: "!", label: "Flagged" },
+	] as const;
+
+	/** The journal's files and the ledger's accounts, listed when composing starts. */
+	let files = $state<JournalFile[]>([]);
+	let known = $state<string[]>([]);
+	/** A file picked by hand; the deduction keeps its hands off while this is set. */
+	let chosen = $state<string | null>(null);
+	/** What the backend deduced, and the accounts it deduced it from. */
+	let suggested = $state<{ path: string; from: string[] } | null>(null);
+
+	/** The file the draft will be written into. */
+	let file = $derived(chosen ?? suggested?.path ?? files[0]?.path ?? "");
+
+	/** The accounts the draft mentions, which is what the deduction reads. */
+	let mentioned = $derived(
+		compose.postings.map((row) => row.account.trim()).filter((name) => name !== "")
+	);
+
+	/** The narration field, focused as the draft opens: it is the one with no default. */
+	let narrationInput = $state<HTMLInputElement | null>(null);
+
+	/** Today, in the `YYYY-MM-DD` the ledger writes dates in. */
+	const today = () => {
+		const now = new Date();
+		const pad = (value: number) => String(value).padStart(2, "0");
+		return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+	};
+
+	/**
+	 * Ask the backend which file this entry belongs in, and ask again whenever the
+	 * accounts change: they are what say which neighbours the entry has. One ask
+	 * per pause in the typing, and the cleanup drops the ask it replaced, so a
+	 * slower earlier answer cannot land over a newer one.
+	 */
+	$effect(() => {
+		if (!composing) return;
+		const accounts = mentioned;
+		let live = true;
+		const timer = setTimeout(async () => {
+			const path = await commands.suggestTransactionFile(accounts);
+			if (live) suggested = path ? { path, from: accounts } : null;
+		}, 150);
+		return () => {
+			live = false;
+			clearTimeout(timer);
+		};
+	});
+
+	/** Focus the narration as the draft appears, so typing can start straight away. */
+	$effect(() => {
+		if (composing) narrationInput?.focus();
+	});
+
+	/**
+	 * Open a draft: today, cleared, and — on an account page — that account on the
+	 * first posting. The files and the account names are fetched per draft, since
+	 * an edit elsewhere may have added either. The other two editors close: one
+	 * entry is being written at a time.
+	 */
+	function startCompose() {
+		cancelEdit();
+		sourceEditing = null;
+		compose.date = today();
+		compose.flag = "*";
+		compose.payee = "";
+		compose.narration = "";
+		compose.postings = [draftPosting(account), draftPosting("")];
+		chosen = null;
+		suggested = null;
+		composeError = "";
+		saving = false;
+		composing = true;
+		void loadDraftLists();
+	}
+
+	async function loadDraftLists() {
+		try {
+			files = await commands.journalFiles();
+			known = (await commands.accounts()).map((balance) => balance.name);
+		} catch (cause) {
+			// A backend that cannot answer — no ledger loaded, an IPC rejection —
+			// leaves the draft standing with nowhere to write to, and says why.
+			composeError = cause instanceof Error ? cause.message : String(cause);
+		}
+	}
+
+	function cancelCompose() {
+		composing = false;
+		composeError = "";
+	}
+
+	/**
+	 * Write the draft through the same pipeline as every other edit: the loader
+	 * decides whether the entry is legal, a refusal leaves the file byte-for-byte
+	 * as it was and its complaint is shown under the draft, and a success stages
+	 * the file and brings the register back in step.
+	 *
+	 * The rows the user left untouched are dropped rather than sent as empty
+	 * postings, and a blank commodity is sent as nothing at all: the backend
+	 * writes the ledger's own operating currency for it.
+	 */
+	async function saveCompose() {
+		if (saving || !composing) return;
+		saving = true;
+		composeError = "";
+		try {
+			const result = await commands.addTransaction({
+				file,
+				date: compose.date.trim(),
+				flag: compose.flag,
+				payee: compose.payee.trim() === "" ? null : compose.payee.trim(),
+				narration: compose.narration.trim(),
+				postings: compose.postings
+					.filter((row) => row.account.trim() !== "")
+					.map((row) => ({
+						account: row.account.trim(),
+						units: row.units.trim() === "" ? null : row.units.trim(),
+						currency: row.currency.trim() === "" ? null : row.currency.trim(),
+					})),
+			});
+			if (result.status === "error") {
+				composeError = result.error;
+				return;
+			}
+		} catch (cause) {
+			composeError = cause instanceof Error ? cause.message : String(cause);
+			return;
+		} finally {
+			saving = false;
+		}
+		composing = false;
+		bumpLedgerRevision();
+		await invalidateAll();
+	}
+
+	/** The keys both of the draft's rows answer to. */
+	function onDraftKeydown(event: KeyboardEvent) {
+		if (event.key === "Enter") {
+			event.preventDefault();
+			void saveCompose();
+		} else if (event.key === "Escape") {
+			event.preventDefault();
+			cancelCompose();
+		}
+	}
+
 	let hiddenCount = (tx: TransactionView) =>
 		tx.postings.filter((posting) => !isSubAccountOf(posting.account, account)).length;
 
@@ -314,22 +506,93 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				{/each}
 			</ToggleGroup.Root>
 		</div>
-		<ToggleGroup.Root
-			type="single"
-			value={view}
-			onValueChange={(next) => {
-				if (!next) return;
-				view = next as ViewId;
-				// The table remounts with the style; nothing is left to close.
-				closing = null;
-			}}
-			aria-label="Register style"
-		>
-			{#each VIEWS as option (option.id)}
-				<ToggleGroup.Item value={option.id}>{option.label}</ToggleGroup.Item>
-			{/each}
-		</ToggleGroup.Root>
+		<div class="flex flex-wrap items-center gap-2">
+			<!--
+				The one thing a register adds: an entry it does not hold yet. It is
+				composed in the register itself (see the draft rows below), so the
+				button only opens one.
+			-->
+			<Button size="sm" variant="outline" onclick={startCompose} disabled={composing}>
+				<HugeiconsIcon icon={Add01Icon} strokeWidth={2} data-icon="inline-start" />
+				New transaction
+			</Button>
+			<ToggleGroup.Root
+				type="single"
+				value={view}
+				onValueChange={(next) => {
+					if (!next) return;
+					view = next as ViewId;
+					// The table remounts with the style; nothing is left to close.
+					closing = null;
+				}}
+				aria-label="Register style"
+			>
+				{#each VIEWS as option (option.id)}
+					<ToggleGroup.Item value={option.id}>{option.label}</ToggleGroup.Item>
+				{/each}
+			</ToggleGroup.Root>
+		</div>
 	</div>
+
+	{#if composing}
+		<!--
+			What the draft needs that no cell of the register has room for: the file
+			it will be written into (the form is told which one, then may change it)
+			and the ways out. A property of the whole entry, so it sits above the
+			table rather than in a row of it.
+		-->
+		<div class="flex flex-wrap items-center gap-2">
+			<label class="text-muted-foreground text-xs" for="new-transaction-file">File</label>
+			<select
+				id="new-transaction-file"
+				class="border-input bg-input/20 dark:bg-input/30 h-7 rounded-md border px-2 text-xs outline-none"
+				value={file}
+				onchange={(event) => (chosen = event.currentTarget.value)}
+			>
+				{#each files as option (option.path)}
+					<option value={option.path} title={option.path}>{option.label}</option>
+				{/each}
+			</select>
+			<ToggleGroup.Root
+				type="single"
+				value={compose.flag}
+				onValueChange={(next) => next && (compose.flag = next)}
+				aria-label="Flag"
+			>
+				{#each FLAGS as option (option.flag)}
+					<ToggleGroup.Item value={option.flag} title={option.label}>
+						<!-- The character is what the file will carry; the word is what it means. -->
+						<span aria-hidden="true">{option.flag}</span>
+						<span class="sr-only">{option.label}</span>
+					</ToggleGroup.Item>
+				{/each}
+			</ToggleGroup.Root>
+			<span class="text-muted-foreground text-xs">
+				{#if files.length === 0}
+					No journal file is loaded, so there is nowhere to write an entry yet.
+				{:else if !chosen && suggested}
+					Suggested from the latest entry on {suggested.from.join(", ")}.
+				{:else}
+					The entry is appended to the end of this file.
+				{/if}
+			</span>
+			<div class="ml-auto flex items-center gap-1">
+				<Button size="sm" onclick={saveCompose} disabled={saving || file === ""}>
+					Add transaction
+				</Button>
+				<Button size="sm" variant="ghost" onclick={cancelCompose} disabled={saving}>Cancel</Button>
+			</div>
+		</div>
+		<!--
+			Completions for the draft's account fields, from the ledger itself: what
+			is open is what can be posted to.
+		-->
+		<datalist id="ledger-accounts">
+			{#each known as name (name)}
+				<option value={name}></option>
+			{/each}
+		</datalist>
+	{/if}
 
 	{#key view}
 		<!--
@@ -357,6 +620,111 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Table.Row>
 			</Table.Header>
 			<Table.Body>
+				{#if composing}
+					<!--
+						The draft's header row: the date and the description, in the
+						cells the register reads them from, with the button that adds
+						another posting row. Enter saves the draft, Escape leaves it.
+					-->
+					<Table.Row class="bg-accent/40" onkeydown={onDraftKeydown}>
+						<Table.Cell class="px-0.5 py-1">
+							<Button
+								size="icon-xs"
+								variant="ghost"
+								aria-label="Add posting"
+								onclick={() => compose.postings.push(draftPosting(""))}
+							>
+								<HugeiconsIcon icon={Add01Icon} strokeWidth={2} />
+							</Button>
+						</Table.Cell>
+						<Table.Cell class="border-s border-border px-1 py-1">
+							<!-- A text date, the field the register's own in-place editor uses: the
+								native picker cannot fit the date column. -->
+							<Input
+								class="h-6 px-1 tabular-nums"
+								placeholder="YYYY-MM-DD"
+								bind:value={compose.date}
+								aria-label="Date"
+							/>
+						</Table.Cell>
+						<Table.Cell class="border-s border-border py-1 pr-3 pl-2">
+							<span class="flex min-w-0 items-center gap-1">
+								<Input
+									class="h-6 min-w-0 flex-1 px-1"
+									placeholder="Payee"
+									bind:value={compose.payee}
+									aria-label="Payee"
+								/>
+								<span class="text-muted-foreground">—</span>
+								<Input
+									class="h-6 min-w-0 flex-2 px-1"
+									placeholder="Narration"
+									bind:value={compose.narration}
+									aria-label="Narration"
+									bind:ref={narrationInput}
+								/>
+							</span>
+						</Table.Cell>
+						<!-- The amounts are on the rows below this one; a header carries none. -->
+						<Table.Cell class="border-s border-border" colspan={2}></Table.Cell>
+					</Table.Row>
+					{#each compose.postings as leg, index (leg.id)}
+						<!--
+							One row per posting, the shape the register's own legs have:
+							the account in the transfer column, what it is worth in the
+							amount columns (figure, then commodity).
+						-->
+						<Table.Row onkeydown={onDraftKeydown}>
+							<Table.Cell class="px-0.5 py-1">
+								<Button
+									size="icon-xs"
+									variant="ghost"
+									aria-label={`Remove posting ${index + 1}`}
+									disabled={compose.postings.length <= 1}
+									onclick={() => compose.postings.splice(index, 1)}
+								>
+									<HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
+								</Button>
+							</Table.Cell>
+							<Table.Cell class="border-s border-border"></Table.Cell>
+							<Table.Cell class="border-s border-border"></Table.Cell>
+							<Table.Cell class="border-s-2 border-s-muted-foreground px-2 py-1">
+								<Input
+									class="h-6 px-1"
+									list="ledger-accounts"
+									placeholder="Account"
+									bind:value={leg.account}
+									aria-label={`Posting ${index + 1} account`}
+								/>
+							</Table.Cell>
+							<Table.Cell class="border-s border-border px-2 py-1" colspan={2}>
+								<span class="flex items-center justify-end gap-1">
+									<Input
+										class="h-6 w-28 px-1 text-right tabular-nums"
+										placeholder="-12.34"
+										bind:value={leg.units}
+										aria-label={`Posting ${index + 1} amount`}
+									/>
+									<Input
+										class="h-6 w-20 px-1"
+										placeholder="currency"
+										bind:value={leg.currency}
+										aria-label={`Posting ${index + 1} commodity`}
+									/>
+								</span>
+							</Table.Cell>
+						</Table.Row>
+					{/each}
+					{#if composeError}
+						<Table.Row>
+							<Table.Cell colspan={COLUMNS.length} class="py-1 pr-3 pl-2">
+								<Alert variant="destructive">
+									<AlertDescription>{composeError}</AlertDescription>
+								</Alert>
+							</Table.Cell>
+						</Table.Row>
+					{/if}
+				{/if}
 				{#each transactions as tx (tx.id)}
 					{@const flow = flows(tx)}
 					<!--

@@ -9,7 +9,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import AccountRegister from "$lib/components/account-register.svelte";
-	import NewTransaction from "$lib/components/new-transaction.svelte";
 	import { LEDGER_LABEL } from "$lib/accounts.js";
 	import { clearFilters, filters, matchesFilters } from "$lib/filters.svelte.js";
 
@@ -34,10 +33,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				? ""
 				: ` of ${transactions.length}`} transactions
 		</span>
-		<!-- The one thing a register adds: an entry it does not hold yet. -->
-		<div class="ms-auto">
-			<NewTransaction {account} />
-		</div>
 	</div>
 
 	<div class="flex flex-wrap items-center gap-2">
@@ -60,13 +55,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	{#if error}
 		<Alert variant="destructive">{error}</Alert>
-	{:else if visible.length === 0}
-		<p class="text-muted-foreground text-sm">
-			{transactions.length === 0
-				? `No transactions${account ? " touch this account" : ""}.`
-				: "No transactions match the filter."}
-		</p>
 	{:else}
+		{#if visible.length === 0}
+			<!--
+				Only the message changes: the register itself stays, since that is
+				where an entry is added, and an account with nothing in it yet is
+				exactly where one is most likely to be.
+			-->
+			<p class="text-muted-foreground text-sm">
+				{transactions.length === 0
+					? `No transactions${account ? " touch this account" : ""}.`
+					: "No transactions match the filter."}
+			</p>
+		{/if}
 		<AccountRegister {account} transactions={visible} />
 	{/if}
 </div>

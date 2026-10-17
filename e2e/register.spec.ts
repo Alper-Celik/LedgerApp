@@ -76,18 +76,19 @@ test("editing a cell in place sends exact decimal strings, never floats", async 
 	expect(JSON.stringify(edit)).not.toMatch(/\d+\.\d{3,}/);
 });
 
-test("a new transaction is composed, filed where the backend suggests, and sent", async ({ page }) => {
+test("a new transaction is composed inline, filed where the backend suggests, and sent", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
 	await page.getByRole("button", { name: "New transaction" }).click();
 
-	// The form opens on an entry that is not in the ledger yet: the register's
-	// own account on the first posting, the date, and the file the backend
-	// deduced from the accounts — asked about those accounts and no others.
+	// The draft is a row of the register itself — no dialog — holding an entry
+	// that is not in the ledger yet: the register's own account on the first
+	// posting, and the file the backend deduced from the accounts, asked about
+	// those accounts and no others.
 	await expect(page.getByLabel("Posting 1 account")).toHaveValue("Assets:Bank");
 	await expect
 		.poll(async () => suggestedFor(await invokes(page)))
 		.toEqual(["Assets:Bank"]);
-	await expect(page.getByRole("radio", { name: "2026.bean" })).toBeChecked();
+	await expect(page.getByRole("combobox", { name: "File" })).toHaveValue("/books/2026.bean");
 
 	await page.getByLabel("Narration").fill("Coffee");
 	await page.getByLabel("Posting 1 amount").fill("-3.50");
@@ -98,10 +99,10 @@ test("a new transaction is composed, filed where the backend suggests, and sent"
 		.poll(async () => suggestedFor(await invokes(page)))
 		.toEqual(["Assets:Bank", "Expenses:Food"]);
 
-	// Picking a file by hand beats the suggestion, and is what gets written to.
-	await page.getByRole("radio", { name: "main.bean" }).click();
-	await expect(page.getByRole("radio", { name: "main.bean" })).toBeChecked();
-	await page.getByRole("button", { name: "Add transaction" }).click();
+	// A file picked by hand beats the suggestion, and is what gets written to.
+	await page.getByRole("combobox", { name: "File" }).selectOption("/books/main.bean");
+	// Enter is the register's own commit key, and the draft answers to it too.
+	await page.getByLabel("Narration").press("Enter");
 
 	await expect.poll(async () => addedEntry(await invokes(page))).toMatchObject({
 		file: "/books/main.bean",
@@ -115,9 +116,22 @@ test("a new transaction is composed, filed where the backend suggests, and sent"
 			{ account: "Expenses:Food", units: "3.50", currency: null },
 		],
 	});
-	// A write that went through closes the form and leaves the register standing.
-	await expect(page.getByRole("dialog")).toBeHidden();
+	// The draft is gone with the entry written, and the register still stands.
+	await expect(page.getByLabel("Narration")).toHaveCount(0);
+	await expect(page.getByRole("button", { name: "Add transaction" })).toHaveCount(0);
 	await expect(page.getByRole("heading", { name: "Assets:Bank" })).toBeVisible();
+});
+
+test("an empty register still takes a new entry", async ({ page }) => {
+	await page.goto("/account/Assets:Bank");
+	// A filter that matches nothing hides every row, but the register — and with
+	// it the draft — has to stay: an empty account is where an entry is most
+	// likely to be added.
+	await page.getByLabel("Search transactions").fill("nothing matches this");
+	await expect(page.getByText("No transactions match the filter.")).toBeVisible();
+	await page.getByRole("button", { name: "New transaction" }).click();
+	await expect(page.getByLabel("Narration")).toBeVisible();
+	await expect(page.getByLabel("Posting 1 amount")).toBeVisible();
 });
 
 test("the diff and commit views use the backend's diff, and commit the message", async ({ page }) => {
