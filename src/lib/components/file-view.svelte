@@ -9,7 +9,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import AccountRegister from "$lib/components/account-register.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
-	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
+	import GitStatus from "$lib/components/git-status.svelte";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 
 	/** How the open file is shown: its transactions, or its text. */
@@ -80,7 +80,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<div class="flex flex-wrap items-center gap-2">
 		<h1 class="truncate text-lg font-semibold tracking-tight">{file?.label ?? path}</h1>
 		<span class="text-muted-foreground truncate text-xs" title={path}>{path}</span>
-		<UncommittedMark modified={file?.modified ?? false} />
+		<GitStatus change={file?.change ?? "unchanged"} />
 		<span class="text-muted-foreground text-xs">
 			{entries.length}{entries.length === 1 ? " transaction" : " transactions"}
 		</span>

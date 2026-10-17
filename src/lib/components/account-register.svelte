@@ -27,8 +27,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as Table from "$lib/components/ui/table/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
+	import GitStatus from "$lib/components/git-status.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
-	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { today } from "$lib/dates.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
@@ -775,15 +775,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									)}
 					<!--
 						Three states, three semantic tints: this entry is the current
-						one (`accent`), or it holds changes not yet committed (the
-						diff's green), or it is a plain entry of the register. The
-						first cell carries the matching left marker, so an entry's
-						state never has to be read from a tint alone.
+						one (`accent`), or it stands in git — green when the entry is
+						new, amber when it was rewritten — or it is a plain entry of
+						the register. The first cell carries the matching left marker,
+						so an entry's state never has to be read from a tint alone.
 					-->
 					<Table.Row
 						class={cn(
 							"transition-motion",
-							tx.modified ? "bg-added/10" : current === tx.id ? "bg-accent" : "",
+							tx.change === "added"
+								? "bg-added/10"
+								: tx.change === "modified"
+									? "bg-amber-500/10"
+									: current === tx.id
+										? "bg-accent"
+										: "",
 							editing === tx.id && "ring-1 ring-inset ring-ring"
 						)}
 						onclick={() => select(tx)}
@@ -803,9 +809,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						<Table.Cell
 							class={cn(
 								"px-0.5 py-1",
-								tx.modified
+								tx.change === "added"
 									? "border-s-2 border-s-added"
-									: current === tx.id && "border-s-2 border-s-primary"
+									: tx.change === "modified"
+										? "border-s-2 border-s-amber-600 dark:border-s-amber-400"
+										: current === tx.id && "border-s-2 border-s-primary"
 							)}
 						>
 							<!--
@@ -885,16 +893,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						</Table.Cell>
 						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
 							<!--
-								The uncommitted state, said in the sidebar's own
-								words: one dot in the diff's green, named for the
-								entry so it is not silent. It rides in the
-								description cell — the column that absorbs the
-								slack — because the actions column is already
-								full: an expander, a pencil and the braces fill
-								it to the pixel, and a fourth child would spill
-								over its border.
+								The entry's own standing in git, the way a git
+								client writes it beside a file: one letter, named
+								for the reader it is not coloured enough to be
+								silent about. It rides in the description cell —
+								the column that absorbs the slack — because the
+								actions column is already full: an expander, a
+								pencil and the braces fill it to the pixel, and a
+								fourth child would spill over its border.
 							-->
-							<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
+							<GitStatus change={tx.change} class="me-1.5 align-middle" />
 							{#if editing === tx.id && draft}
 								<span class="flex min-w-0 items-center gap-1">
 									<Input

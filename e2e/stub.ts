@@ -4,6 +4,7 @@
 import type { Page } from "@playwright/test";
 import type {
 	AccountBalance,
+	BudgetMonth,
 	JournalFile,
 	NewAccount,
 	NewTransaction,
@@ -30,10 +31,10 @@ declare global {
 }
 
 export const accounts: AccountBalance[] = [
-	{ name: "Assets", balance: "60386.05", currency: "TRY", modified: true },
-	{ name: "Assets:Bank", balance: "1500.00", currency: "USD", modified: true },
-	{ name: "Assets:Bank:Checking", balance: "-123.45", currency: "TRY", modified: true },
-	{ name: "Liabilities:KYK", balance: "-45000.00", currency: "TRY", modified: false },
+	{ name: "Assets", balance: "60386.05", currency: "TRY", change: "modified" },
+	{ name: "Assets:Bank", balance: "1500.00", currency: "USD", change: "modified" },
+	{ name: "Assets:Bank:Checking", balance: "-123.45", currency: "TRY", change: "modified" },
+	{ name: "Liabilities:KYK", balance: "-45000.00", currency: "TRY", change: "unchanged" },
 ];
 
 export const transactions: TransactionView[] = [
@@ -43,7 +44,7 @@ export const transactions: TransactionView[] = [
 		flag: "*",
 		payee: null,
 		narration: "Fees and top-up",
-		modified: true,
+		change: "modified",
 		postings: [
 			{ account: "Assets:Bank:Checking", units: "-100.00", currency: "TRY" },
 			{ account: "Assets:Bank:Emergency", units: "40.00", currency: "TRY" },
@@ -56,10 +57,22 @@ export const transactions: TransactionView[] = [
 		flag: "*",
 		payee: "Migros",
 		narration: "weekly groceries",
-		modified: false,
+		change: "unchanged",
 		postings: [
 			{ account: "Assets:Bank:Checking", units: "-123.45", currency: "TRY" },
 			{ account: "Expenses:Food:Groceries", units: "123.45", currency: "TRY" },
+		],
+	},
+	{
+		id: 1,
+		date: "2026-01-05",
+		flag: "*",
+		payee: "Employer",
+		narration: "Salary",
+		change: "added",
+		postings: [
+			{ account: "Assets:Bank:Checking", units: "2500.00", currency: "TRY" },
+			{ account: "Income:Salary", units: "-2500.00", currency: "TRY" },
 		],
 	},
 ];
@@ -69,14 +82,66 @@ export const source = `2026-01-10 * "Migros" "weekly groceries"
   Expenses:Food:Groceries  123.45 TRY
 `;
 
-/** The journal's files, as the backend lists them: root journal first. */
+/**
+ * The journal's files, as the backend lists them: the root journal first, and a
+ * folder for what the paths have in common — the explorer's tree is built from
+ * these labels.
+ */
 export const files: JournalFile[] = [
-	{ path: "/books/main.bean", label: "main.bean", transactions: 0, modified: false },
-	{ path: "/books/2026.bean", label: "2026.bean", transactions: 2, modified: true },
+	{ path: "/books/main.bean", label: "main.bean", transactions: 0, change: "unchanged" },
+	{ path: "/books/2026/march.bean", label: "2026/march.bean", transactions: 2, change: "modified" },
+	{ path: "/books/2026/april.bean", label: "2026/april.bean", transactions: 1, change: "added" },
 ];
 
 /** The file the backend deduces for an entry on the fixture accounts. */
-export const suggestedFile = "/books/2026.bean";
+export const suggestedFile = "/books/2026/march.bean";
+
+/** One budget month, as the backend folds the envelope plugin's entries into it. */
+export const budget: BudgetMonth = {
+	month: "2026-03",
+	months: ["2026-02", "2026-03"],
+	groups: [
+		{
+			name: "Food",
+			budgeted: "300.00",
+			spent: "123.45",
+			balance: "176.55",
+			envelopes: [
+				{
+					name: "Groceries",
+					full_name: "Equity:Envelope:Food:Groceries",
+					budgeted: "200.00",
+					spent: "123.45",
+					balance: "76.55",
+				},
+				{
+					name: "Coffee",
+					full_name: "Equity:Envelope:Food:Coffee",
+					budgeted: "100.00",
+					spent: "0.00",
+					balance: "100.00",
+				},
+			],
+		},
+		{
+			name: "Bills",
+			budgeted: "50.00",
+			spent: "0.00",
+			balance: "50.00",
+			envelopes: [
+				{
+					name: "Rent",
+					full_name: "Equity:Envelope:Bills:Rent",
+					budgeted: "50.00",
+					spent: "0.00",
+					balance: "50.00",
+				},
+			],
+		},
+	],
+	to_budget: "1200.00",
+	currency: "TRY",
+};
 
 /** The file the fixture opens, as the file view's text mode reads it. */
 export const fileSource = `2026-01-10 * "Migros" "weekly groceries"
@@ -122,6 +187,8 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.transactions);
 						case "transaction_source":
 							return Promise.resolve(fixtures.source);
+						case "budget":
+							return Promise.resolve(fixtures.budget);
 						case "journal_files":
 							return Promise.resolve(fixtures.files);
 						case "suggest_transaction_file":
@@ -155,7 +222,7 @@ export async function stubIpc(page: Page) {
 			});
 			Object.defineProperty(window, "__invokes", { value: log, writable: false });
 		},
-		{ accounts, transactions, source, diff, files, suggestedFile, fileSource }
+		{ accounts, transactions, source, diff, files, suggestedFile, fileSource, budget }
 	);
 }
 

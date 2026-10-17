@@ -28,18 +28,24 @@ test("the register renders the fixture ledger and its three styles", async ({ pa
 	await expect(page.getByRole("cell", { name: "Expenses:Food:Groceries" }).first()).toBeVisible();
 });
 
-test("an uncommitted entry is marked, and only that one", async ({ page }) => {
+test("git letters mark what is new and what was rewritten, and nothing else", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
-	const markedRow = page.getByRole("row", { name: /Fees and top-up/ }).first();
-	const cleanRow = page.getByRole("row", { name: /Migros — weekly groceries/ }).first();
-	// "Marked" is the entry's own left marker; no colour is pinned here, so the
-	// theme can move without this test having to be re-pinned to it.
-	await expect(markedRow.getByRole("cell").first()).toHaveClass(/border-s-added/);
-	await expect(cleanRow.getByRole("cell").first()).not.toHaveClass(/border-s-added/);
-	// The marker proper: the dot the sidebar's account tree draws, one on the
-	// uncommitted entry and none on the clean one.
-	await expect(markedRow.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
-	await expect(cleanRow.locator('[data-slot="uncommitted-mark"]')).toHaveCount(0);
+	const rewritten = page.getByRole("row", { name: /Fees and top-up/ }).first();
+	const fresh = page.getByRole("row", { name: /Salary/ }).first();
+	const clean = page.getByRole("row", { name: /Migros — weekly groceries/ }).first();
+
+	// The letter a git client writes beside a file: M for an entry that was
+	// rewritten, A for one the last commit does not have, nothing for one that is
+	// as committed.
+	await expect(rewritten.locator('[data-slot="git-status"]')).toHaveText("M");
+	await expect(fresh.locator('[data-slot="git-status"]')).toHaveText("A");
+	await expect(clean.locator('[data-slot="git-status"]')).toHaveCount(0);
+
+	// The row's own left marker says the same thing, so the state is never read
+	// from a colour alone.
+	await expect(rewritten.getByRole("cell").first()).toHaveClass(/border-s-amber-600/);
+	await expect(fresh.getByRole("cell").first()).toHaveClass(/border-s-added/);
+	await expect(clean.getByRole("cell").first()).not.toHaveClass(/border-s-/);
 });
 
 test("editing a cell in place sends exact decimal strings, never floats", async ({ page }) => {
@@ -89,7 +95,7 @@ test("a new transaction is composed inline, filed where the backend suggests, an
 		.poll(async () => suggestedFor(await invokes(page)))
 		.toEqual(["Assets:Bank"]);
 	// The file is the standard select, showing the deduced one as its value.
-	await expect(page.getByLabel("File")).toContainText("2026.bean");
+	await expect(page.getByLabel("File")).toContainText("march.bean");
 
 	await page.getByLabel("Narration").fill("Coffee");
 	await page.getByLabel("Posting 1 amount").fill("-3.50");
@@ -137,22 +143,43 @@ test("an empty register still takes a new entry", async ({ page }) => {
 	await expect(page.getByLabel("Posting 1 amount")).toBeVisible();
 });
 
-test("the sidebar's file browser opens a file as entries and as text", async ({ page }) => {
+test("the sidebar's file explorer is a tree, and opens a file as entries and as text", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
 
-	// The browser is the sidebar's, beside the accounts: every file the journal
-	// holds, with what it carries and whether it is committed.
-	const link = page.getByRole("link", { name: /2026\.bean/ });
-	await expect(link).toContainText("2");
-	await expect(link.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
+	// The accounts and the files share the sidebar's list place, so they are a tab
+	// each.
+	await page.getByRole("radio", { name: "Files" }).click();
+
+	// What the paths have in common is a folder, and it carries the strongest
+	// change under it, so a folded folder still says something inside moved.
+	const folder = page.getByRole("button", { name: /^2026/ });
+	await expect(folder.locator('[data-slot="git-status"]')).toHaveText("M");
+	const march = page.getByRole("link", { name: /march\.bean/ });
+	await expect(march.locator('[data-slot="git-status"]')).toHaveText("M");
+	await expect(march).toContainText("2");
+	await expect(
+		page.getByRole("link", { name: /april\.bean/ }).locator('[data-slot="git-status"]')
+	).toHaveText("A");
+	// A file git has and nothing has touched carries no letter at all.
+	await expect(
+		page.getByRole("link", { name: /main\.bean/ }).locator('[data-slot="git-status"]')
+	).toHaveCount(0);
+
+	// The folder folds and unfolds, the way an explorer's does. The fold is a
+	// clipped grid track, so what is asserted is the control's own state.
+	const toggle = page.getByRole("button", { name: "Toggle 2026" });
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-expanded", "false");
+	await toggle.click();
+	await expect(toggle).toHaveAttribute("aria-expanded", "true");
 
 	// Opening one goes to its own page, which has already asked the backend for
 	// that file's entries.
-	await link.click();
-	await expect(page.getByRole("heading", { name: "2026.bean" })).toBeVisible();
+	await march.click();
+	await expect(page.getByRole("heading", { name: "2026/march.bean" })).toBeVisible();
 	await expect
 		.poll(async () => argsOf(await invokes(page), "file_transactions")?.file)
-		.toBe("/books/2026.bean");
+		.toBe("/books/2026/march.bean");
 
 	// The transactions view is the register's own, with every entry's legs
 	// showing: a file is read, so it has no current entry to hide them behind.
@@ -167,7 +194,7 @@ test("the sidebar's file browser opens a file as entries and as text", async ({ 
 	await page.getByRole("button", { name: "Save" }).click();
 	await expect
 		.poll(async () => argsOf(await invokes(page), "update_file_text")?.file)
-		.toBe("/books/2026.bean");
+		.toBe("/books/2026/march.bean");
 	expect(argsOf(await invokes(page), "update_file_text")?.text).toContain("weekly groceries");
 });
 
@@ -183,7 +210,7 @@ test("an account is opened from the sidebar, in the file its family lives in", a
 		.poll(async () => argsOf(await invokes(page), "suggest_account_file")?.name)
 		.toBe("Expenses:Coffee");
 	// The standard select shows the deduced file, and a picked one replaces it.
-	await expect(page.getByLabel("File")).toContainText("2026.bean");
+	await expect(page.getByLabel("File")).toContainText("march.bean");
 	await page.getByLabel("File").click();
 	await page.getByRole("option", { name: "main.bean" }).click();
 	await expect(page.getByLabel("File")).toContainText("main.bean");
@@ -215,10 +242,51 @@ test("the diff and commit views use the backend's diff, and commit the message",
 	await expect(page.getByText("committed abc1234")).toBeVisible();
 });
 
-test("the sidebar carries the git views and survives a failing backend", async ({ page }) => {
+test("the budget shows a month's envelopes, and steps through the plugin's months", async ({ page }) => {
+	await page.goto("/budget");
+	// The load asks for the newest month the ledger has.
+	await expect.poll(async () => (await invokes(page)).some((call) => call.cmd === "budget")).toBe(true);
+
+	// The month, the figures it comes down to, and a group with its own totals
+	// over one row per envelope, in the three columns Actual Budget uses.
+	await expect(page.getByText("March 2026").first()).toBeVisible();
+	await expect(page.getByText("To budget")).toBeVisible();
+	await expect(page.getByText("In envelopes")).toBeVisible();
+	await expect(page.getByRole("row", { name: /^Food/ })).toContainText("176.55");
+	await expect(page.getByRole("row", { name: /Groceries/ })).toContainText("200.00");
+	await expect(page.getByRole("row", { name: /Groceries/ })).toContainText("123.45");
+	await expect(page.getByRole("row", { name: /Groceries/ })).toContainText("76.55");
+
+	// The arrows step through the plugin's own months, one backend call each.
+	await page.getByRole("button", { name: "Previous month" }).click();
+	await expect.poll(async () => argsOf(await invokes(page), "budget")?.month).toBe("2026-02");
+});
+
+test("the dashboard registry lists its dashboards, and each one renders", async ({ page }) => {
+	await page.goto("/dashboards");
+	await expect(page.getByRole("link", { name: /Balances/ })).toBeVisible();
+	await expect(page.getByRole("link", { name: /Activity/ })).toBeVisible();
+
+	// A dashboard is data from the commands the app already has: the accounts,
+	// and the whole ledger's transactions.
+	await page.getByRole("link", { name: /Activity/ }).click();
+	await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+	await expect(page.getByRole("row", { name: /2026-01/ }).first()).toBeVisible();
+	await expect(page.getByText("Fees and top-up")).toBeVisible();
+
+	// An id the registry does not know reads as no such dashboard, not as a
+	// broken page.
+	await page.goto("/dashboards/nonsense");
+	await expect(page.getByText(/No dashboard/)).toBeVisible();
+	await expect(page.getByRole("link", { name: "All dashboards" })).toBeVisible();
+});
+
+test("the sidebar carries the views and survives a failing backend", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
 	// `exact` because the account rows' names now carry "Uncommitted", which
 	// contains "Commit" — the sidebar's own link is the one named exactly that.
+	await expect(page.getByRole("link", { name: "Budget", exact: true })).toBeVisible();
+	await expect(page.getByRole("link", { name: "Dashboards", exact: true })).toBeVisible();
 	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
 	await expect(page.getByRole("link", { name: "Commit", exact: true })).toBeVisible();
 

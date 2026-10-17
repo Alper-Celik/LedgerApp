@@ -121,6 +121,17 @@ export const commands = {
 	ledgerDiff: () => typedError<string, string>(__TAURI_INVOKE("ledger_diff")),
 	/**  Commit the ledger's staged changes; returns the new commit's short id. */
 	commitLedger: (message: string) => typedError<string, string>(__TAURI_INVOKE("commit_ledger", { message })),
+	/**
+	 *  One month of the ledger's envelope budget — the budget screen's data.
+	 * 
+	 *  `month` is a `YYYY-MM` label, or `None` for the newest month the plugin has
+	 *  budgeted, which is what the screen opens on. The figures are for that month,
+	 *  in the ledger's operating currency; see [`BudgetMonth`] for what each one
+	 *  means. Read-only on purpose: the plugin owns the allocations (its `fund`,
+	 *  `adjust`, `zero`, `pad` and `rollover` configuration) and rewrites them on
+	 *  every load, so an edit from here would fight the next run of it.
+	 */
+	budget: (month: string | null) => typedError<BudgetMonth, string>(__TAURI_INVOKE("budget", { month })),
 };
 
 /* Types */
@@ -141,12 +152,106 @@ export type AccountBalance = {
 	 */
 	currency: string,
 	/**
-	 *  True when at least one transaction in this account's subtree is
-	 *  uncommitted — the same flag [`TransactionView::modified`] carries, rolled
-	 *  up the account tree so the sidebar can mark a branch.
+	 *  How this account stands against the last commit: the strongest change in
+	 *  its own subtree, [`Change::Modified`] over [`Change::Added`], so a branch
+	 *  reads as changed when anything under it is. [`Change::Unchanged`] when
+	 *  the ledger is not in a git repository or nothing changed — the sidebar
+	 *  never fails over git.
 	 */
-	modified: boolean,
+	change: Change,
 };
+
+/**
+ *  One envelope of a budget month, as the plugin's own bookkeeping reports it.
+ * 
+ *  Every figure is an exact decimal string in [`BudgetMonth::currency`], the
+ *  app's convention: nothing is a float and nothing is rounded here.
+ */
+export type BudgetEnvelope = {
+	/**
+	 *  The envelope's label inside its group — the account's path below the
+	 *  group, e.g. `Bread` for `Equity:Envelope:Food:Bread` in group `Food`.
+	 */
+	name: string,
+	/**
+	 *  The account the plugin writes this envelope's postings to, which is what
+	 *  names it in the ledger.
+	 */
+	full_name: string,
+	/**
+	 *  What the month put into the envelope, net: inherited funding, one-off
+	 *  `adjust`/`zero`/`pad` deltas, and the rollover sweep's own correction,
+	 *  which takes money back out and so reads negative.
+	 */
+	budgeted: string,
+	/**
+	 *  What the month spent out of it, the plugin's mirrored activity, reported
+	 *  as a positive figure.
+	 */
+	spent: string,
+	/**
+	 *  What the envelope held at the month's end, every earlier month carried
+	 *  into it — the subtree total the plugin's own `balance` assertions check.
+	 */
+	balance: string,
+};
+
+/**
+ *  One top-level branch of the plugin's envelope tree — a group in the budget
+ *  screen's sense — and its totals over its envelopes.
+ */
+export type BudgetGroup = {
+	/**  The branch's own name, the first account component below the namespace. */
+	name: string,
+	/**  Its envelopes' figures summed, exact decimal strings like theirs. */
+	budgeted: string,
+	spent: string,
+	balance: string,
+	/**  The envelopes below it, in the ledger's tree order. */
+	envelopes: BudgetEnvelope[],
+};
+
+/**  One month of the ledger's envelope budget, as the budget screen reads it. */
+export type BudgetMonth = {
+	/**  The month the figures belong to, `YYYY-MM`. */
+	month: string,
+	/**  Every month the plugin budgeted, oldest first — the screen's navigation. */
+	months: string[],
+	/**  The month's groups, alphabetically. */
+	groups: BudgetGroup[],
+	/**
+	 *  `Equity:Envelope:To-Be-Budgeted` at the month's end: what the
+	 *  configuration has not assigned to an envelope, per the plugin's rule
+	 *  `To-Be-Budgeted = on-budget money − Σ categories`.
+	 */
+	to_budget: string,
+	/**  The commodity every figure is in: the ledger's operating currency. */
+	currency: string,
+};
+
+/**
+ *  How a file, an entry or an account stands against the ledger's last commit —
+ *  the one letter a git client would put beside it.
+ * 
+ *  The reference is HEAD's blob where git has one, and the text the session
+ *  started with otherwise (see [`Loaded::baseline`]): a ledger that is not
+ *  committed yet is not a change in itself, only what was written to it is.
+ *  Whether that change is *staged* is not distinguished — every edit this app
+ *  makes stages its file on the way out.
+ */
+export type Change = 
+/**  As committed, or a ledger with no commit to be measured against. */
+"unchanged" | 
+/**
+ *  New to git: the file is not in the last commit, or the entry's lines were
+ *  not there before.
+ */
+"added" | 
+/**
+ *  There and rewritten: the file is committed and differs from it, or the
+ *  entry's lines stand where committed lines were.
+ */
+"modified";
 
 /**
  *  One file of the loaded journal — the journal the session was opened with and
@@ -172,10 +277,12 @@ export type JournalFile = {
 	 */
 	transactions: number,
 	/**
-	 *  Whether any of the file's own lines are uncommitted, the same measure
-	 *  [`TransactionView::modified`] takes from an entry.
+	 *  How the file stands in git: [`Change::Modified`] when the file is in the
+	 *  last commit and differs from it, [`Change::Added`] when git does not have
+	 *  it and it has been written to. The same measure the entries inside it
+	 *  carry, read at file level.
 	 */
-	modified: boolean,
+	change: Change,
 };
 
 /**  Summary of a successful ledger load. */
@@ -297,11 +404,13 @@ export type TransactionView = {
 	narration: string,
 	postings: PostingView[],
 	/**
-	 *  Whether the transaction's own lines differ from the ledger's last commit,
-	 *  staged or not. False everywhere when the ledger is not in a git
-	 *  repository or nothing changed — the register never fails over git.
+	 *  How the entry's own lines stand against the last commit: [`Change::Added`]
+	 *  when its lines are all new, [`Change::Modified`] when they stand where
+	 *  committed lines were. [`Change::Unchanged`] everywhere when the ledger is
+	 *  not in a git repository or nothing changed — the register never fails
+	 *  over git.
 	 */
-	modified: boolean,
+	change: Change,
 };
 
 /* Tauri Specta runtime */

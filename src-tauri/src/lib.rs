@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
-use rustledger_core::{Decimal, Directive, IncompleteAmount, Span, Spanned, Transaction};
+use rustledger_core::{Decimal, Directive, IncompleteAmount, MetaValue, Span, Spanned, Transaction};
 use rustledger_loader::{Ledger, LedgerError, LoadOptions, SourceFile};
 use tauri::State;
 
@@ -43,6 +43,27 @@ fn is_envelope_account(account: &str) -> bool {
             && account.as_bytes()[ENVELOPE_NAMESPACE.len()] == b':')
 }
 
+/// How a file, an entry or an account stands against the ledger's last commit —
+/// the one letter a git client would put beside it.
+///
+/// The reference is HEAD's blob where git has one, and the text the session
+/// started with otherwise (see [`Loaded::baseline`]): a ledger that is not
+/// committed yet is not a change in itself, only what was written to it is.
+/// Whether that change is *staged* is not distinguished — every edit this app
+/// makes stages its file on the way out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum Change {
+    /// As committed, or a ledger with no commit to be measured against.
+    Unchanged,
+    /// New to git: the file is not in the last commit, or the entry's lines were
+    /// not there before.
+    Added,
+    /// There and rewritten: the file is committed and differs from it, or the
+    /// entry's lines stand where committed lines were.
+    Modified,
+}
+
 /// Fully-qualified Beancount account name, e.g. "Expenses:Food:Groceries".
 #[derive(Debug, serde::Serialize, specta::Type)]
 pub struct AccountBalance {
@@ -56,10 +77,12 @@ pub struct AccountBalance {
     /// Beancount commodity of `balance`, e.g. `USD` or `TRY` — the code the
     /// frontend needs to place a symbol or code next to the amount.
     pub currency: String,
-    /// True when at least one transaction in this account's subtree is
-    /// uncommitted — the same flag [`TransactionView::modified`] carries, rolled
-    /// up the account tree so the sidebar can mark a branch.
-    pub modified: bool,
+    /// How this account stands against the last commit: the strongest change in
+    /// its own subtree, [`Change::Modified`] over [`Change::Added`], so a branch
+    /// reads as changed when anything under it is. [`Change::Unchanged`] when
+    /// the ledger is not in a git repository or nothing changed — the sidebar
+    /// never fails over git.
+    pub change: Change,
 }
 
 /// One posting as shown on an account page.
@@ -83,10 +106,12 @@ pub struct TransactionView {
     pub payee: Option<String>,
     pub narration: String,
     pub postings: Vec<PostingView>,
-    /// Whether the transaction's own lines differ from the ledger's last commit,
-    /// staged or not. False everywhere when the ledger is not in a git
-    /// repository or nothing changed — the register never fails over git.
-    pub modified: bool,
+    /// How the entry's own lines stand against the last commit: [`Change::Added`]
+    /// when its lines are all new, [`Change::Modified`] when they stand where
+    /// committed lines were. [`Change::Unchanged`] everywhere when the ledger is
+    /// not in a git repository or nothing changed — the register never fails
+    /// over git.
+    pub change: Change,
 }
 
 /// Fields the register may change about one transaction. `id` is the
@@ -142,9 +167,11 @@ pub struct JournalFile {
     /// ones the register hides included, since this is a fact about the file
     /// rather than about a view of the ledger.
     pub transactions: u32,
-    /// Whether any of the file's own lines are uncommitted, the same measure
-    /// [`TransactionView::modified`] takes from an entry.
-    pub modified: bool,
+    /// How the file stands in git: [`Change::Modified`] when the file is in the
+    /// last commit and differs from it, [`Change::Added`] when git does not have
+    /// it and it has been written to. The same measure the entries inside it
+    /// carry, read at file level.
+    pub change: Change,
 }
 
 /// A transaction that is not in the ledger yet, as the new-entry form fills it
@@ -320,54 +347,81 @@ fn accounts(state: State<'_, AppState>) -> Vec<AccountBalance> {
     guard
         .as_ref()
         .map(|loaded| {
-            let modified = modified_accounts(&loaded.ledger, &loaded.baseline);
-            account_balances(&loaded.ledger, &modified)
+            let changes = account_changes(&loaded.ledger, &loaded.baseline);
+            account_balances(&loaded.ledger, &changes)
         })
         .unwrap_or_default()
 }
 
-/// The accounts touched by at least one uncommitted transaction, with every
-/// colon-prefix ancestor of each — the same "changed since HEAD or since this
-/// session's baseline" test [`account_transaction_views`] runs per row, rolled
-/// up so a parent branch reads as changed when anything under it is.
+/// How each account in the ledger's tree stands against the last commit, by
+/// full account name: the change of the entries that touch it, rolled up every
+/// colon-prefix ancestor so a parent branch reads as changed when anything under
+/// it is. [`Change::Modified`] wins over [`Change::Added`] where both meet.
 ///
-/// Like the per-row flag, the whole walk is skipped when the working tree has
-/// nothing to report, so a clean ledger costs one diff.
-fn modified_accounts(
-    ledger: &Ledger,
-    baseline: &HashMap<PathBuf, Arc<str>>,
-) -> BTreeSet<String> {
+/// The whole walk is skipped when the working tree has nothing to report, so a
+/// clean ledger costs one diff.
+fn account_changes(ledger: &Ledger, baseline: &HashMap<PathBuf, Arc<str>>) -> BTreeMap<String, Change> {
     let changed = working_tree_changes(ledger, baseline);
-    let mut marked = BTreeSet::new();
+    let mut marked: BTreeMap<String, Change> = BTreeMap::new();
     if changed.is_empty() {
         return marked;
     }
     let view = ledger.balance_view();
     let sources = source_directive_index(ledger, &view);
     let mut line_starts: HashMap<u16, Vec<usize>> = HashMap::new();
+    // An account's own `open` line counts before anything is posted to it:
+    // opening an account is a change to that account, not only to its file.
+    for source in &ledger.directives {
+        let Directive::Open(open) = &source.value else {
+            continue;
+        };
+        let account = open.account.as_str();
+        if is_envelope_account(account) {
+            continue;
+        }
+        let change = directive_change(ledger, &changed, &mut line_starts, source);
+        if change != Change::Unchanged {
+            mark_account(&mut marked, account, change);
+        }
+    }
     for (id, directive) in view.iter().enumerate() {
         let Directive::Transaction(tx) = directive else {
             continue;
         };
-        let modified = sources.get(id).copied().flatten().is_some_and(|index| {
-            touches_changes(ledger, &changed, &mut line_starts, &ledger.directives[index])
-        });
-        if !modified {
+        let change = sources
+            .get(id)
+            .copied()
+            .flatten()
+            .map_or(Change::Unchanged, |index| {
+                directive_change(ledger, &changed, &mut line_starts, &ledger.directives[index])
+            });
+        if change == Change::Unchanged {
             continue;
         }
         for posting in &tx.postings {
-            let mut prefix = String::new();
-            for part in posting.value.account.as_str().split(':') {
-                prefix = if prefix.is_empty() {
-                    part.to_owned()
-                } else {
-                    format!("{prefix}:{part}")
-                };
-                marked.insert(prefix.clone());
-            }
+            mark_account(&mut marked, posting.value.account.as_str(), change);
         }
     }
     marked
+}
+
+/// Marks every colon-prefix of `account` — the account itself and each ancestor
+/// — with `change`, keeping the stronger of the two where they meet:
+/// [`Change::Modified`] over [`Change::Added`], so a branch that holds an edited
+/// entry reads as modified rather than merely added to.
+fn mark_account(marked: &mut BTreeMap<String, Change>, account: &str, change: Change) {
+    let mut prefix = String::new();
+    for part in account.split(':') {
+        prefix = if prefix.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{prefix}:{part}")
+        };
+        let entry = marked.entry(prefix.clone()).or_insert(Change::Unchanged);
+        if change == Change::Modified || *entry == Change::Unchanged {
+            *entry = change;
+        }
+    }
 }
 
 /// Transactions touching `account` — the account itself or any sub-account —
@@ -655,10 +709,10 @@ fn registerable(tx: &Transaction) -> bool {
 }
 
 /// One transaction of the ledger stream as a register row: every posting it
-/// contains, and whether its own source lines are among the file's changes.
+/// contains, and how its own source lines stand against the last commit.
 fn transaction_view(
     ledger: &Ledger,
-    changed: &HashMap<u16, Vec<(u32, u32)>>,
+    changed: &HashMap<u16, FileChange>,
     sources: Option<&[Option<usize>]>,
     line_starts: &mut HashMap<u16, Vec<usize>>,
     id: usize,
@@ -679,9 +733,11 @@ fn transaction_view(
             })
         })
         .collect();
-    let modified = sources
+    let change = sources
         .and_then(|sources| sources.get(id).copied().flatten())
-        .is_some_and(|index| touches_changes(ledger, changed, line_starts, &ledger.directives[index]));
+        .map_or(Change::Unchanged, |index| {
+            directive_change(ledger, changed, line_starts, &ledger.directives[index])
+        });
     TransactionView {
         id: u32::try_from(id).unwrap_or(u32::MAX),
         date: tx.date.to_string(),
@@ -689,7 +745,7 @@ fn transaction_view(
         payee: tx.payee.as_ref().map(|p| p.as_str().to_owned()),
         narration: tx.narration.as_str().to_owned(),
         postings,
-        modified,
+        change,
     }
 }
 
@@ -706,7 +762,7 @@ fn source_of_file<'a>(ledger: &'a Ledger, file: &str) -> Result<&'a SourceFile, 
 /// Accumulate per-(account, currency) units over the pad-merged transaction
 /// stream, roll each account's totals up into its ancestors, then report one
 /// entry per tree node.
-fn account_balances(ledger: &Ledger, modified: &BTreeSet<String>) -> Vec<AccountBalance> {
+fn account_balances(ledger: &Ledger, changes: &BTreeMap<String, Change>) -> Vec<AccountBalance> {
     let mut totals: HashMap<String, HashMap<String, Decimal>> = HashMap::new();
     // Every account the ledger opens belongs in the tree, balance or not: an
     // account opened and not yet posted to is exactly the one a user is about to
@@ -777,7 +833,7 @@ fn account_balances(ledger: &Ledger, modified: &BTreeSet<String>) -> Vec<Account
                 name: name.clone(),
                 balance: units.to_string(),
                 currency,
-                modified: modified.contains(name),
+                change: changes.get(name).copied().unwrap_or(Change::Unchanged),
             }
         })
         .collect();
@@ -1027,7 +1083,10 @@ fn journal_file_views(loaded: &Loaded) -> Vec<JournalFile> {
                 .display()
                 .to_string(),
             transactions: counts[id],
-            modified: u16::try_from(id).is_ok_and(|id| changed.contains_key(&id)),
+            change: u16::try_from(id)
+                .ok()
+                .and_then(|id| changed.get(&id))
+                .map_or(Change::Unchanged, FileChange::file),
         })
         .collect()
 }
@@ -1669,9 +1728,34 @@ fn render_diff(diff: &git2::Diff<'_>) -> Result<String, String> {
     Ok(text)
 }
 
+/// What one file's working copy holds against what it is measured against, by
+/// kind of change: the lines it added, the lines that stand where a line the
+/// reference had is gone, and whether the reference was the last commit at all.
+struct FileChange {
+    /// Lines that are new in the working copy, merged into inclusive ranges.
+    added: Vec<(u32, u32)>,
+    /// Lines that took the place of something the reference had.
+    rewritten: Vec<(u32, u32)>,
+    /// Whether the reference was HEAD's blob rather than the session's baseline:
+    /// a file git does not have is new to git however it was edited.
+    committed: bool,
+}
+
+impl FileChange {
+    /// How the file itself stands: nothing, new to git, or committed and
+    /// rewritten.
+    fn file(&self) -> Change {
+        if self.committed {
+            Change::Modified
+        } else {
+            Change::Added
+        }
+    }
+}
+
 /// Which lines of the ledger's files differ from what they are measured
 /// against, keyed by source-map file id — the measure behind
-/// [`TransactionView::modified`].
+/// [`TransactionView::change`] and [`JournalFile::change`].
 ///
 /// A file's reference is its HEAD blob when git has one, and otherwise the text
 /// the session started with (see [`Loaded::baseline`]): a ledger that is not
@@ -1680,8 +1764,8 @@ fn render_diff(diff: &git2::Diff<'_>) -> Result<String, String> {
 fn working_tree_changes(
     ledger: &Ledger,
     baseline: &HashMap<PathBuf, Arc<str>>,
-) -> HashMap<u16, Vec<(u32, u32)>> {
-    let mut changed: HashMap<u16, Vec<(u32, u32)>> = HashMap::new();
+) -> HashMap<u16, FileChange> {
+    let mut changed: HashMap<u16, FileChange> = HashMap::new();
     for file in ledger.source_map.files() {
         let Some(id) = u16::try_from(file.id).ok() else {
             continue;
@@ -1689,13 +1773,13 @@ fn working_tree_changes(
         let Some((repo, relative)) = repo_and_relative(&file.path) else {
             continue;
         };
-        let lines = match head_blob(&repo, &relative) {
+        let (lines, committed) = match head_blob(&repo, &relative) {
             // Committed: the working tree is compared against HEAD.
             Some(head) => {
                 if head == *file.source {
                     continue;
                 }
-                changed_lines(&head, &file.source)
+                (changed_lines(&head, &file.source), true)
             }
             // Not committed: compared against the session's starting point, so
             // an untracked ledger lights up only where it was edited.
@@ -1706,21 +1790,30 @@ fn working_tree_changes(
                 if start.as_ref() == file.source.as_ref() {
                     continue;
                 }
-                changed_lines(start, &file.source)
+                (changed_lines(start, &file.source), false)
             }
         };
-        if !lines.is_empty() {
-            changed.insert(id, lines);
+        let (added, rewritten) = lines;
+        if !added.is_empty() || !rewritten.is_empty() {
+            changed.insert(
+                id,
+                FileChange {
+                    added,
+                    rewritten,
+                    committed,
+                },
+            );
         }
     }
     changed
 }
 
-/// The 1-based lines of `new` that `old` does not have, merged into inclusive
-/// ranges. libgit2's own line diff drives this, so rewrites, insertions and
-/// deletions are all covered; a deleted line has no number of its own in the new
-/// file, so the line that takes its place is the one reported.
-fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
+/// Which lines of `new` `old` does not have, split by kind and merged into
+/// inclusive ranges: the lines that were added, and the lines that stand where a
+/// line `old` had is gone. libgit2's own line diff drives this, so rewrites,
+/// insertions and deletions are all covered; a deleted line has no number of its
+/// own in the new file, so the line that takes its place is the one reported.
+fn changed_lines(old: &str, new: &str) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
     let Ok(patch) = git2::Patch::from_buffers(
         old.as_bytes(),
         Some(Path::new("head")),
@@ -1728,9 +1821,10 @@ fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
         Some(Path::new("worktree")),
         None,
     ) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut lines: BTreeSet<u32> = BTreeSet::new();
+    let mut added: BTreeSet<u32> = BTreeSet::new();
+    let mut rewritten: BTreeSet<u32> = BTreeSet::new();
     // A deletion at the end of the file points past its last line; clamping
     // keeps the reported change on a line the file actually has.
     let last_line = u32::try_from(new.lines().count().max(1)).unwrap_or(u32::MAX);
@@ -1745,11 +1839,11 @@ fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
             };
             match diff_line.origin() {
                 '+' => {
-                    lines.insert(line.min(last_line));
+                    added.insert(line.min(last_line));
                     line += 1;
                 }
                 '-' => {
-                    lines.insert(line.min(last_line));
+                    rewritten.insert(line.min(last_line));
                 }
                 ' ' => line += 1,
                 // `\ No newline at end of file` and friends occupy no line.
@@ -1757,6 +1851,11 @@ fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
             }
         }
     }
+    (merge_lines(added), merge_lines(rewritten))
+}
+
+/// A set of 1-based line numbers as inclusive 1-based ranges.
+fn merge_lines(lines: BTreeSet<u32>) -> Vec<(u32, u32)> {
     let mut ranges: Vec<(u32, u32)> = Vec::new();
     for line in lines {
         match ranges.last_mut() {
@@ -1767,20 +1866,23 @@ fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
     ranges
 }
 
-/// Whether a directive's own source lines are among the working tree's changes
-/// for its file. A span's trailing trivia — the blank line or comment after the
-/// last posting — belongs to no transaction and is ignored.
-fn touches_changes(
+/// How a directive's own source lines have changed, if at all: [`Change::Modified`]
+/// when any of them stands where a removed line was, else [`Change::Added`] when
+/// any of them is new, else [`Change::Unchanged`].
+///
+/// A span's trailing trivia — the blank line or comment after the last posting —
+/// belongs to no transaction and is ignored.
+fn directive_change(
     ledger: &Ledger,
-    changed: &HashMap<u16, Vec<(u32, u32)>>,
+    changed: &HashMap<u16, FileChange>,
     line_starts: &mut HashMap<u16, Vec<usize>>,
     source: &Spanned<Directive>,
-) -> bool {
-    let Some(ranges) = changed.get(&source.file_id) else {
-        return false;
+) -> Change {
+    let Some(file_change) = changed.get(&source.file_id) else {
+        return Change::Unchanged;
     };
     let Some(file) = ledger.source_map.get(source.file_id as usize) else {
-        return false;
+        return Change::Unchanged;
     };
     let text: &str = &file.source;
     let starts = line_starts
@@ -1790,7 +1892,15 @@ fn touches_changes(
     let last_byte = source.span.start + body.trim_end().len();
     let first = line_of(starts, source.span.start);
     let last = line_of(starts, last_byte.saturating_sub(1).max(source.span.start));
-    ranges.iter().any(|&(from, to)| from <= last && first <= to)
+    let over = |ranges: &Vec<(u32, u32)>| ranges.iter().any(|&(from, to)| from <= last && first <= to);
+
+    if over(&file_change.rewritten) {
+        Change::Modified
+    } else if over(&file_change.added) {
+        Change::Added
+    } else {
+        Change::Unchanged
+    }
 }
 
 /// The byte offset at which each line of `text` starts, for offset → line lookup.
@@ -2222,6 +2332,317 @@ fn new_errors(before: &[String], after: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// The envelope plugin's own plumbing accounts, mirroring its
+/// `accounts.rs` (`TO_BE_BUDGETED` and `MONEY`).
+///
+/// `To-Be-Budgeted` is the pool of money the configuration has not assigned to
+/// an envelope — the budget screen's own headline — and `Money` is the contra of
+/// the ledger's on-budget money, which the plugin reads to keep the pool's
+/// figure real. Neither is an envelope a user funded, so neither becomes a
+/// group: the pool is reported as [`BudgetMonth::to_budget`] and the contra is
+/// left out of the month's lines.
+const ENVELOPE_POOL: &str = "Equity:Envelope:To-Be-Budgeted";
+const ENVELOPE_MONEY: &str = "Equity:Envelope:Money";
+
+/// What the budget says about a ledger the plugin has not budgeted: an empty
+/// screen would read as "this month is worth nothing", which is a different
+/// statement from "nothing was written".
+const NO_ENVELOPE_BUDGET: &str = "this ledger has no envelope budget data — the envelope plugin has written nothing under `Equity:Envelope:`, so there is no month to show";
+
+/// One envelope of a budget month, as the plugin's own bookkeeping reports it.
+///
+/// Every figure is an exact decimal string in [`BudgetMonth::currency`], the
+/// app's convention: nothing is a float and nothing is rounded here.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct BudgetEnvelope {
+    /// The envelope's label inside its group — the account's path below the
+    /// group, e.g. `Bread` for `Equity:Envelope:Food:Bread` in group `Food`.
+    pub name: String,
+    /// The account the plugin writes this envelope's postings to, which is what
+    /// names it in the ledger.
+    pub full_name: String,
+    /// What the month put into the envelope, net: inherited funding, one-off
+    /// `adjust`/`zero`/`pad` deltas, and the rollover sweep's own correction,
+    /// which takes money back out and so reads negative.
+    pub budgeted: String,
+    /// What the month spent out of it, the plugin's mirrored activity, reported
+    /// as a positive figure.
+    pub spent: String,
+    /// What the envelope held at the month's end, every earlier month carried
+    /// into it — the subtree total the plugin's own `balance` assertions check.
+    pub balance: String,
+}
+
+/// One top-level branch of the plugin's envelope tree — a group in the budget
+/// screen's sense — and its totals over its envelopes.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct BudgetGroup {
+    /// The branch's own name, the first account component below the namespace.
+    pub name: String,
+    /// Its envelopes' figures summed, exact decimal strings like theirs.
+    pub budgeted: String,
+    pub spent: String,
+    pub balance: String,
+    /// The envelopes below it, in the ledger's tree order.
+    pub envelopes: Vec<BudgetEnvelope>,
+}
+
+/// One month of the ledger's envelope budget, as the budget screen reads it.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct BudgetMonth {
+    /// The month the figures belong to, `YYYY-MM`.
+    pub month: String,
+    /// Every month the plugin budgeted, oldest first — the screen's navigation.
+    pub months: Vec<String>,
+    /// The month's groups, alphabetically.
+    pub groups: Vec<BudgetGroup>,
+    /// `Equity:Envelope:To-Be-Budgeted` at the month's end: what the
+    /// configuration has not assigned to an envelope, per the plugin's rule
+    /// `To-Be-Budgeted = on-budget money − Σ categories`.
+    pub to_budget: String,
+    /// The commodity every figure is in: the ledger's operating currency.
+    pub currency: String,
+}
+
+/// Whether `text` is a `YYYY-MM` month label — the budget's unit of time, the
+/// same one the plugin's `month.rs` writes.
+fn is_month_label(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 7
+        && bytes[4] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && matches!((bytes[5], bytes[6]), (b'0', b'1'..=b'9') | (b'1', b'0'..=b'2'))
+}
+
+/// What one envelope did in one month.
+#[derive(Clone, Copy, Default)]
+struct EnvelopeFlow {
+    /// Postings the month moved into the envelope, net of the sweep's
+    /// corrections.
+    budgeted: Decimal,
+    /// Postings the month spent out of it, as a positive figure.
+    spent: Decimal,
+}
+
+/// The commodity the budget reports in: the ledger's operating currency when the
+/// plugin budgeted in it, else the commodity the most money moved in (ties go to
+/// the later name, so the payload does not wobble between loads of one ledger).
+fn budget_currency(held: &BTreeMap<String, Decimal>, operating: &[String]) -> Option<String> {
+    if let Some(currency) = operating.iter().find(|currency| held.contains_key(*currency)) {
+        return Some(currency.clone());
+    }
+    let mut best: Option<(&String, Decimal)> = None;
+    for (currency, total) in held {
+        if best.is_none_or(|(_, highest)| total.abs() > highest) {
+            best = Some((currency, total.abs()));
+        }
+    }
+    best.map(|(currency, _)| currency.clone())
+}
+
+/// A group while it is being collected: its envelopes and the totals they add up
+/// to, so the totals never have to be read back out of the rendered strings.
+#[derive(Default)]
+struct BudgetGroupTotals {
+    envelopes: Vec<BudgetEnvelope>,
+    budgeted: Decimal,
+    spent: Decimal,
+    balance: Decimal,
+}
+
+/// One month of the ledger's envelope budget.
+///
+/// The plugin (`plugins/rustledger-envelope`) is the only writer of the
+/// `Equity:Envelope:` namespace and the owner of its arithmetic. For every
+/// budget month it emits one entry per step — the backing contra
+/// (`Equity:Envelope:Money` against `To-Be-Budgeted`), the inherited funding,
+/// the month's mirrored activity, the `adjust`/`zero`/`pad` reconciliation and
+/// the rollover sweep — each dated the month's last day, tagged `#envelope` and
+/// carrying `envelope-kind`/`envelope-month` metadata (see its `emit.rs`). Every
+/// posting stays inside the namespace, so the budget is one prefix away from the
+/// rest of the app.
+///
+/// This is the one surface that *reads* those accounts instead of hiding them
+/// (see [`is_envelope_account`]): a month's flows are the postings dated inside
+/// it, an envelope's balance is every posting up to and including the requested
+/// month — the same subtree total the plugin's month-end assertions measure —
+/// and the pool's balance is the screen's `to_budget`.
+///
+/// `envelope-kind` decides what a posting is: activity is spending, funding,
+/// adjustments and the sweep are everything else. Without the metadata — a
+/// hand-written entry in the namespace — the posting's sign decides, which is
+/// what the plugin's own funding/activity postings imply (money leaving an
+/// envelope is spending).
+///
+/// `month` is a `YYYY-MM` label; `None` is the newest month with data, and a
+/// month outside the data (a gap, or before the first month) reports what stood
+/// at its end: the carries, with nothing moved in it.
+fn budget_month(ledger: &Ledger, month: Option<&str>) -> Result<BudgetMonth, String> {
+    if let Some(text) = month
+        && !is_month_label(text)
+    {
+        return Err(format!("`{text}` is not a budget month in YYYY-MM form"));
+    }
+    // Every posting inside the namespace, summed per account, month and
+    // commodity. The per-commodity totals pick the one to report in: the plugin
+    // tracks each commodity separately, and the budget screen shows one.
+    let mut flows: BTreeMap<(String, String, String), EnvelopeFlow> = BTreeMap::new();
+    let mut held: BTreeMap<String, Decimal> = BTreeMap::new();
+    for directive in ledger.balance_view() {
+        let Directive::Transaction(tx) = directive else {
+            continue;
+        };
+        let date = tx.date.to_string();
+        // The plugin dates every entry the month's last day, so the date says
+        // which month an entry belongs to (`model.rs`: `let date =
+        // month.last_day()`).
+        let Some(entry_month) = date.get(0..7).filter(|text| is_month_label(text)) else {
+            continue;
+        };
+        let kind = match tx.meta.get("envelope-kind") {
+            Some(MetaValue::String(kind)) => Some(kind.as_str()),
+            _ => None,
+        };
+        for posting in &tx.postings {
+            let account = posting.value.account.as_str();
+            if !is_envelope_account(account) {
+                continue;
+            }
+            let Some(IncompleteAmount::Complete(amount)) = &posting.value.units else {
+                // Residual/interpolated postings never occur post-booked.
+                continue;
+            };
+            let commodity = amount.currency.as_str().to_owned();
+            *held.entry(commodity.clone()).or_default() += amount.number.abs();
+            let flow = flows
+                .entry((account.to_owned(), entry_month.to_owned(), commodity))
+                .or_default();
+            let spending = match kind {
+                Some("Envelope activity") => true,
+                Some("Envelope funding" | "Envelope adjustment" | "Envelope rollover") => false,
+                // No kind at all, or the backing entry, which only ever touches
+                // the pool and the contra.
+                _ => amount.number.is_sign_negative(),
+            };
+            if spending {
+                flow.spent -= amount.number;
+            } else {
+                flow.budgeted += amount.number;
+            }
+        }
+    }
+    let Some(currency) = budget_currency(&held, &ledger.options.operating_currency) else {
+        return Err(NO_ENVELOPE_BUDGET.to_string());
+    };
+
+    // The reported month's figures. Each account's months come in order, so a
+    // month past the requested one ends its history.
+    let mut months: BTreeSet<String> = BTreeSet::new();
+    let mut histories: BTreeMap<String, Vec<(String, EnvelopeFlow)>> = BTreeMap::new();
+    for ((account, entry_month, commodity), flow) in flows {
+        if commodity != currency {
+            continue;
+        }
+        months.insert(entry_month.clone());
+        histories.entry(account).or_default().push((entry_month, flow));
+    }
+    let Some(newest) = months.iter().next_back() else {
+        return Err(NO_ENVELOPE_BUDGET.to_string());
+    };
+    let requested = month.unwrap_or(newest).to_owned();
+
+    let mut groups: BTreeMap<String, BudgetGroupTotals> = BTreeMap::new();
+    let mut to_budget = Decimal::ZERO;
+    for (account, history) in histories {
+        // `Equity:Envelope:<path>`; the namespace itself holds nothing.
+        let Some(path) = account
+            .strip_prefix(ENVELOPE_NAMESPACE)
+            .and_then(|tail| tail.strip_prefix(':'))
+        else {
+            continue;
+        };
+        let mut budgeted = Decimal::ZERO;
+        let mut spent = Decimal::ZERO;
+        let mut balance = Decimal::ZERO;
+        let mut exists = false;
+        for (entry_month, flow) in history {
+            if entry_month.as_str() > requested.as_str() {
+                break;
+            }
+            exists = true;
+            if entry_month == requested {
+                budgeted = flow.budgeted;
+                spent = flow.spent;
+            }
+            balance += flow.budgeted - flow.spent;
+        }
+        if account == ENVELOPE_POOL {
+            to_budget = balance;
+            continue;
+        }
+        // The contra of the on-budget money is not an envelope; a group for it
+        // would read as a category holding the user's whole bank balance.
+        if !exists || account == ENVELOPE_MONEY {
+            continue;
+        }
+        let (group_name, name) = match path.split_once(':') {
+            Some((group_name, name)) => (group_name.to_owned(), name.to_owned()),
+            None => (path.to_owned(), path.to_owned()),
+        };
+        let envelope = BudgetEnvelope {
+            name,
+            full_name: account,
+            budgeted: budgeted.to_string(),
+            spent: spent.to_string(),
+            balance: balance.to_string(),
+        };
+        let group = groups.entry(group_name).or_default();
+        group.budgeted += budgeted;
+        group.spent += spent;
+        group.balance += balance;
+        group.envelopes.push(envelope);
+    }
+    let groups: Vec<BudgetGroup> = groups
+        .into_iter()
+        .map(|(name, totals)| BudgetGroup {
+            name,
+            budgeted: totals.budgeted.to_string(),
+            spent: totals.spent.to_string(),
+            balance: totals.balance.to_string(),
+            envelopes: totals.envelopes,
+        })
+        .collect();
+    Ok(BudgetMonth {
+        month: requested,
+        months: months.into_iter().collect(),
+        groups,
+        to_budget: to_budget.to_string(),
+        currency,
+    })
+}
+
+/// One month of the ledger's envelope budget — the budget screen's data.
+///
+/// `month` is a `YYYY-MM` label, or `None` for the newest month the plugin has
+/// budgeted, which is what the screen opens on. The figures are for that month,
+/// in the ledger's operating currency; see [`BudgetMonth`] for what each one
+/// means. Read-only on purpose: the plugin owns the allocations (its `fund`,
+/// `adjust`, `zero`, `pad` and `rollover` configuration) and rewrites them on
+/// every load, so an edit from here would fight the next run of it.
+#[tauri::command]
+#[specta::specta]
+fn budget(month: Option<String>, state: State<'_, AppState>) -> Result<BudgetMonth, String> {
+    budget_view(&state, month.as_deref())
+}
+
+/// [`budget`] against the held ledger, so the tests can ask the same question
+/// the screen does.
+fn budget_view(state: &AppState, month: Option<&str>) -> Result<BudgetMonth, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+    budget_month(&loaded.ledger, month)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = Builder::<AppRuntime>::new()
@@ -2246,6 +2667,7 @@ pub fn run() {
             suggest_account_file,
             ledger_diff,
             commit_ledger,
+            budget,
         ]);
 
     // Only export bindings on non-release builds
@@ -2298,6 +2720,7 @@ mod tests {
                 suggest_account_file,
                 ledger_diff,
                 commit_ledger,
+                budget,
             ])
             .export(Typescript::default(), "../src/bindings.ts")
             .unwrap();
@@ -2347,7 +2770,7 @@ option \"operating_currency\" \"USD\"
         .unwrap();
         assert!(ledger.errors.is_empty(), "errors: {:?}", ledger.errors);
 
-        let balances = account_balances(&ledger, &BTreeSet::new());
+        let balances = account_balances(&ledger, &BTreeMap::new());
         let get = |name: &str| {
             balances
                 .iter()
@@ -2528,7 +2951,7 @@ option \"operating_currency\" \"USD\"
 
         // A ledger whose files are not in a git repository reports no row as
         // modified — the flag never turns git's absence into an error.
-        assert!(root.iter().all(|view| !view.modified));
+        assert!(root.iter().all(|view| view.change == Change::Unchanged));
     }
 
     /// A throwaway directory holding a real ledger file and a real repository,
@@ -2613,11 +3036,12 @@ option \"operating_currency\" \"USD\"
             .id
     }
 
-    /// The narrations of the transactions the register would mark as modified.
-    fn modified_narrations(state: &AppState) -> Vec<String> {
+    /// The narrations of the transactions the register would mark as changed,
+    /// whatever kind of change it is.
+    fn changed_narrations(state: &AppState) -> Vec<String> {
         views(state)
             .into_iter()
-            .filter(|view| view.modified)
+            .filter(|view| view.change != Change::Unchanged)
             .map(|view| view.narration)
             .collect()
     }
@@ -2786,8 +3210,17 @@ option \"operating_currency\" \"USD\"
             let errors = &guard.as_ref().unwrap().ledger.errors;
             assert!(errors.is_empty(), "errors: {errors:?}");
         }
-        // The edited transaction is the only row that reports itself modified.
-        assert_eq!(modified_narrations(&state), ["Groceries and coffee"]);
+        // The edited transaction is the only row that reports itself changed, and
+        // it reads as modified — its lines stand where committed lines were.
+        assert_eq!(changed_narrations(&state), ["Groceries and coffee"]);
+        assert_eq!(
+            views(&state)
+                .into_iter()
+                .find(|view| view.narration == "Groceries and coffee")
+                .expect("the edited entry is in the register")
+                .change,
+            Change::Modified
+        );
 
         // The file is staged: the index differs from HEAD, and only by it.
         let head = repo.head().unwrap().peel_to_tree().unwrap();
@@ -2831,7 +3264,7 @@ option \"operating_currency\" \"USD\"
         // The file is byte-for-byte what it was, and the app still holds the
         // ledger it had before the attempt.
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(modified_narrations(&state), Vec::<String>::new());
+        assert_eq!(changed_narrations(&state), Vec::<String>::new());
         assert_eq!(view_id(&state, "Groceries"), id);
     }
 
@@ -2924,7 +3357,7 @@ option \"operating_currency\" \"USD\"
             assert!(errors.is_empty(), "errors: {errors:?}");
         }
         assert_eq!(view_id(&state, "Groceries and coffee"), id);
-        assert_eq!(modified_narrations(&state), ["Groceries and coffee"]);
+        assert_eq!(changed_narrations(&state), ["Groceries and coffee"]);
 
         // The file is staged.
         let staged = repo.diff_tree_to_index(Some(&head), None, None).unwrap();
@@ -2972,7 +3405,7 @@ option \"operating_currency\" \"USD\"
         // The file is byte-for-byte what it was, and the app still holds the
         // ledger it had before the attempt.
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(modified_narrations(&state), Vec::<String>::new());
+        assert_eq!(changed_narrations(&state), Vec::<String>::new());
         assert_eq!(view_id(&state, "Groceries"), id);
     }
 
@@ -3403,7 +3836,7 @@ option \"operating_currency\" \"USD\"
 
         // Loading a ledger git has never seen is not a change in itself: the
         // register starts quiet instead of lighting up whole file.
-        assert_eq!(modified_narrations(&state), Vec::<String>::new());
+        assert_eq!(changed_narrations(&state), Vec::<String>::new());
 
         let id = view_id(&state, "Groceries");
         edit_transaction(
@@ -3412,8 +3845,23 @@ option \"operating_currency\" \"USD\"
         )
         .unwrap();
 
-        // The edit — not the file's untracked state — is what shows up.
-        assert_eq!(modified_narrations(&state), ["Groceries"]);
+        // The edit — not the file's untracked state — is what shows up, and it is
+        // a modification of an entry in a file git has never seen: the file
+        // itself is new to git, which is what its diff says too.
+        assert_eq!(changed_narrations(&state), ["Groceries"]);
+        assert_eq!(
+            views(&state)
+                .into_iter()
+                .find(|view| view.narration == "Groceries")
+                .expect("the edited entry is in the register")
+                .change,
+            Change::Modified
+        );
+        {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let listed = journal_file_views(guard.as_ref().unwrap());
+            assert_eq!(listed[0].change, Change::Added, "{listed:?}");
+        }
         assert_eq!(view_id(&state, "Groceries"), id);
     }
 
@@ -3516,7 +3964,7 @@ option \"operating_currency\" \"USD\"
 
         // With no repository there is nothing to compare against and nothing to
         // stage — and nothing fails on that account either.
-        assert!(modified_narrations(&state).is_empty());
+        assert!(changed_narrations(&state).is_empty());
         assert!(ledger_diff_text(&state).is_err());
         assert!(commit_staged(&state, "no repository").is_err());
     }
@@ -3556,7 +4004,7 @@ option \"operating_currency\" \"TRY\"
 
         // The generated accounts are the plugin's own bookkeeping: the tree shows
         // neither them nor their money.
-        let balances = account_balances(&ledger, &BTreeSet::new());
+        let balances = account_balances(&ledger, &BTreeMap::new());
         let names: Vec<&str> = balances.iter().map(|b| b.name.as_str()).collect();
         assert!(names.contains(&"Assets:Bank"), "{names:?}");
         assert!(!names.iter().any(|name| name.contains("Envelope")), "{names:?}");
@@ -3722,6 +4170,9 @@ include \"2026.bean\"
             .into_iter()
             .find(|view| view.narration == "Coffee")
             .expect("the new entry is in the register");
+        // Appended, so its lines are all new: the entry reads as added, where the
+        // file it went into — a file git has — reads as modified.
+        assert_eq!(coffee.change, Change::Added);
         assert_eq!(coffee.date, "2026-01-14");
         assert_eq!(coffee.payee.as_deref(), Some("Corner Shop"));
         assert_eq!(
@@ -3735,7 +4186,7 @@ include \"2026.bean\"
                 ("Expenses:Coffee", "16.20"),
             ]
         );
-        assert_eq!(modified_narrations(&state), ["Coffee"]);
+        assert_eq!(changed_narrations(&state), ["Coffee"]);
 
         // The file is staged, and only it.
         let head = repo.head().unwrap().peel_to_tree().unwrap();
@@ -3837,7 +4288,7 @@ include \"2026.bean\"
 
         assert_eq!(fs::read(&entries).unwrap(), before);
         assert!(views(&state).iter().all(|view| view.narration != "Coffee"));
-        assert_eq!(modified_narrations(&state), Vec::<String>::new());
+        assert_eq!(changed_narrations(&state), Vec::<String>::new());
     }
 
     /// The default file follows the accounts: the file of the newest entry that
@@ -3960,7 +4411,8 @@ include \"2026.bean\"
             let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
             let loaded = guard.as_ref().unwrap();
             assert!(loaded.ledger.errors.is_empty(), "errors: {:?}", loaded.ledger.errors);
-            account_balances(&loaded.ledger, &BTreeSet::new())
+            let changes = account_changes(&loaded.ledger, &loaded.baseline);
+            account_balances(&loaded.ledger, &changes)
         };
         let held = |name: &str| {
             balances
@@ -3974,6 +4426,19 @@ include \"2026.bean\"
         // An account that has postings keeps the commodity its postings put
         // there, whatever it was opened for.
         assert_eq!(held("Expenses:Food"), ("20.00", "USD"));
+        // Opening an account is a change to that account and to its ancestors,
+        // on top of the change to the file it was written into.
+        let change = |name: &str| {
+            balances
+                .iter()
+                .find(|balance| balance.name == name)
+                .map(|balance| balance.change)
+                .unwrap_or_else(|| panic!("missing {name} in {balances:?}"))
+        };
+        assert_eq!(change("Expenses:Tea"), Change::Added);
+        assert_eq!(change("Expenses"), Change::Added);
+        assert_eq!(change("Expenses:Food"), Change::Unchanged);
+        assert_eq!(change("Assets:Bank:Checking"), Change::Unchanged);
 
         // Only the file it went into is staged.
         let head = repo.head().unwrap().peel_to_tree().unwrap();
@@ -4104,9 +4569,12 @@ include \"2026.bean\"
         assert_eq!(
             listed
                 .iter()
-                .map(|file| (file.label.as_str(), file.transactions, file.modified))
+                .map(|file| (file.label.as_str(), file.transactions, file.change))
                 .collect::<Vec<_>>(),
-            [("main.bean", 0, false), ("2026.bean", 1, false)]
+            [
+                ("main.bean", 0, Change::Unchanged),
+                ("2026.bean", 1, Change::Unchanged)
+            ]
         );
 
         // A file's own transactions, in the register's own row shape — the ids
@@ -4161,9 +4629,15 @@ include \"2026.bean\"
         assert_eq!(
             listed
                 .iter()
-                .map(|file| (file.label.as_str(), file.transactions, file.modified))
+                .map(|file| (file.label.as_str(), file.transactions, file.change))
                 .collect::<Vec<_>>(),
-            [("main.bean", 0, false), ("2026.bean", 1, true)]
+            [
+                // The file is in the last commit, so an edit to it is a
+                // modification of it — where the entry inside carries its own
+                // kind of change.
+                ("main.bean", 0, Change::Unchanged),
+                ("2026.bean", 1, Change::Modified)
+            ]
         );
     }
 
@@ -4229,5 +4703,299 @@ include \"2026.bean\"
         assert!(edit_named_file_source(&state, "/tmp/elsewhere.bean", "whatever\n")
             .unwrap_err()
             .contains("not a file of this journal"));
+    }
+
+    /// A group's own label with its totals, then one row per envelope — the
+    /// shape the budget screen renders, as comparable strings.
+    fn group_rows(group: &BudgetGroup) -> Vec<(&str, &str, &str, &str)> {
+        let mut rows = vec![(
+            group.name.as_str(),
+            group.budgeted.as_str(),
+            group.spent.as_str(),
+            group.balance.as_str(),
+        )];
+        rows.extend(group.envelopes.iter().map(|envelope| {
+            (
+                envelope.name.as_str(),
+                envelope.budgeted.as_str(),
+                envelope.spent.as_str(),
+                envelope.balance.as_str(),
+            )
+        }));
+        rows
+    }
+
+    /// Every group's rows, as the screen reads them.
+    fn budget_rows(month: &BudgetMonth) -> Vec<Vec<(&str, &str, &str, &str)>> {
+        month.groups.iter().map(group_rows).collect()
+    }
+
+    /// A ledger holding what the envelope plugin writes for two months, in the
+    /// shape `emit.rs` gives it: one entry per step of the month, dated the
+    /// month's last day, tagged `#envelope`, with `envelope-kind` and
+    /// `envelope-month` metadata, every posting inside `Equity:Envelope:`.
+    ///
+    /// Food is funded 300 a month (plus a 20 adjustment in January), and its
+    /// spending is recorded on `Expenses:Food:Bread`, so the funding lands on
+    /// the parent envelope while the activity lands on the child — the case a
+    /// group total exists for. Fun is reset by its rollover at the end of
+    /// February, which sweeps its 80 balance back to the pool.
+    fn envelope_fixture() -> &'static str {
+        "\
+option \"operating_currency\" \"TRY\"
+
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+2026-01-01 open Expenses:Food:Bread
+2026-01-01 open Expenses:Fun
+2026-01-01 open Equity:Envelope:Food
+2026-01-01 open Equity:Envelope:Food:Bread
+2026-01-01 open Equity:Envelope:Fun
+2026-01-01 open Equity:Envelope:Money
+2026-01-01 open Equity:Envelope:To-Be-Budgeted
+
+2026-01-15 * \"Bakery\"
+  Assets:Bank                     -50.00 TRY
+  Expenses:Food:Bread              50.00 TRY
+
+2026-01-31 * \"Envelope backing 2026-01\" #envelope
+  envelope-kind: \"Envelope backing\"
+  envelope-month: \"2026-01\"
+  Equity:Envelope:Money         -1000.00 TRY
+  Equity:Envelope:To-Be-Budgeted 1000.00 TRY
+
+2026-01-31 * \"Envelope funding 2026-01\" #envelope
+  envelope-kind: \"Envelope funding\"
+  envelope-month: \"2026-01\"
+  Equity:Envelope:Food             300.00 TRY
+  Equity:Envelope:Fun              200.00 TRY
+  Equity:Envelope:To-Be-Budgeted  -500.00 TRY
+
+2026-01-31 * \"Envelope activity 2026-01\" #envelope
+  envelope-kind: \"Envelope activity\"
+  envelope-month: \"2026-01\"
+  Equity:Envelope:Food:Bread       -50.00 TRY
+  Equity:Envelope:Fun              -30.00 TRY
+  Equity:Envelope:To-Be-Budgeted    80.00 TRY
+
+2026-01-31 * \"Envelope adjustment 2026-01\" #envelope
+  envelope-kind: \"Envelope adjustment\"
+  envelope-month: \"2026-01\"
+  Equity:Envelope:Food              20.00 TRY
+  Equity:Envelope:To-Be-Budgeted   -20.00 TRY
+
+2026-02-28 * \"Envelope funding 2026-02\" #envelope
+  envelope-kind: \"Envelope funding\"
+  envelope-month: \"2026-02\"
+  Equity:Envelope:Food             300.00 TRY
+  Equity:Envelope:Fun              200.00 TRY
+  Equity:Envelope:To-Be-Budgeted  -500.00 TRY
+
+2026-02-28 * \"Envelope activity 2026-02\" #envelope
+  envelope-kind: \"Envelope activity\"
+  envelope-month: \"2026-02\"
+  Equity:Envelope:Food:Bread       -80.00 TRY
+  Equity:Envelope:Fun             -120.00 TRY
+  Equity:Envelope:To-Be-Budgeted   200.00 TRY
+
+2026-02-28 * \"Envelope rollover 2026-02\" #envelope
+  envelope-kind: \"Envelope rollover\"
+  envelope-month: \"2026-02\"
+  Equity:Envelope:Fun              -80.00 TRY
+  Equity:Envelope:To-Be-Budgeted    80.00 TRY
+"
+    }
+
+    /// The budget opens on the newest month the plugin budgeted, and reads the
+    /// month's figures per envelope and per group, with the pool of unassigned
+    /// money underneath.
+    #[test]
+    fn budget_reads_the_newest_envelope_month() {
+        let dir = TempDir::new("budget-month");
+        let (_, path) = committed_fixture(&dir, envelope_fixture());
+        let state = loaded_state(&path);
+        let month = budget_view(&state, None).unwrap();
+
+        assert_eq!(month.month, "2026-02");
+        assert_eq!(month.months, ["2026-01", "2026-02"]);
+        assert_eq!(month.currency, "TRY");
+        // The pool: 1000 backed in, 500 + 500 funded, 80 + 120 + 200 spent
+        // activity back, the adjustment's 20 and the sweep's 80 out.
+        assert_eq!(month.to_budget, "340.00");
+        assert_eq!(
+            budget_rows(&month),
+            vec![
+                vec![
+                    // The group's own envelope holds the funding, its child the
+                    // spending, so only the group row is the whole story.
+                    ("Food", "300.00", "80.00", "490.00"),
+                    ("Food", "300.00", "0", "620.00"),
+                    ("Bread", "0", "80.00", "-130.00"),
+                ],
+                vec![
+                    // The rollover's 80 goes back to the pool, so the month
+                    // budgeted Fun 120 of its 200, not all of it.
+                    ("Fun", "120.00", "120.00", "170.00"),
+                    ("Fun", "120.00", "120.00", "170.00"),
+                ],
+            ]
+        );
+    }
+
+    /// A requested month is read on its own terms: its own flows, and the
+    /// balance every earlier month carries into it.
+    #[test]
+    fn budget_reads_any_budget_month() {
+        let dir = TempDir::new("budget-any-month");
+        let (_, path) = committed_fixture(&dir, envelope_fixture());
+        let state = loaded_state(&path);
+
+        let january = budget_view(&state, Some("2026-01")).unwrap();
+        assert_eq!(january.month, "2026-01");
+        assert_eq!(january.months, ["2026-01", "2026-02"]);
+        assert_eq!(january.to_budget, "560.00");
+        assert_eq!(
+            budget_rows(&january),
+            vec![
+                vec![
+                    ("Food", "320.00", "50.00", "270.00"),
+                    ("Food", "320.00", "0", "320.00"),
+                    ("Bread", "0", "50.00", "-50.00"),
+                ],
+                vec![
+                    ("Fun", "200.00", "30.00", "170.00"),
+                    ("Fun", "200.00", "30.00", "170.00"),
+                ],
+            ]
+        );
+
+        // A month the plugin never budgeted carries the balances it ended with
+        // and moves nothing of its own.
+        let march = budget_view(&state, Some("2026-03")).unwrap();
+        assert_eq!(march.month, "2026-03");
+        assert_eq!(march.to_budget, "340.00");
+        assert_eq!(
+            budget_rows(&march),
+            vec![
+                vec![
+                    ("Food", "0", "0", "490.00"),
+                    ("Food", "0", "0", "620.00"),
+                    ("Bread", "0", "0", "-130.00"),
+                ],
+                vec![("Fun", "0", "0", "170.00"), ("Fun", "0", "0", "170.00")],
+            ]
+        );
+
+        // Before the first budget month there is nothing to carry: an empty
+        // month rather than a made-up one.
+        let before = budget_view(&state, Some("2025-12")).unwrap();
+        assert!(before.groups.is_empty());
+        assert_eq!(before.to_budget, "0");
+
+        // A label that is not a month is refused rather than guessed at.
+        for bad in ["2026-1", "2026-13", "junk", ""] {
+            assert!(budget_view(&state, Some(bad)).is_err(), "`{bad}` must not read");
+        }
+    }
+
+    /// The budget's two refusals: nothing loaded, and a ledger the plugin has
+    /// not budgeted — an empty month would claim something the ledger does not.
+    #[test]
+    fn budget_refuses_a_ledger_it_cannot_read() {
+        assert_eq!(
+            budget_view(&AppState::default(), None).unwrap_err(),
+            "no ledger loaded"
+        );
+
+        let dir = TempDir::new("budget-none");
+        let (_, path) = committed_fixture(
+            &dir,
+            "option \"operating_currency\" \"USD\"\n\n2026-01-01 open Assets:Bank\n",
+        );
+        let state = loaded_state(&path);
+        let error = budget_view(&state, None).unwrap_err();
+        assert!(error.contains("Equity:Envelope:"), "{error}");
+    }
+
+    /// A hand-written entry in the namespace carries no metadata, so the sign of
+    /// its postings decides what it is: money into an envelope is funding, money
+    /// out of it is spending.
+    #[test]
+    fn budget_reads_envelope_entries_without_metadata() {
+        let dir = TempDir::new("budget-plain");
+        let (_, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"TRY\"
+
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+2026-01-01 open Equity:Envelope:Groceries
+2026-01-01 open Equity:Envelope:To-Be-Budgeted
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank                     -50.00 TRY
+  Expenses:Food                    50.00 TRY
+
+2026-01-31 * \"Envelope funding 2026-01\" #envelope
+  Equity:Envelope:Groceries       100.00 TRY
+  Equity:Envelope:To-Be-Budgeted -100.00 TRY
+
+2026-01-31 * \"Envelope activity 2026-01\" #envelope
+  Equity:Envelope:Groceries       -50.00 TRY
+  Equity:Envelope:To-Be-Budgeted   50.00 TRY
+",
+        );
+        let state = loaded_state(&path);
+        let month = budget_view(&state, None).unwrap();
+        assert_eq!(month.month, "2026-01");
+        assert_eq!(month.months, ["2026-01"]);
+        // No backing entry in this ledger, so the pool is short by the 50 that
+        // was already spent when it was funded.
+        assert_eq!(month.to_budget, "-50.00");
+        assert_eq!(
+            budget_rows(&month),
+            vec![vec![
+                ("Groceries", "100.00", "50.00", "50.00"),
+                ("Groceries", "100.00", "50.00", "50.00"),
+            ]]
+        );
+    }
+
+    /// The budget is the only surface that reads the envelope accounts: the
+    /// tree, the balances and the register still hide them, metadata or not.
+    #[test]
+    fn envelope_accounts_stay_out_of_the_other_surfaces() {
+        let dir = TempDir::new("budget-hidden");
+        let (_, path) = committed_fixture(&dir, envelope_fixture());
+        let state = loaded_state(&path);
+
+        let balances = {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            account_balances(&guard.as_ref().unwrap().ledger, &BTreeMap::new())
+        };
+        let names: Vec<&str> = balances.iter().map(|balance| balance.name.as_str()).collect();
+        // Equity holds nothing but envelope money here, so the branch that would
+        // report it has nothing left to report.
+        assert_eq!(
+            names,
+            [
+                "Assets",
+                "Assets:Bank",
+                "Expenses",
+                "Expenses:Food",
+                "Expenses:Food:Bread",
+                "Expenses:Fun",
+            ]
+        );
+        let bank = balances
+            .iter()
+            .find(|balance| balance.name == "Assets:Bank")
+            .unwrap();
+        assert_eq!((bank.balance.as_str(), bank.currency.as_str()), ("-50.00", "TRY"));
+
+        // The plugin's entries never reach the register; the user's own does.
+        let shown: Vec<String> = views(&state).into_iter().map(|view| view.narration).collect();
+        assert_eq!(shown, ["Bakery"]);
     }
 }

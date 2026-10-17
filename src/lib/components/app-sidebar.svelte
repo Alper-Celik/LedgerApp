@@ -11,16 +11,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import {
 		Add01Icon,
 		ChevronRightIcon,
+		DashboardSquare01Icon,
 		FileDiffIcon,
 		GitCommitIcon,
 		Settings01Icon,
+		Wallet01Icon,
 	} from "@hugeicons/core-free-icons";
-	import { commands, type AccountBalance, type JournalFile } from "../../bindings";
+	import { commands, type AccountBalance, type Change, type JournalFile } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import * as Select from "$lib/components/ui/select/index.js";
+	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import { today } from "$lib/dates.js";
 	import {
 		ACCOUNT_SECTIONS,
@@ -29,7 +32,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		type AccountNode,
 	} from "$lib/accounts.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
-	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
+	import GitStatus from "$lib/components/git-status.svelte";
 	import { bumpLedgerRevision, ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import {
 		SIDEBAR_WIDTH_STORAGE_KEY,
@@ -43,22 +46,27 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let files = $state<JournalFile[]>([]);
 
 	/**
-	 * The accounts the backend marks uncommitted, by full name. Its flag is
-	 * already rolled up every ancestor, so a row asks by its own name — and the
-	 * virtual root row, which stands for all of them, asks whether the set has
-	 * anything in it.
+	 * How each account stands in git, by full name. The backend has already
+	 * rolled a change up every ancestor, so a row asks by its own name — and the
+	 * virtual root row, which stands for all of them, asks whether any account
+	 * has something to say.
 	 */
-	const modifiedAccounts = $derived(
-		new Set(accounts.filter((account) => account.modified).map((account) => account.name))
+	const accountChanges = $derived(
+		new Map(accounts.map((account) => [account.name, account.change] as const))
 	);
 
 	/**
-	 * Non-account views. Future budget and dashboard views belong in this group
-	 * (or a sibling group) the same way.
+	 * Views beside the register: the ledger's own budget, the dashboards, and the
+	 * git ones. A new view belongs in this list the same way.
+	 *
+	 * Resolved one literal at a time, at module scope: `resolve` has an overload
+	 * per route, so it cannot take a variable whose type is a union of them.
 	 */
-	const GIT_VIEWS = [
-		{ href: "/diff", label: "Diff", icon: FileDiffIcon },
-		{ href: "/commit", label: "Commit", icon: GitCommitIcon },
+	const VIEWS = [
+		{ href: resolve("/budget"), label: "Budget", icon: Wallet01Icon },
+		{ href: resolve("/dashboards"), label: "Dashboards", icon: DashboardSquare01Icon },
+		{ href: resolve("/diff"), label: "Diff", icon: FileDiffIcon },
+		{ href: resolve("/commit"), label: "Commit", icon: GitCommitIcon },
 	] as const;
 
 	/**
@@ -208,6 +216,99 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.px));
 	}
 
+	/** One row of the file browser: a folder, or a journal file. */
+	type FileNode = {
+		name: string;
+		/** The file's path for a file, the folder's own for a folder. */
+		path: string;
+		/** The journal file this row is, or `null` for a folder. */
+		file: JournalFile | null;
+		children: FileNode[];
+		/** The strongest change anywhere at or under the row, folders included. */
+		change: Change;
+	};
+
+	/**
+	 * The journal's files as a tree, the way a code editor's explorer draws them:
+	 * the folders their paths make, then the files. The labels are relative to the
+	 * journal's own directory, so they are what the tree is built from — a file
+	 * outside it brings its own path's folders along.
+	 *
+	 * Folders first, then files, each alphabetically, which is what an explorer
+	 * does and what keeps a growing ledger readable; a folder carries the
+	 * strongest change under it, so a folded one still says something inside it
+	 * moved.
+	 */
+	function fileTree(entries: JournalFile[]): FileNode[] {
+		const root: FileNode = { name: "", path: "", file: null, children: [], change: "unchanged" };
+		for (const file of entries) {
+			let node = root;
+			let walked = "";
+			for (const part of file.label.split("/").filter((part) => part !== "")) {
+				walked = walked === "" ? part : `${walked}/${part}`;
+				let child = node.children.find((candidate) => candidate.name === part);
+				if (!child) {
+					child = { name: part, path: walked, file: null, children: [], change: "unchanged" };
+					node.children.push(child);
+				}
+				node = child;
+			}
+			node.file = file;
+			node.path = file.path;
+		}
+		const roll = (node: FileNode): Change => {
+			let change = node.file?.change ?? "unchanged";
+			for (const child of node.children) {
+				const under = roll(child);
+				if (under === "modified" || (under === "added" && change === "unchanged")) change = under;
+			}
+			node.change = change;
+			return change;
+		};
+		const order = (nodes: FileNode[]) => {
+			nodes.sort(
+				(a, b) =>
+					Number(a.file !== null) - Number(b.file !== null) || a.name.localeCompare(b.name)
+			);
+			for (const node of nodes) order(node.children);
+		};
+		roll(root);
+		order(root.children);
+		return root.children;
+	}
+
+	let tree = $derived(fileTree(files));
+
+	/** Folded folders by path; everything opens by default, as it does in an explorer. */
+	let foldedFiles = $state<Record<string, boolean>>({});
+
+	/**
+	 * A file's page: its path percent-encoded into one route segment. `resolve` is
+	 * not used for it because it refuses a parameter that starts with a slash,
+	 * which every absolute path does.
+	 */
+	const fileHref = (file: JournalFile) => `/files/${encodeURIComponent(file.path)}`;
+
+	/** localStorage key holding which of the two lists the sidebar shows. */
+	const LIST_KEY = "sidebar_list";
+	/**
+	 * The two lists share one place in the sidebar, so they are a tab each: the
+	 * accounts the ledger has, and the files they are written in. Remembered
+	 * across visits, like the register's own choices.
+	 */
+	let list = $state<"accounts" | "files">(
+		localStorage.getItem(LIST_KEY) === "files" ? "files" : "accounts"
+	);
+
+	/** The ledger's own standing: the strongest change any account carries. */
+	const ledgerChange = $derived(
+		accounts.reduce<Change>((strongest, account) => {
+			if (account.change === "modified") return "modified";
+			if (account.change === "added" && strongest === "unchanged") return "added";
+			return strongest;
+		}, "unchanged")
+	);
+
 	let sections = $derived(
 		ACCOUNT_SECTIONS.map((section) => ({
 			section,
@@ -237,7 +338,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	-->
 	<span class="flex min-w-0 flex-1 items-center gap-2">
 		<span class="min-w-0 truncate">{node.name}</span>
-		<UncommittedMark modified={modifiedAccounts.has(node.fullName)} />
+		<GitStatus change={accountChanges.get(node.fullName) ?? "unchanged"} />
 		{#if node.balance}
 			<MoneyAmount
 				units={node.balance.units}
@@ -246,6 +347,71 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			/>
 		{/if}
 	</span>
+{/snippet}
+
+{#snippet renderFiles(nodes: FileNode[], depth: number)}
+	{#each nodes as node (node.path)}
+		{#if node.file}
+			{@const file = node.file}
+			<Sidebar.MenuItem>
+				<Sidebar.MenuButton
+					size="sm"
+					class="rounded-none"
+					isActive={page.url.pathname === fileHref(file)}
+				>
+					{#snippet child({ props })}
+						<a {...props} href={fileHref(file)} title={file.path}>
+							<span class="flex min-w-0 flex-1 items-center gap-2">
+								<span class="min-w-0 truncate">{node.name}</span>
+								<GitStatus change={node.change} />
+								<span class="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+									{file.transactions}
+								</span>
+							</span>
+						</a>
+					{/snippet}
+				</Sidebar.MenuButton>
+			</Sidebar.MenuItem>
+		{:else}
+			<Sidebar.MenuItem class="flex items-center">
+				<Sidebar.MenuButton
+					size="sm"
+					class="w-auto rounded-none px-1.5"
+					aria-label={`Toggle ${node.path}`}
+					aria-expanded={!foldedFiles[node.path]}
+					onclick={() => (foldedFiles[node.path] = !foldedFiles[node.path])}
+				>
+					<HugeiconsIcon
+						icon={ChevronRightIcon}
+						strokeWidth={2}
+						data-icon="inline-start"
+						class={cn(
+							"transition-transform transition-motion-fast",
+							foldedFiles[node.path] ? "" : "rotate-90"
+						)}
+					/>
+				</Sidebar.MenuButton>
+				<!-- The name is the toggle too: a folder row has nothing else to be. -->
+				<Sidebar.MenuButton
+					size="sm"
+					class="rounded-none"
+					onclick={() => (foldedFiles[node.path] = !foldedFiles[node.path])}
+				>
+					<span class="flex min-w-0 flex-1 items-center gap-2">
+						<span class="min-w-0 truncate">{node.name}</span>
+						<GitStatus change={node.change} />
+					</span>
+				</Sidebar.MenuButton>
+			</Sidebar.MenuItem>
+			<div class={cn("fold", !foldedFiles[node.path] && "fold-open")}>
+				<div class="overflow-hidden">
+					<Sidebar.MenuSub class="ml-3.5 mr-0 translate-x-0 gap-0 py-0 pl-0 pr-0">
+						{@render renderFiles(node.children, depth + 1)}
+					</Sidebar.MenuSub>
+				</div>
+			</div>
+		{/if}
+	{/each}
 {/snippet}
 
 {#snippet renderAccounts(nodes: AccountNode[], depth: number)}
@@ -341,18 +507,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	<Sidebar.Content>
 		<Sidebar.Group>
-			<Sidebar.GroupLabel class="rounded-none">Git</Sidebar.GroupLabel>
+			<Sidebar.GroupLabel class="rounded-none">Views</Sidebar.GroupLabel>
 			<Sidebar.GroupContent>
 				<Sidebar.Menu>
-					{#each GIT_VIEWS as item (item.href)}
+					{#each VIEWS as item (item.href)}
 						<Sidebar.MenuItem>
 							<Sidebar.MenuButton
 								size="sm"
 								class="rounded-none"
-								isActive={page.url.pathname === resolve(item.href)}
+								isActive={page.url.pathname === item.href}
 							>
 								{#snippet child({ props })}
-									<a {...props} href={resolve(item.href)}>
+									<a {...props} href={item.href}>
 										<HugeiconsIcon
 											icon={item.icon}
 											strokeWidth={2}
@@ -367,6 +533,45 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Sidebar.Menu>
 			</Sidebar.GroupContent>
 		</Sidebar.Group>
+
+		<!--
+			The two lists share the sidebar's one list place, so they are a tab
+			each: the accounts the ledger has, and the files they are written in.
+		-->
+		<div class="px-1.5 pb-1">
+			<ToggleGroup.Root
+				size="sm"
+				type="single"
+				value={list}
+				onValueChange={(next) => next && (list = next as "accounts" | "files")}
+				aria-label="Sidebar list"
+			>
+				<ToggleGroup.Item value="accounts">Accounts</ToggleGroup.Item>
+				<ToggleGroup.Item value="files">Files</ToggleGroup.Item>
+			</ToggleGroup.Root>
+		</div>
+
+		{#if list === "files"}
+			<!--
+				The journal's files, as an explorer draws them: the folders their
+				paths make and then the files, each with how it stands in git and
+				how many entries it writes. A row is a link to that file's own page.
+			-->
+			<Sidebar.Group>
+				<Sidebar.GroupContent>
+					<Sidebar.Menu>
+						{@render renderFiles(tree, 0)}
+						{#if tree.length === 0}
+							<Sidebar.MenuItem>
+								<span class="text-muted-foreground px-2 py-1 text-xs">
+									No journal file is loaded.
+								</span>
+							</Sidebar.MenuItem>
+						{/if}
+					</Sidebar.Menu>
+				</Sidebar.GroupContent>
+			</Sidebar.Group>
+		{:else}
 		{#each sections as entry (entry.section.label)}
 			<Sidebar.Group>
 				<Sidebar.GroupContent>
@@ -488,7 +693,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									<a {...props} href={resolve("/ledger")}>
 										<span class="flex min-w-0 flex-1 items-center gap-2">
 											<span class="min-w-0 truncate">{entry.section.label}</span>
-											<UncommittedMark modified={modifiedAccounts.size > 0} />
+											<GitStatus change={ledgerChange} />
 										</span>
 									</a>
 								{/snippet}
@@ -508,54 +713,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Sidebar.GroupContent>
 			</Sidebar.Group>
 		{/each}
-
-		<!--
-			The journal's files, listed the way the accounts are: this is the file
-			browser, and every row is a link to that file's own page, where it is
-			read as transactions or as text.
-		-->
-		<Sidebar.Group>
-			<Sidebar.GroupLabel class="rounded-none">Files</Sidebar.GroupLabel>
-			<Sidebar.GroupContent>
-				<Sidebar.Menu>
-					{#each files as file (file.path)}
-						<!--
-							The path is the file's identity, so it is what the route
-							carries — percent-encoded into one path segment.
-							`resolve` is not used here because it refuses a parameter
-							that starts with a slash, which every absolute path does.
-						-->
-						{@const href = `/files/${encodeURIComponent(file.path)}`}
-						<Sidebar.MenuItem>
-							<Sidebar.MenuButton
-								size="sm"
-								class="rounded-none"
-								isActive={page.url.pathname === href}
-							>
-								{#snippet child({ props })}
-									<a {...props} {href} title={file.path}>
-										<span class="flex min-w-0 flex-1 items-center gap-2">
-											<span class="min-w-0 truncate">{file.label}</span>
-											<UncommittedMark modified={file.modified} />
-											<span class="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-												{file.transactions}
-											</span>
-										</span>
-									</a>
-								{/snippet}
-							</Sidebar.MenuButton>
-						</Sidebar.MenuItem>
-					{/each}
-					{#if files.length === 0}
-						<Sidebar.MenuItem>
-							<span class="text-muted-foreground px-2 py-1 text-xs">
-								No journal file is loaded.
-							</span>
-						</Sidebar.MenuItem>
-					{/if}
-				</Sidebar.Menu>
-			</Sidebar.GroupContent>
-		</Sidebar.Group>
+		{/if}
 	</Sidebar.Content>
 	<Sidebar.Footer>
 		<Sidebar.Menu>
