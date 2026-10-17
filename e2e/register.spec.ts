@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { expect, test } from "@playwright/test";
-import { editArgument, invokes, stubIpc } from "./stub";
+import { addedEntry, editArgument, invokes, stubIpc, suggestedFor } from "./stub";
 
 test.beforeEach(async ({ page }) => {
 	await stubIpc(page);
@@ -74,6 +74,50 @@ test("editing a cell in place sends exact decimal strings, never floats", async 
 	]);
 	// Decimal strings all the way: nothing was parsed into a float.
 	expect(JSON.stringify(edit)).not.toMatch(/\d+\.\d{3,}/);
+});
+
+test("a new transaction is composed, filed where the backend suggests, and sent", async ({ page }) => {
+	await page.goto("/account/Assets:Bank");
+	await page.getByRole("button", { name: "New transaction" }).click();
+
+	// The form opens on an entry that is not in the ledger yet: the register's
+	// own account on the first posting, the date, and the file the backend
+	// deduced from the accounts — asked about those accounts and no others.
+	await expect(page.getByLabel("Posting 1 account")).toHaveValue("Assets:Bank");
+	await expect
+		.poll(async () => suggestedFor(await invokes(page)))
+		.toEqual(["Assets:Bank"]);
+	await expect(page.getByRole("radio", { name: "2026.bean" })).toBeChecked();
+
+	await page.getByLabel("Narration").fill("Coffee");
+	await page.getByLabel("Posting 1 amount").fill("-3.50");
+	await page.getByLabel("Posting 2 account").fill("Expenses:Food");
+	await page.getByLabel("Posting 2 amount").fill("3.50");
+	// The accounts are what the deduction follows, so the ask follows them too.
+	await expect
+		.poll(async () => suggestedFor(await invokes(page)))
+		.toEqual(["Assets:Bank", "Expenses:Food"]);
+
+	// Picking a file by hand beats the suggestion, and is what gets written to.
+	await page.getByRole("radio", { name: "main.bean" }).click();
+	await expect(page.getByRole("radio", { name: "main.bean" })).toBeChecked();
+	await page.getByRole("button", { name: "Add transaction" }).click();
+
+	await expect.poll(async () => addedEntry(await invokes(page))).toMatchObject({
+		file: "/books/main.bean",
+		flag: "*",
+		payee: null,
+		narration: "Coffee",
+		// The amounts are the strings that were typed, and the commodities the
+		// fields were left empty on are the backend's to fill in.
+		postings: [
+			{ account: "Assets:Bank", units: "-3.50", currency: null },
+			{ account: "Expenses:Food", units: "3.50", currency: null },
+		],
+	});
+	// A write that went through closes the form and leaves the register standing.
+	await expect(page.getByRole("dialog")).toBeHidden();
+	await expect(page.getByRole("heading", { name: "Assets:Bank" })).toBeVisible();
 });
 
 test("the diff and commit views use the backend's diff, and commit the message", async ({ page }) => {

@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Page } from "@playwright/test";
-import type { AccountBalance, TransactionEdit, TransactionView } from "../src/bindings";
+import type {
+	AccountBalance,
+	JournalFile,
+	NewTransaction,
+	TransactionEdit,
+	TransactionView,
+} from "../src/bindings";
 
 /**
  * The Tauri IPC stub the e2e tests run against: fixtures defined here, never a
@@ -62,6 +68,15 @@ export const source = `2026-01-10 * "Migros" "weekly groceries"
   Expenses:Food:Groceries  123.45 TRY
 `;
 
+/** The journal's files, as the backend lists them: root journal first. */
+export const files: JournalFile[] = [
+	{ path: "/books/main.bean", label: "main.bean" },
+	{ path: "/books/2026.bean", label: "2026.bean" },
+];
+
+/** The file the backend deduces for an entry on the fixture accounts. */
+export const suggestedFile = "/books/2026.bean";
+
 export const diff = `diff --git a/main.bean b/main.bean
 index 1a2b3c4..5d6e7f8 100644
 --- a/main.bean
@@ -95,8 +110,13 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.transactions);
 						case "transaction_source":
 							return Promise.resolve(fixtures.source);
+						case "journal_files":
+							return Promise.resolve(fixtures.files);
+						case "suggest_transaction_file":
+							return Promise.resolve(fixtures.suggestedFile);
 						case "update_transaction":
 						case "update_transaction_source":
+						case "add_transaction":
 							return Promise.resolve(null);
 						case "ledger_diff":
 							return Promise.resolve(fixtures.diff);
@@ -116,7 +136,7 @@ export async function stubIpc(page: Page) {
 			});
 			Object.defineProperty(window, "__invokes", { value: log, writable: false });
 		},
-		{ accounts, transactions, source, diff }
+		{ accounts, transactions, source, diff, files, suggestedFile }
 	);
 }
 
@@ -147,4 +167,18 @@ export function editArgument(calls: Invoke[], cmd: string): TransactionEdit | un
 	if (!call || typeof call.args !== "object" || call.args === null || !("edit" in call.args)) return undefined;
 	const edit = call.args.edit;
 	return isTransactionEdit(edit) ? edit : undefined;
+}
+
+/** The entry the UI most recently handed to `add_transaction`. */
+export function addedEntry(calls: Invoke[]): NewTransaction | undefined {
+	const call = [...calls].reverse().find((entry) => entry.cmd === "add_transaction");
+	if (!call || typeof call.args !== "object" || call.args === null || !("entry" in call.args)) return undefined;
+	return call.args.entry as NewTransaction;
+}
+
+/** The accounts the UI most recently asked `suggest_transaction_file` about. */
+export function suggestedFor(calls: Invoke[]): string[] | undefined {
+	const call = [...calls].reverse().find((entry) => entry.cmd === "suggest_transaction_file");
+	if (!call || typeof call.args !== "object" || call.args === null || !("accounts" in call.args)) return undefined;
+	return call.args.accounts as string[];
 }

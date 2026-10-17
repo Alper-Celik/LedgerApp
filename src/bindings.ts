@@ -66,6 +66,24 @@ export const commands = {
 	 */
 	updateFileSource: (id: number, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_source", { id, text })),
 	/**
+	 *  The journal's files — the root journal first, then everything it includes —
+	 *  for the new-entry form's file picker.
+	 */
+	journalFiles: () => __TAURI_INVOKE<JournalFile[]>("journal_files"),
+	/**
+	 *  The journal file a new transaction should go into, given the accounts it
+	 *  mentions — the new-entry form's default, so the form can preselect a file
+	 *  before the user has to think about one. `None` only when no ledger is loaded.
+	 */
+	suggestTransactionFile: (accounts: string[]) => __TAURI_INVOKE<string | null>("suggest_transaction_file", { accounts }),
+	/**
+	 *  Append a new transaction to one of the journal's files, through the same
+	 *  pipeline as every other edit: reload the ledger and refuse the write (putting
+	 *  the file back byte-for-byte) if the reload fails or raises an error the
+	 *  ledger did not already have, and stage the file on success.
+	 */
+	addTransaction: (entry: NewTransaction) => typedError<null, string>(__TAURI_INVOKE("add_transaction", { entry })),
+	/**
 	 *  Unified diff of the ledger's files against HEAD, index and working tree
 	 *  together, for the diff view: git's own patch text under a `=== path ===`
 	 *  header per changed file.
@@ -100,6 +118,25 @@ export type AccountBalance = {
 	modified: boolean,
 };
 
+/**
+ *  One file of the loaded journal — the journal the session was opened with and
+ *  every file it pulls in with `include`. These are the files a new transaction
+ *  may be written into.
+ */
+export type JournalFile = {
+	/**
+	 *  The path as loaded, which is what a new entry sends back to say where to
+	 *  write. The frontend only ever echoes a path it was handed; it never
+	 *  builds one.
+	 */
+	path: string,
+	/**
+	 *  Name to show: the path relative to the journal's own directory when the
+	 *  file lives under it, else the path as it stands.
+	 */
+	label: string,
+};
+
 /**  Summary of a successful ledger load. */
 export type LoadSummary = {
 	/**  Path of the loaded root journal. */
@@ -111,6 +148,37 @@ export type LoadSummary = {
 	 *  loaded and usable.
 	 */
 	error_count: number,
+};
+
+/**  One posting of a new transaction: the account, and what it is worth. */
+export type NewPosting = {
+	account: string,
+	/**
+	 *  The units figure as typed. `None` (or empty) writes the account alone and
+	 *  leaves the amount to be interpolated at load time.
+	 */
+	units: string | null,
+	/**
+	 *  The commodity. `None` (or empty) writes the ledger's first
+	 *  `option "operating_currency"`.
+	 */
+	currency: string | null,
+};
+
+/**
+ *  A transaction that is not in the ledger yet, as the new-entry form fills it
+ *  out: the shape of a [`TransactionEdit`] plus the file to write it into, and
+ *  with the amounts optional — a posting left without a figure is the leg
+ *  beancount interpolates.
+ */
+export type NewTransaction = {
+	/**  Path of the journal file to append to, as [`journal_files`] reported it. */
+	file: string,
+	date: string,
+	flag: string,
+	payee: string | null,
+	narration: string,
+	postings: NewPosting[],
 };
 
 /**

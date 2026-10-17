@@ -4,7 +4,7 @@
 
 use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -124,6 +124,47 @@ pub struct TransactionFile {
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
+}
+
+/// One file of the loaded journal — the journal the session was opened with and
+/// every file it pulls in with `include`. These are the files a new transaction
+/// may be written into.
+#[derive(Debug, serde::Serialize, specta::Type)]
+pub struct JournalFile {
+    /// The path as loaded, which is what a new entry sends back to say where to
+    /// write. The frontend only ever echoes a path it was handed; it never
+    /// builds one.
+    pub path: String,
+    /// Name to show: the path relative to the journal's own directory when the
+    /// file lives under it, else the path as it stands.
+    pub label: String,
+}
+
+/// A transaction that is not in the ledger yet, as the new-entry form fills it
+/// out: the shape of a [`TransactionEdit`] plus the file to write it into, and
+/// with the amounts optional — a posting left without a figure is the leg
+/// beancount interpolates.
+#[derive(Debug, serde::Deserialize, specta::Type)]
+pub struct NewTransaction {
+    /// Path of the journal file to append to, as [`journal_files`] reported it.
+    pub file: String,
+    pub date: String, // YYYY-MM-DD
+    pub flag: String, // "*" or "!"
+    pub payee: Option<String>,
+    pub narration: String,
+    pub postings: Vec<NewPosting>,
+}
+
+/// One posting of a new transaction: the account, and what it is worth.
+#[derive(Debug, serde::Deserialize, specta::Type)]
+pub struct NewPosting {
+    pub account: String,
+    /// The units figure as typed. `None` (or empty) writes the account alone and
+    /// leaves the amount to be interpolated at load time.
+    pub units: Option<String>,
+    /// The commodity. `None` (or empty) writes the ledger's first
+    /// `option "operating_currency"`.
+    pub currency: Option<String>,
 }
 
 /// A loaded ledger together with the baseline the register's `modified` flags
@@ -384,6 +425,38 @@ fn update_file_source(id: u32, text: String, state: State<'_, AppState>) -> Resu
     edit_file_source(&state, id, &text)
 }
 
+/// The journal's files — the root journal first, then everything it includes —
+/// for the new-entry form's file picker.
+#[tauri::command]
+#[specta::specta]
+fn journal_files(state: State<'_, AppState>) -> Vec<JournalFile> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map(journal_file_views).unwrap_or_default()
+}
+
+/// The journal file a new transaction should go into, given the accounts it
+/// mentions — the new-entry form's default, so the form can preselect a file
+/// before the user has to think about one. `None` only when no ledger is loaded.
+#[tauri::command]
+#[specta::specta]
+fn suggest_transaction_file(accounts: Vec<String>, state: State<'_, AppState>) -> Option<String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref()?;
+    let index = default_file(&loaded.ledger, &accounts)?;
+    let file = loaded.ledger.source_map.files().get(index)?;
+    Some(file.path.display().to_string())
+}
+
+/// Append a new transaction to one of the journal's files, through the same
+/// pipeline as every other edit: reload the ledger and refuse the write (putting
+/// the file back byte-for-byte) if the reload fails or raises an error the
+/// ledger did not already have, and stage the file on success.
+#[tauri::command]
+#[specta::specta]
+fn add_transaction(entry: NewTransaction, state: State<'_, AppState>) -> Result<(), String> {
+    create_transaction(&state, entry)
+}
+
 /// Unified diff of the ledger's files against HEAD, index and working tree
 /// together, for the diff view: git's own patch text under a `=== path ===`
 /// header per changed file.
@@ -410,8 +483,6 @@ fn account_transaction_views(
     baseline: &HashMap<PathBuf, Arc<str>>,
     account: &str,
 ) -> Vec<TransactionView> {
-    let prefix = format!("{account}:");
-    let root = account.is_empty();
     let view = ledger.balance_view();
     // Flagging rows costs a git diff plus a walk of the directive stream; both
     // are skipped when the working tree has nothing to report — no repository,
@@ -437,11 +508,10 @@ fn account_transaction_views(
             {
                 return None;
             }
-            let touches = root
-                || tx.postings.iter().any(|posting| {
-                    let name = posting.value.account.as_str();
-                    name == account || name.starts_with(&prefix)
-                });
+            let touches = tx
+                .postings
+                .iter()
+                .any(|posting| mentions_account(posting.value.account.as_str(), account));
             if !touches {
                 return None;
             }
@@ -712,6 +782,310 @@ fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<(), String>
     };
 
     apply_file_edit(state, &path, &previous, text.to_string(), reported)
+}
+
+/// The body of [`add_transaction`], split out like [`edit_file_source`] so it
+/// can be driven without a running Tauri app: work out the file's new text from
+/// the loaded copy, then take the same reload-and-stage path as every edit.
+fn create_transaction(state: &AppState, entry: NewTransaction) -> Result<(), String> {
+    let (path, previous, rewritten, reported) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let ledger = &loaded.ledger;
+        // The entry names the file it goes into; a path the journal does not
+        // hold — a stale picker, a hand-written payload — is refused rather than
+        // written to, so this command can only ever touch the ledger's own
+        // files.
+        let file = ledger
+            .source_map
+            .get_by_path(Path::new(&entry.file))
+            .ok_or_else(|| format!("`{}` is not a file of this journal", entry.file))?;
+        let previous = file.source.to_string();
+        let rewritten = append_transaction(&previous, ledger, &entry)?;
+        (
+            file.path.clone(),
+            previous,
+            rewritten,
+            error_signatures(&ledger.errors),
+        )
+    };
+
+    apply_file_edit(state, &path, &previous, rewritten, reported)
+}
+
+/// The journal's files, as the new-entry picker shows them: in the loader's own
+/// order, which is the root journal first, then what it includes.
+fn journal_file_views(loaded: &Loaded) -> Vec<JournalFile> {
+    let files = loaded.ledger.source_map.files();
+    // The loader resolves everything a journal mentions relative to the root
+    // journal's directory (its own `base_dir` rule, shared by `include` and
+    // `option "documents"`), so that is the directory a label is relative to.
+    let base = files.first().and_then(|file| file.path.parent());
+    files
+        .iter()
+        .map(|file| JournalFile {
+            path: file.path.display().to_string(),
+            label: base
+                .and_then(|base| file.path.strip_prefix(base).ok())
+                .filter(|rest| !rest.as_os_str().is_empty())
+                .unwrap_or(file.path.as_path())
+                .display()
+                .to_string(),
+        })
+        .collect()
+}
+
+/// Picks the journal file a new transaction defaults to.
+///
+/// A strategy sees the loaded ledger and the accounts already typed, and answers
+/// with a file index; the form only ever asks [`suggest_transaction_file`], so
+/// which rule answers it — this one, a smarter one, or one backed by a model —
+/// is invisible to the form and to the command that writes the entry.
+trait FileSuggestion {
+    /// The index into `ledger.source_map.files()` a new entry belongs in, or
+    /// `None` when this strategy has nothing to say about these accounts.
+    fn suggest(&self, ledger: &Ledger, accounts: &[String]) -> Option<usize>;
+}
+
+/// The rule the app ships with: entries live next to their neighbours, so the
+/// file of the newest entry that already touches one of the accounts — on the
+/// account itself, or anywhere on its branch of the tree — is where a new one
+/// goes.
+struct RecentAccountActivity;
+
+impl FileSuggestion for RecentAccountActivity {
+    fn suggest(&self, ledger: &Ledger, accounts: &[String]) -> Option<usize> {
+        if accounts.is_empty() {
+            return None;
+        }
+        let view = ledger.balance_view();
+        let sources = source_directive_index(ledger, &view);
+        let mut suggested = None;
+        for (id, directive) in view.iter().enumerate() {
+            let Directive::Transaction(tx) = directive else {
+                continue;
+            };
+            let touches = tx.postings.iter().any(|posting| {
+                accounts
+                    .iter()
+                    .any(|account| same_branch(posting.value.account.as_str(), account))
+            });
+            if !touches {
+                continue;
+            }
+            // `balance_view` is in date order, so the last match on the walk is
+            // the newest entry. One the loader synthesized — a `pad`'s
+            // transaction, a plugin's generated entries — has no file of its own
+            // and cannot answer.
+            let Some(index) = sources.get(id).copied().flatten() else {
+                continue;
+            };
+            suggested = Some(ledger.directives[index].file_id as usize);
+        }
+        suggested
+    }
+}
+
+/// The strategy the app asks today. Swapping the default rule — for a smarter
+/// one, or for an AI-backed one — is a change to this line and nothing else.
+const FILE_SUGGESTION: RecentAccountActivity = RecentAccountActivity;
+
+/// The file index a new entry defaults to: what the strategy answers, else the
+/// root journal. A new entry always has somewhere to go, and the file every
+/// other one hangs off is the journal it belongs to.
+fn default_file(ledger: &Ledger, accounts: &[String]) -> Option<usize> {
+    let count = ledger.source_map.files().len();
+    match FILE_SUGGESTION.suggest(ledger, accounts) {
+        Some(index) if index < count => Some(index),
+        _ if count > 0 => Some(0),
+        _ => None,
+    }
+}
+
+/// Whether `name` is `account` itself or an account below it.
+fn is_under(name: &str, account: &str) -> bool {
+    name == account
+        || (name.len() > account.len()
+            && name.starts_with(account)
+            && name.as_bytes()[account.len()] == b':')
+}
+
+/// Whether a posting's `name` is one the register for `account` lists: the
+/// account itself or anything under it. An empty `account` is the virtual root,
+/// which lists everything.
+fn mentions_account(name: &str, account: &str) -> bool {
+    account.is_empty() || is_under(name, account)
+}
+
+/// Whether `name` and `account` lie on the same branch of the account tree:
+/// either is the other, or one sits under the other. Which file an entry belongs
+/// in is read that way round on both sides — an entry on `Expenses:Food` says
+/// where a new entry on `Expenses:Food:Groceries` goes, even though the
+/// register's own one-way filter would not have listed it there.
+fn same_branch(name: &str, account: &str) -> bool {
+    is_under(name, account) || is_under(account, name)
+}
+
+/// `text` with `entry` appended to the end of the file as a new transaction.
+///
+/// Only bytes are added: one blank line separates the entry from whatever the
+/// file already ends with, and not a byte of what was there is rewritten, so
+/// the change the diff view shows is the entry itself.
+fn append_transaction(
+    text: &str,
+    ledger: &Ledger,
+    entry: &NewTransaction,
+) -> Result<String, String> {
+    let rendered = render_transaction(text, ledger, entry)?;
+    let mut rewritten = String::with_capacity(text.len() + rendered.len() + 2);
+    rewritten.push_str(text);
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            rewritten.push_str("\n\n");
+        } else if !text.ends_with("\n\n") {
+            rewritten.push('\n');
+        }
+    }
+    rewritten.push_str(&rendered);
+    Ok(rewritten)
+}
+
+/// The text of `entry`, laid out the way the file it is going into lays its own
+/// postings out: the header, then one line per posting, each account padded to
+/// the column the file's postings put their amounts at.
+///
+/// Only the tokens beancount reads are written, from values that have been
+/// validated or quoted on the way in, so nothing typed into the form can land in
+/// the file as syntax of its own.
+fn render_transaction(
+    text: &str,
+    ledger: &Ledger,
+    entry: &NewTransaction,
+) -> Result<String, String> {
+    let date = checked_date(&entry.date)?;
+    let flag = checked_flag(&entry.flag)?;
+    let payee = entry
+        .payee
+        .as_deref()
+        .map(str::trim)
+        .filter(|payee| !payee.is_empty());
+    let narration = entry.narration.trim();
+    let mut rendered = String::new();
+    rendered.push_str(&date);
+    rendered.push(' ');
+    rendered.push_str(flag);
+    // A payee that only repeats the narration is not written down twice — the
+    // same rule the register's header rewrite follows.
+    if let Some(payee) = payee.filter(|payee| *payee != narration) {
+        rendered.push(' ');
+        rendered.push_str(&quote_beancount(payee));
+    }
+    rendered.push(' ');
+    rendered.push_str(&quote_beancount(narration));
+
+    let column = amount_column(text)
+        // A file with no posting to take a column from — a root journal of
+        // `open`s and `include`s, say — still gets postings that line up with
+        // each other: the entry is its own convention then.
+        .unwrap_or_else(|| 2 + longest_account(entry) + 1);
+    for (position, posting) in entry.postings.iter().enumerate() {
+        let account = posting.account.trim();
+        if account.is_empty() {
+            return Err(format!("posting {} has no account", position + 1));
+        }
+        rendered.push('\n');
+        rendered.push_str("  ");
+        rendered.push_str(account);
+        let figure = match posting
+            .units
+            .as_deref()
+            .map(str::trim)
+            .filter(|units| !units.is_empty())
+        {
+            // An amount left blank is the leg beancount interpolates: the
+            // account stands alone, the way a hand-written ledger leaves it.
+            None => continue,
+            Some(units) => Decimal::from_str(units)
+                .map_err(|e| format!("`{units}` is not an amount: {e}"))?
+                .to_string(),
+        };
+        let currency = posting
+            .currency
+            .as_deref()
+            .map(str::trim)
+            .filter(|currency| !currency.is_empty())
+            .or_else(|| ledger.options.operating_currency.first().map(String::as_str))
+            .ok_or("the ledger declares no `operating_currency` to write amounts in")?;
+        // Pad out to the file's own amount column, never below one space, so an
+        // account longer than the file's widest cannot touch its figure.
+        rendered.extend(std::iter::repeat_n(' ', column.saturating_sub(2 + account.len()).max(1)));
+        rendered.push_str(&figure);
+        rendered.push(' ');
+        rendered.push_str(currency);
+    }
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+/// The longest account `entry` posts to, in bytes — the width a file with no
+/// postings of its own gets its new entry aligned to.
+fn longest_account(entry: &NewTransaction) -> usize {
+    entry
+        .postings
+        .iter()
+        .map(|posting| posting.account.trim().len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The column the file's own postings put their amounts at: the one most of them
+/// agree on, so a new entry lines up with the entries around it. `None` when the
+/// file has no posting with a figure yet.
+fn amount_column(text: &str) -> Option<usize> {
+    let mut columns: BTreeMap<usize, usize> = BTreeMap::new();
+    for line in text.lines() {
+        if let Some(column) = posting_amount_column(line) {
+            *columns.entry(column).or_default() += 1;
+        }
+    }
+    // The most common column wins; a tie goes to the leftmost, so an entry never
+    // drifts further right than the file already puts its own amounts.
+    columns
+        .into_iter()
+        .max_by_key(|&(column, count)| (count, std::cmp::Reverse(column)))
+        .map(|(column, _)| column)
+}
+
+/// The byte column a posting line's amount figure starts at, when the line is
+/// one of the file's own postings: indented, an account name, then a figure.
+///
+/// A posting the file leaves without an amount has no figure to align to, and
+/// neither has anything else on the line: an account name starts with a capital
+/// and never ends with a colon, which is what keeps a metadata line's
+/// `key: value` from reading as one.
+fn posting_amount_column(line: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start().len();
+    if indent == 0 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let account_end = rest.find(char::is_whitespace)?;
+    let account = &rest[..account_end];
+    let named = account.chars().next()?.is_ascii_uppercase()
+        && account.contains(':')
+        && !account.ends_with(':')
+        && account
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_'));
+    if !named {
+        return None;
+    }
+    let value = &rest[account_end..];
+    let gap = value.len() - value.trim_start().len();
+    value
+        .trim_start()
+        .starts_with(|character: char| character.is_ascii_digit() || matches!(character, '-' | '+'))
+        .then_some(indent + account_end + gap)
 }
 
 /// The 1-based line and UTF-16 column of `byte` in `text` — Monaco's own
@@ -1535,6 +1909,9 @@ pub fn run() {
             update_transaction_source,
             transaction_file,
             update_file_source,
+            journal_files,
+            suggest_transaction_file,
+            add_transaction,
             ledger_diff,
             commit_ledger,
         ]);
@@ -1579,6 +1956,9 @@ mod tests {
                 update_transaction_source,
                 transaction_file,
                 update_file_source,
+                journal_files,
+                suggest_transaction_file,
+                add_transaction,
                 ledger_diff,
                 commit_ledger,
             ])
@@ -2869,4 +3249,341 @@ option \"operating_currency\" \"TRY\"
         assert_eq!(root[0].id, u32::try_from(index).unwrap());
     }
 
+    /// The column the fixtures' posting lines align their amounts at.
+    const FIXTURE_COLUMN: usize = 34;
+
+    /// A posting line of the shape the fixtures write: two-space indent, the
+    /// account, then spaces out to [`FIXTURE_COLUMN`], then the figure and its
+    /// commodity.
+    fn aligned(account: &str, units: &str, currency: &str) -> String {
+        format!(
+            "  {account}{}{units} {currency}",
+            " ".repeat(FIXTURE_COLUMN.saturating_sub(2 + account.len()))
+        )
+    }
+
+    /// A posting of a new entry, as the form sends it.
+    fn new_posting(account: &str, units: Option<&str>) -> NewPosting {
+        NewPosting {
+            account: account.to_string(),
+            units: units.map(str::to_string),
+            currency: Some("USD".to_string()),
+        }
+    }
+
+    /// A new entry for `file`, with the fixtures' own shape.
+    fn new_entry(file: &Path, date: &str, narration: &str, postings: Vec<NewPosting>) -> NewTransaction {
+        NewTransaction {
+            file: file.display().to_string(),
+            date: date.to_string(),
+            flag: "*".to_string(),
+            payee: None,
+            narration: narration.to_string(),
+            postings,
+        }
+    }
+
+    /// A journal split the way a real one is: a root of `open` directives and
+    /// `include`s, and a file of entries it pulls in — the shape the file picker
+    /// exists for. The entries file aligns its amounts at [`FIXTURE_COLUMN`].
+    fn split_fixture(dir: &TempDir) -> (git2::Repository, PathBuf, PathBuf) {
+        let root = dir.file("main.bean");
+        let entries = dir.file("2026.bean");
+        fs::write(
+            &root,
+            "\
+option \"operating_currency\" \"USD\"
+
+include \"2026.bean\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+2026-01-01 open Expenses:Coffee
+",
+        )
+        .unwrap();
+        fs::write(
+            &entries,
+            format!(
+                "2026-01-10 * \"Groceries\"\n{}\n{}\n",
+                aligned("Assets:Bank:Checking", "-20.00", "USD"),
+                aligned("Expenses:Food", "20.00", "USD"),
+            ),
+        )
+        .unwrap();
+        let repo = repo_with_commit(dir, &["main.bean", "2026.bean"]);
+        (repo, root, entries)
+    }
+
+    /// A new entry lands in the file it names, at the end, laid out like that
+    /// file's own postings — through the same reload, refusal and staging path as
+    /// every other edit.
+    #[test]
+    fn adds_a_transaction_to_the_chosen_file() {
+        let dir = TempDir::new("add");
+        let (repo, root, entries) = split_fixture(&dir);
+        let state = loaded_state(&root);
+
+        // The picker's view of the journal: the root journal first, both files
+        // named relative to the root's directory.
+        {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let files = journal_file_views(guard.as_ref().unwrap());
+            assert_eq!(
+                files
+                    .iter()
+                    .map(|file| (file.label.as_str(), file.path.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("main.bean", root.display().to_string().as_str()),
+                    ("2026.bean", entries.display().to_string().as_str()),
+                ]
+            );
+        }
+
+        create_transaction(
+            &state,
+            NewTransaction {
+                payee: Some("Corner Shop".to_string()),
+                ..new_entry(
+                    &entries,
+                    "2026-01-14",
+                    "Coffee",
+                    vec![
+                        new_posting("Assets:Bank:Checking", Some("-16.20")),
+                        new_posting("Expenses:Coffee", Some("16.20")),
+                    ],
+                )
+            },
+        )
+        .unwrap();
+
+        // The file the entry named gained the entry and nothing else: one blank
+        // line separates it from what was there, and its postings line up with
+        // the file's own amounts.
+        let mut expected = String::from("2026-01-10 * \"Groceries\"\n");
+        expected.push_str(&aligned("Assets:Bank:Checking", "-20.00", "USD"));
+        expected.push('\n');
+        expected.push_str(&aligned("Expenses:Food", "20.00", "USD"));
+        expected.push_str("\n\n2026-01-14 * \"Corner Shop\" \"Coffee\"\n");
+        expected.push_str(&aligned("Assets:Bank:Checking", "-16.20", "USD"));
+        expected.push('\n');
+        expected.push_str(&aligned("Expenses:Coffee", "16.20", "USD"));
+        expected.push('\n');
+        assert_eq!(fs::read_to_string(&entries).unwrap(), expected);
+        // The root journal is untouched: the entry named its own file.
+        assert!(fs::read_to_string(&root).unwrap().ends_with("open Expenses:Coffee\n"));
+
+        // The ledger the app now holds is clean, and the new entry is in the
+        // register with both legs, the only row reporting itself modified.
+        {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let errors = &guard.as_ref().unwrap().ledger.errors;
+            assert!(errors.is_empty(), "errors: {errors:?}");
+        }
+        let coffee = views(&state)
+            .into_iter()
+            .find(|view| view.narration == "Coffee")
+            .expect("the new entry is in the register");
+        assert_eq!(coffee.date, "2026-01-14");
+        assert_eq!(coffee.payee.as_deref(), Some("Corner Shop"));
+        assert_eq!(
+            coffee
+                .postings
+                .iter()
+                .map(|posting| (posting.account.as_str(), posting.units.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Assets:Bank:Checking", "-16.20"),
+                ("Expenses:Coffee", "16.20"),
+            ]
+        );
+        assert_eq!(modified_narrations(&state), ["Coffee"]);
+
+        // The file is staged, and only it.
+        let head = repo.head().unwrap().peel_to_tree().unwrap();
+        let staged = repo.diff_tree_to_index(Some(&head), None, None).unwrap();
+        assert_eq!(
+            staged
+                .deltas()
+                .map(|delta| delta.new_file().path().unwrap().display().to_string())
+                .collect::<Vec<_>>(),
+            ["2026.bean"]
+        );
+    }
+
+    /// A posting left without an amount is the leg beancount interpolates: the
+    /// account is written alone, and the reload books it.
+    #[test]
+    fn a_posting_without_an_amount_is_left_to_be_interpolated() {
+        let dir = TempDir::new("add-implicit");
+        let (_, root, entries) = split_fixture(&dir);
+        let state = loaded_state(&root);
+
+        create_transaction(
+            &state,
+            new_entry(
+                &entries,
+                "2026-01-15",
+                "Coffee",
+                vec![
+                    new_posting("Assets:Bank:Checking", Some("-4.00")),
+                    new_posting("Expenses:Coffee", None),
+                ],
+            ),
+        )
+        .unwrap();
+
+        // The implied leg is just the account: no figure, no commodity.
+        let written = fs::read_to_string(&entries).unwrap();
+        assert!(
+            written.ends_with("2026-01-15 * \"Coffee\"\n  Assets:Bank:Checking            -4.00 USD\n  Expenses:Coffee\n"),
+            "entries: {written}"
+        );
+        let coffee = views(&state)
+            .into_iter()
+            .find(|view| view.narration == "Coffee")
+            .expect("the new entry is in the register");
+        assert_eq!(
+            coffee
+                .postings
+                .iter()
+                .map(|posting| (posting.account.as_str(), posting.units.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Assets:Bank:Checking", "-4.00"),
+                ("Expenses:Coffee", "4.00"),
+            ]
+        );
+    }
+
+    /// An entry the ledger refuses — legs that do not balance, or a file the
+    /// journal does not hold — is not written: the file keeps every byte it had,
+    /// and the app keeps the ledger it had.
+    #[test]
+    fn an_entry_the_loader_refuses_is_not_written() {
+        let dir = TempDir::new("add-refused");
+        let (_, root, entries) = split_fixture(&dir);
+        let state = loaded_state(&root);
+        let before = fs::read(&entries).unwrap();
+
+        let unbalanced = create_transaction(
+            &state,
+            new_entry(
+                &entries,
+                "2026-01-14",
+                "Coffee",
+                vec![
+                    new_posting("Assets:Bank:Checking", Some("-3.50")),
+                    new_posting("Expenses:Coffee", Some("3.00")),
+                ],
+            ),
+        );
+        assert!(unbalanced.is_err(), "an unbalanced entry went through");
+
+        let elsewhere = create_transaction(
+            &state,
+            new_entry(
+                Path::new("/tmp/elsewhere.bean"),
+                "2026-01-14",
+                "Coffee",
+                vec![
+                    new_posting("Assets:Bank:Checking", Some("-3.50")),
+                    new_posting("Expenses:Coffee", Some("3.50")),
+                ],
+            ),
+        );
+        assert!(
+            elsewhere.unwrap_err().contains("not a file of this journal"),
+            "a path outside the journal was written to"
+        );
+
+        assert_eq!(fs::read(&entries).unwrap(), before);
+        assert!(views(&state).iter().all(|view| view.narration != "Coffee"));
+        assert_eq!(modified_narrations(&state), Vec::<String>::new());
+    }
+
+    /// The default file follows the accounts: the file of the newest entry that
+    /// already touches one of them, whichever side of the tree it is on — and the
+    /// root journal when nothing does.
+    #[test]
+    fn the_default_file_follows_the_accounts_newest_entry() {
+        let dir = TempDir::new("suggest");
+        let root = dir.file("main.bean");
+        let older = dir.file("2025.bean");
+        let newer = dir.file("2026.bean");
+        fs::write(
+            &root,
+            "\
+option \"operating_currency\" \"USD\"
+
+include \"2025.bean\"
+include \"2026.bean\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+2026-01-01 open Income:Salary
+",
+        )
+        .unwrap();
+        fs::write(
+            &older,
+            format!(
+                "2025-12-30 * \"Groceries\"\n{}\n{}\n",
+                aligned("Assets:Bank:Checking", "-20.00", "USD"),
+                aligned("Expenses:Food", "20.00", "USD"),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &newer,
+            format!(
+                "2026-01-10 * \"Groceries\"\n{}\n{}\n\n2026-01-12 * \"Salary\"\n{}\n{}\n",
+                aligned("Assets:Bank:Checking", "-20.00", "USD"),
+                aligned("Expenses:Food", "20.00", "USD"),
+                aligned("Assets:Bank:Checking", "200.00", "USD"),
+                aligned("Income:Salary", "-200.00", "USD"),
+            ),
+        )
+        .unwrap();
+        let state = loaded_state(&root);
+
+        // What the app's own strategy answers, as `suggest_transaction_file`
+        // hands it on — the root fallback is the command's, not the rule's.
+        let suggested = |accounts: &[&str]| -> Option<String> {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let loaded = guard.as_ref().unwrap();
+            let names: Vec<String> = accounts.iter().map(|name| name.to_string()).collect();
+            let index = default_file(&loaded.ledger, &names)?;
+            Some(loaded.ledger.source_map.files()[index].path.display().to_string())
+        };
+
+        // Both files hold an entry on Expenses:Food; the newer one wins.
+        assert_eq!(suggested(&["Expenses:Food"]), Some(newer.display().to_string()));
+        // And it is the accounts that decide, not the journal's newest entry:
+        // the salary of 01-12 does not touch Expenses:Food.
+        assert_eq!(suggested(&["Income:Salary"]), Some(newer.display().to_string()));
+        // An entry on the account's parent, or its child, is on the same branch.
+        assert_eq!(
+            suggested(&["Expenses:Food:Groceries"]),
+            Some(newer.display().to_string())
+        );
+        assert_eq!(
+            suggested(&["Assets:Bank"]),
+            Some(newer.display().to_string())
+        );
+        // Nothing touches an account the ledger has never seen, let alone the
+        // ones no entry mentions: the rule answers nothing and the app falls back
+        // to the journal it was opened with.
+        assert_eq!(suggested(&["Expenses:Coffee"]), Some(root.display().to_string()));
+        assert_eq!(suggested(&[]), Some(root.display().to_string()));
+        {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let loaded = guard.as_ref().unwrap();
+            assert_eq!(
+                RecentAccountActivity.suggest(&loaded.ledger, &["Expenses:Coffee".to_string()]),
+                None
+            );
+        }
+    }
 }

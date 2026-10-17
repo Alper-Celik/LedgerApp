@@ -9,6 +9,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
 	import AccountRegister from "$lib/components/account-register.svelte";
+	import NewTransaction from "$lib/components/new-transaction.svelte";
 	import { LEDGER_LABEL } from "$lib/accounts.js";
 	import { clearFilters, filters, matchesFilters } from "$lib/filters.svelte.js";
 
@@ -33,6 +34,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				? ""
 				: ` of ${transactions.length}`} transactions
 		</span>
+		<!-- The one thing a register adds: an entry it does not hold yet. -->
+		<div class="ms-auto">
+			<NewTransaction {account} />
+		</div>
 	</div>
 
 	<div class="flex flex-wrap items-center gap-2">
