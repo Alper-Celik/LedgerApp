@@ -88,7 +88,8 @@ test("a new transaction is composed inline, filed where the backend suggests, an
 	await expect
 		.poll(async () => suggestedFor(await invokes(page)))
 		.toEqual(["Assets:Bank"]);
-	await expect(page.getByRole("combobox", { name: "File" })).toHaveValue("/books/2026.bean");
+	// The file is the standard select, showing the deduced one as its value.
+	await expect(page.getByLabel("File")).toContainText("2026.bean");
 
 	await page.getByLabel("Narration").fill("Coffee");
 	await page.getByLabel("Posting 1 amount").fill("-3.50");
@@ -100,7 +101,9 @@ test("a new transaction is composed inline, filed where the backend suggests, an
 		.toEqual(["Assets:Bank", "Expenses:Food"]);
 
 	// A file picked by hand beats the suggestion, and is what gets written to.
-	await page.getByRole("combobox", { name: "File" }).selectOption("/books/main.bean");
+	await page.getByLabel("File").click();
+	await page.getByRole("option", { name: "main.bean" }).click();
+	await expect(page.getByLabel("File")).toContainText("main.bean");
 	// Enter is the register's own commit key, and the draft answers to it too.
 	await page.getByLabel("Narration").press("Enter");
 
@@ -134,28 +137,26 @@ test("an empty register still takes a new entry", async ({ page }) => {
 	await expect(page.getByLabel("Posting 1 amount")).toBeVisible();
 });
 
-test("the file tab lists the journal's files, and opens one as entries and as text", async ({ page }) => {
+test("the sidebar's file browser opens a file as entries and as text", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
-	await page.getByRole("radio", { name: "Files" }).click();
 
-	// The explorer: every file the journal holds, with what it carries and
-	// whether it is committed — main.bean writes nothing, 2026.bean two entries
-	// and is uncommitted.
-	await expect(page.getByRole("row", { name: /main\.bean/ }).getByRole("cell").nth(2)).toHaveText("0");
-	const entries = page.getByRole("row", { name: /2026\.bean/ });
-	await expect(entries.getByRole("cell").nth(2)).toHaveText("2");
-	await expect(entries.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
+	// The browser is the sidebar's, beside the accounts: every file the journal
+	// holds, with what it carries and whether it is committed.
+	const link = page.getByRole("link", { name: /2026\.bean/ });
+	await expect(link).toContainText("2");
+	await expect(link.locator('[data-slot="uncommitted-mark"]')).toHaveCount(1);
 
-	// Opening one shows its transactions, through the register's own view: the
-	// rows are asked for the file, and the entry is the register's.
-	await page.getByRole("button", { name: "2026.bean" }).click();
-	await expect.poll(async () => (await invokes(page)).length).toBeGreaterThan(0);
-	await expect.poll(async () => argsOf(await invokes(page), "file_transactions")?.file).toBe(
-		"/books/2026.bean"
-	);
+	// Opening one goes to its own page, which has already asked the backend for
+	// that file's entries.
+	await link.click();
+	await expect(page.getByRole("heading", { name: "2026.bean" })).toBeVisible();
+	await expect
+		.poll(async () => argsOf(await invokes(page), "file_transactions")?.file)
+		.toBe("/books/2026.bean");
+
+	// The transactions view is the register's own, with every entry's legs
+	// showing: a file is read, so it has no current entry to hide them behind.
 	await expect(page.getByRole("row", { name: /Fees and top-up/ })).toBeVisible();
-	// Every leg, not just the header row: a file is read, so it has no current
-	// entry to hide the other accounts behind.
 	await expect(page.getByRole("cell", { name: "Expenses:Fees", exact: true })).toBeVisible();
 	await expect(page.getByRole("cell", { name: "Assets:Bank:Emergency", exact: true })).toBeVisible();
 
@@ -164,11 +165,10 @@ test("the file tab lists the journal's files, and opens one as entries and as te
 	// backend ever held.
 	await page.getByRole("radio", { name: "Text" }).click();
 	await page.getByRole("button", { name: "Save" }).click();
-	await expect.poll(async () => argsOf(await invokes(page), "update_file_text")?.file).toBe(
-		"/books/2026.bean"
-	);
-	const saved = argsOf(await invokes(page), "update_file_text");
-	expect(saved?.text).toContain("weekly groceries");
+	await expect
+		.poll(async () => argsOf(await invokes(page), "update_file_text")?.file)
+		.toBe("/books/2026.bean");
+	expect(argsOf(await invokes(page), "update_file_text")?.text).toContain("weekly groceries");
 });
 
 test("an account is opened from the sidebar, in the file its family lives in", async ({ page }) => {
@@ -182,13 +182,16 @@ test("an account is opened from the sidebar, in the file its family lives in", a
 	await expect
 		.poll(async () => argsOf(await invokes(page), "suggest_account_file")?.name)
 		.toBe("Expenses:Coffee");
-	await expect(page.getByRole("combobox", { name: "File" })).toHaveValue("/books/2026.bean");
-
+	// The standard select shows the deduced file, and a picked one replaces it.
+	await expect(page.getByLabel("File")).toContainText("2026.bean");
+	await page.getByLabel("File").click();
+	await page.getByRole("option", { name: "main.bean" }).click();
+	await expect(page.getByLabel("File")).toContainText("main.bean");
 	await page.getByLabel("Commodities").fill("USD, EUR");
 	await page.getByRole("button", { name: "Open account" }).click();
 
 	await expect.poll(async () => addedAccount(await invokes(page))).toMatchObject({
-		file: "/books/2026.bean",
+		file: "/books/main.bean",
 		name: "Expenses:Coffee",
 		currencies: ["USD", "EUR"],
 	});

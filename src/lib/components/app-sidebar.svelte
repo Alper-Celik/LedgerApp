@@ -20,6 +20,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
 	import { today } from "$lib/dates.js";
 	import {
 		ACCOUNT_SECTIONS,
@@ -38,6 +39,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
+	/** The journal's files, for the browser below the accounts — listed and fetched together. */
+	let files = $state<JournalFile[]>([]);
 
 	/**
 	 * The accounts the backend marks uncommitted, by full name. Its flag is
@@ -72,6 +75,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		}
 	}
 
+	/**
+	 * The journal's files, on the same terms: the browser below the accounts is
+	 * this sidebar's own, so it is fetched here rather than routed — an edit
+	 * anywhere changes what a file holds, and the revision effect below brings
+	 * both lists back in step.
+	 */
+	async function loadFiles() {
+		try {
+			return await commands.journalFiles();
+		} catch (cause) {
+			console.error("journalFiles failed", cause);
+			return [];
+		}
+	}
+
 	/** Folded subtrees by account name; everything opens by default. */
 	let folded = $state<Record<string, boolean>>({});
 	let toggleFold = (name: string) => (folded[name] = !folded[name]);
@@ -88,14 +106,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let openError = $state("");
 	let draft = $state({ name: "", date: "", currencies: "" });
 
-	/** The journal's files, listed when the form opens. */
-	let files = $state<JournalFile[]>([]);
 	/** A file picked by hand; the deduction keeps its hands off while this is set. */
 	let chosen = $state<string | null>(null);
 	/** What the backend deduced for this name, and the name it was asked about. */
 	let suggested = $state<{ path: string; from: string } | null>(null);
 	/** The file the account will be opened in. */
 	let file = $derived(chosen ?? suggested?.path ?? files[0]?.path ?? "");
+	/** That file's own name, which is what the picker shows — the path is its id. */
+	let fileLabel = $derived(files.find((option) => option.path === file)?.label ?? "");
 
 	/**
 	 * Ask the backend which file this account belongs in, and ask again as the
@@ -117,7 +135,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	});
 
 	/** Open the form on a clean draft: today, in the file the ledger starts in. */
-	async function startOpening() {
+	function startOpening() {
 		draft.name = "";
 		draft.date = today();
 		draft.currencies = "";
@@ -125,11 +143,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		suggested = null;
 		openError = "";
 		opening = true;
-		try {
-			files = await commands.journalFiles();
-		} catch (cause) {
-			openError = cause instanceof Error ? cause.message : String(cause);
-		}
 	}
 
 	/**
@@ -204,13 +217,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	onMount(async () => {
 		accounts = await loadAccounts();
+		files = await loadFiles();
 	});
 
 	$effect(() => {
-		// Balances are fetched once per page load, so an edit saved elsewhere (or a
-		// commit) has to bump the revision to bring this list back in step.
+		// Balances and files are fetched once per page load, so an edit saved
+		// elsewhere (or a commit) has to bump the revision to bring both lists
+		// back in step.
 		if (ledgerRevision.value === 0) return;
-		loadAccounts();
+		void loadAccounts().then((balances) => (accounts = balances));
+		void loadFiles().then((journal) => (files = journal));
 	});
 </script>
 
@@ -393,17 +409,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 										bind:value={draft.currencies}
 										aria-label="Commodities"
 									/>
-									<label class="text-muted-foreground text-xs" for="new-account-file">File</label>
-									<select
-										id="new-account-file"
-										class="border-input bg-input/20 dark:bg-input/30 h-6 w-full rounded-md border px-1 text-xs outline-none"
+									<Select.Root
+										type="single"
 										value={file}
-										onchange={(event) => (chosen = event.currentTarget.value)}
+										onValueChange={(next) => next && (chosen = next)}
 									>
-										{#each files as option (option.path)}
-											<option value={option.path} title={option.path}>{option.label}</option>
-										{/each}
-									</select>
+										<Select.Trigger class="w-full" aria-label="File">
+											<span data-slot="select-value" class={fileLabel ? "" : "text-muted-foreground"}>
+												{fileLabel || "no file"}
+											</span>
+										</Select.Trigger>
+										<Select.Content>
+											{#each files as option (option.path)}
+												<Select.Item value={option.path} label={option.label} />
+											{/each}
+										</Select.Content>
+									</Select.Root>
 									<p class="text-muted-foreground text-xs">
 										{#if files.length === 0}
 											No journal file is loaded, so there is nowhere to open an account.
@@ -487,6 +508,54 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Sidebar.GroupContent>
 			</Sidebar.Group>
 		{/each}
+
+		<!--
+			The journal's files, listed the way the accounts are: this is the file
+			browser, and every row is a link to that file's own page, where it is
+			read as transactions or as text.
+		-->
+		<Sidebar.Group>
+			<Sidebar.GroupLabel class="rounded-none">Files</Sidebar.GroupLabel>
+			<Sidebar.GroupContent>
+				<Sidebar.Menu>
+					{#each files as file (file.path)}
+						<!--
+							The path is the file's identity, so it is what the route
+							carries — percent-encoded into one path segment.
+							`resolve` is not used here because it refuses a parameter
+							that starts with a slash, which every absolute path does.
+						-->
+						{@const href = `/files/${encodeURIComponent(file.path)}`}
+						<Sidebar.MenuItem>
+							<Sidebar.MenuButton
+								size="sm"
+								class="rounded-none"
+								isActive={page.url.pathname === href}
+							>
+								{#snippet child({ props })}
+									<a {...props} {href} title={file.path}>
+										<span class="flex min-w-0 flex-1 items-center gap-2">
+											<span class="min-w-0 truncate">{file.label}</span>
+											<UncommittedMark modified={file.modified} />
+											<span class="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+												{file.transactions}
+											</span>
+										</span>
+									</a>
+								{/snippet}
+							</Sidebar.MenuButton>
+						</Sidebar.MenuItem>
+					{/each}
+					{#if files.length === 0}
+						<Sidebar.MenuItem>
+							<span class="text-muted-foreground px-2 py-1 text-xs">
+								No journal file is loaded.
+							</span>
+						</Sidebar.MenuItem>
+					{/if}
+				</Sidebar.Menu>
+			</Sidebar.GroupContent>
+		</Sidebar.Group>
 	</Sidebar.Content>
 	<Sidebar.Footer>
 		<Sidebar.Menu>

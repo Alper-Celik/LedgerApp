@@ -23,6 +23,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Badge } from "$lib/components/ui/badge/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
+	import * as Select from "$lib/components/ui/select/index.js";
 	import * as Table from "$lib/components/ui/table/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
@@ -272,6 +273,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The file the draft will be written into. */
 	let file = $derived(chosen ?? suggested?.path ?? files[0]?.path ?? "");
+	/** That file's own name, which is what the picker shows — the path is its id. */
+	let fileLabel = $derived(files.find((option) => option.path === file)?.label ?? "");
 
 	/** The accounts the draft mentions, which is what the deduction reads. */
 	let mentioned = $derived(
@@ -566,17 +569,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			table rather than in a row of it.
 		-->
 		<div class="flex flex-wrap items-center gap-2">
-			<label class="text-muted-foreground text-xs" for="new-transaction-file">File</label>
-			<select
-				id="new-transaction-file"
-				class="border-input bg-input/20 dark:bg-input/30 h-7 rounded-md border px-2 text-xs outline-none"
-				value={file}
-				onchange={(event) => (chosen = event.currentTarget.value)}
-			>
-				{#each files as option (option.path)}
-					<option value={option.path} title={option.path}>{option.label}</option>
-				{/each}
-			</select>
+			<Select.Root type="single" value={file} onValueChange={(next) => next && (chosen = next)}>
+				<Select.Trigger class="w-40" aria-label="File">
+					<span data-slot="select-value" class={fileLabel ? "" : "text-muted-foreground"}>
+						{fileLabel || "no file"}
+					</span>
+				</Select.Trigger>
+				<Select.Content>
+					{#each files as option (option.path)}
+						<Select.Item value={option.path} label={option.label} />
+					{/each}
+				</Select.Content>
+			</Select.Root>
 			<ToggleGroup.Root
 				type="single"
 				value={compose.flag}
