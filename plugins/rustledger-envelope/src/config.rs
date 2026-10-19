@@ -27,6 +27,7 @@
 //! | `rollover` | ACCOUNT, BOOL | `TRUE` carries the category's balance into the next month (default), `FALSE` resets it to zero at the month boundary. |
 //! | `rollover` | ACCOUNT, AMOUNT | Carries the balance up to `AMOUNT`, sweeping the excess to `To-Be-Budgeted`. |
 //! | `map` | STRING regex, ACCOUNT | Optional: send postings matching the account pattern to ACCOUNT's category instead of their own. First match wins. |
+//! | `book to market` | ACCOUNT, [STRING,] STRING | Value the account's holdings in the target currency at the latest `price` at or before each month end. **Inherited** from its month onward. |
 //! | `include starting balance` | BOOL | Whether the on-budget money held before the first budget month counts as available. Default `FALSE`. |
 //! | `assert` | BOOL | Emit a `balance` assertion per category and commodity at each month end. Default `TRUE`. |
 //! | `strict` | BOOL | Report spending in a category that was never funded. Default `FALSE`. |
@@ -91,6 +92,9 @@ pub struct Config {
     pub rollovers: Vec<RolloverDecl>,
     /// Category overrides for matching postings.
     pub mappings: Vec<Mapping>,
+    /// Accounts whose non-target holdings are valued in another currency, each
+    /// effective from its month onward.
+    pub conversions: Vec<Conversion>,
     /// Whether money held before [`Config::start`] counts as available.
     pub include_starting_balance: bool,
     /// Whether to emit month-end assertions.
@@ -106,6 +110,20 @@ pub struct Config {
     /// warnings. They do not stop the budget; the rest of the configuration
     /// stays in force and the host reports these.
     pub warnings: Vec<PluginError>,
+}
+
+/// A `book to market` policy: value an account's holdings in another currency
+/// from this month onward.
+#[derive(Clone, Debug)]
+pub struct Conversion {
+    /// Month the policy starts being effective.
+    pub month: Month,
+    /// The on-budget account being valued.
+    pub account: String,
+    /// The commodity to price; `None` values every non-target commodity.
+    pub source: Option<String>,
+    /// The currency the valuation is expressed in.
+    pub target: String,
 }
 
 /// An assignment to a category, effective from its month onward.
@@ -245,6 +263,7 @@ struct Parser<'a> {
     targets: Vec<Target>,
     rollovers: Vec<RolloverDecl>,
     mappings: Vec<Mapping>,
+    conversions: Vec<Conversion>,
     include_starting_balance: bool,
     assert_balances: bool,
     strict: bool,
@@ -269,6 +288,7 @@ impl<'a> Parser<'a> {
             targets: Vec::new(),
             rollovers: Vec::new(),
             mappings: Vec::new(),
+            conversions: Vec::new(),
             include_starting_balance: false,
             assert_balances: true,
             strict: false,
@@ -431,6 +451,42 @@ impl<'a> Parser<'a> {
                     self.mappings.push(Mapping { pattern, node });
                 }
             }
+            "book to market" => {
+                let Some(account) = self.account_arg(key, args, 0) else {
+                    return;
+                };
+                let (source, target) = match args.len() {
+                    2 => (None, self.currency_arg(key, args, 1)),
+                    3 => (
+                        self.currency_arg(key, args, 1),
+                        self.currency_arg(key, args, 2),
+                    ),
+                    _ => {
+                        self.error(key, "expected ACCOUNT [SOURCE] TARGET");
+                        return;
+                    }
+                };
+                let Some(target) = target else {
+                    return;
+                };
+                if let Some(source) = &source
+                    && source == &target
+                {
+                    self.error(
+                        key,
+                        &format!("source and target are both {source:?}; nothing to convert"),
+                    );
+                    return;
+                }
+                if let Some(month) = self.directive_month(key, directive) {
+                    self.conversions.push(Conversion {
+                        month,
+                        account,
+                        source,
+                        target,
+                    });
+                }
+            }
             "include starting balance" => {
                 if let Some(flag) = self.bool_arg(key, args, 0) {
                     self.include_starting_balance = flag;
@@ -466,6 +522,7 @@ impl<'a> Parser<'a> {
         }
         self.check_pads();
         self.check_rollovers();
+        self.check_conversions();
         if !self.errors.is_empty() {
             return Err(self.errors);
         }
@@ -480,6 +537,7 @@ impl<'a> Parser<'a> {
             targets: self.targets,
             rollovers: self.rollovers,
             mappings: self.mappings,
+            conversions: self.conversions,
             include_starting_balance: self.include_starting_balance,
             assert_balances: self.assert_balances,
             strict: self.strict,
@@ -530,6 +588,35 @@ impl<'a> Parser<'a> {
         }
         for problem in problems {
             self.error("pad", &problem);
+        }
+    }
+
+    /// A conversion only makes sense for an account the budget already counts.
+    /// The patterns are validated as they are parsed, so compiling them here
+    /// cannot fail for a real ledger.
+    fn check_conversions(&mut self) {
+        let patterns: Vec<Regex> = self
+            .budget_accounts
+            .iter()
+            .filter_map(|pattern| Regex::new(pattern).ok())
+            .collect();
+        let problems: Vec<String> = self
+            .conversions
+            .iter()
+            .filter(|conversion| {
+                !patterns
+                    .iter()
+                    .any(|pattern| pattern.is_match(&conversion.account))
+            })
+            .map(|conversion| {
+                format!(
+                    "{} is not an on-budget account; declare it with `budget account` first",
+                    conversion.account
+                )
+            })
+            .collect();
+        for problem in problems {
+            self.error("book to market", &problem);
         }
     }
 
@@ -621,6 +708,25 @@ impl<'a> Parser<'a> {
                 self.error(
                     key,
                     &format!("expected an ACCOUNT as argument {}", index + 1),
+                );
+                None
+            }
+        }
+    }
+
+    fn currency_arg(&mut self, key: &str, args: &[MetaValueData], index: usize) -> Option<String> {
+        // rustledger's parser rejects bare currency tokens in a `custom`
+        // directive, so the journal writes these as quoted strings. Accept a
+        // typed Currency too, in case a future parser starts producing one.
+        match args
+            .get(index)
+            .and_then(|value| value::currency(value).or_else(|| value::string(value)))
+        {
+            Some(currency) => Some(currency.to_string()),
+            None => {
+                self.error(
+                    key,
+                    &format!("expected a CURRENCY as argument {}", index + 1),
                 );
                 None
             }
@@ -746,6 +852,15 @@ pub mod value {
         }
     }
 
+    /// The CURRENCY carried by `value`.
+    #[must_use]
+    pub fn currency(value: &MetaValueData) -> Option<&str> {
+        match value {
+            MetaValueData::Currency(currency) => Some(currency),
+            _ => None,
+        }
+    }
+
     /// The BOOL carried by `value`.
     #[must_use]
     pub fn boolean(value: &MetaValueData) -> Option<bool> {
@@ -797,6 +912,10 @@ mod tests {
             number: number.to_string(),
             currency: currency.to_string(),
         })
+    }
+
+    fn currency(value: &str) -> MetaValueData {
+        MetaValueData::Currency(value.to_string())
     }
 
     fn number(value: &str) -> MetaValueData {
@@ -1644,5 +1763,94 @@ mod tests {
             Some("budget.bean")
         );
         assert_eq!(config.warnings[0].line_number, Some(7));
+    }
+
+    #[test]
+    fn book_to_market_parses_optional_source_and_target() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![
+                text("book to market"),
+                account("Assets:Cash"),
+                currency("TRY"),
+            ],
+        ));
+        let config = parse(&directives).expect("a two-argument conversion parses");
+        assert_eq!(config.conversions.len(), 1);
+        assert_eq!(config.conversions[0].account, "Assets:Cash");
+        assert_eq!(config.conversions[0].source, None);
+        assert_eq!(config.conversions[0].target, "TRY");
+
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![
+                text("book to market"),
+                account("Assets:Cash"),
+                currency("ENR"),
+                currency("TRY"),
+            ],
+        ));
+        let config = parse(&directives).expect("a three-argument conversion parses");
+        assert_eq!(config.conversions[0].source.as_deref(), Some("ENR"));
+        assert_eq!(config.conversions[0].target, "TRY");
+    }
+
+    #[test]
+    fn book_to_market_account_must_be_on_budget() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![
+                text("book to market"),
+                account("Assets:Bank:Fund"),
+                currency("TRY"),
+            ],
+        ));
+        let errors = parse(&directives).expect_err("the account is not on-budget");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("not an on-budget account")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn book_to_market_rejects_the_same_source_and_target() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![
+                text("book to market"),
+                account("Assets:Cash"),
+                currency("TRY"),
+                currency("TRY"),
+            ],
+        ));
+        let errors = parse(&directives).expect_err("a no-op conversion is an error");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("source and target are both")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn book_to_market_requires_currency_arguments() {
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("book to market"), account("Assets:Cash"), number("1")],
+        ));
+        let errors = parse(&directives).expect_err("a NUMBER is not a currency");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("expected a CURRENCY")),
+            "{errors:?}"
+        );
     }
 }

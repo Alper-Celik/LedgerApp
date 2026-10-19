@@ -33,4 +33,6 @@ rustledger-validate = "0.24.0"
 # ledger has to finish inside the default 30M-unit budget.
 opt-level = 3
 lto = true
+codegen-units = 1
+panic = "abort"
 strip = true

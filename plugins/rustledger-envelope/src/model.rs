@@ -64,8 +64,8 @@ use rustledger_plugin_types::{
     CostNumberData, DirectiveData, DirectiveWrapper, PluginError, PostingData, PriceAnnotationView,
 };
 
-use crate::accounts::{self, MONEY, TO_BE_BUDGETED};
-use crate::config::{Config, Rollover, Target};
+use crate::accounts::{self, MONEY, TO_BE_BUDGETED, VALUATION};
+use crate::config::{Config, Conversion, Rollover, Target};
 use crate::inventory::Inventory;
 use crate::money::Money;
 use crate::month::Month;
@@ -116,6 +116,8 @@ pub enum EntryKind {
     Adjustment,
     /// The month's mirrored spending.
     Activity,
+    /// Marking converted holdings to the month-end price.
+    Valuation,
     /// The rollover policy applied at the month boundary.
     Sweep,
 }
@@ -129,6 +131,7 @@ impl EntryKind {
             Self::Funding => "Envelope funding",
             Self::Adjustment => "Envelope adjustment",
             Self::Activity => "Envelope activity",
+            Self::Valuation => "Envelope valuation",
             Self::Sweep => "Envelope rollover",
         }
     }
@@ -189,6 +192,83 @@ struct Movement {
     lineno: Option<u32>,
 }
 
+/// The latest `price` directive for a pair, at or before a date.
+#[derive(Debug, Default)]
+struct PriceBook {
+    by_pair: BTreeMap<String, BTreeMap<String, Vec<(String, Decimal)>>>,
+}
+
+impl PriceBook {
+    fn new(directives: &[DirectiveWrapper], conversions: &[Conversion]) -> Self {
+        let mut book = Self::default();
+        let needed = |source: &str, target: &str| {
+            conversions.iter().any(|conversion| {
+                conversion.target == target
+                    && match &conversion.source {
+                        Some(declared) => declared == source,
+                        None => source != target,
+                    }
+            })
+        };
+        for directive in directives {
+            let DirectiveData::Price(price) = &directive.data else {
+                continue;
+            };
+            if !needed(&price.currency, &price.amount.currency) {
+                continue;
+            }
+            let Ok(rate) = Decimal::from_str(price.amount.number.trim()) else {
+                continue;
+            };
+            if rate <= Decimal::ZERO {
+                continue;
+            }
+            book.by_pair
+                .entry(price.currency.clone())
+                .or_default()
+                .entry(price.amount.currency.clone())
+                .or_default()
+                .push((directive.date.clone(), rate));
+        }
+        for targets in book.by_pair.values_mut() {
+            for prices in targets.values_mut() {
+                prices.sort_by(|left, right| left.0.cmp(&right.0));
+            }
+        }
+        book
+    }
+
+    /// The latest rate at or before `at`, with the date it came from.
+    fn rate(&self, source: &str, target: &str, at: &str) -> Option<(&str, Decimal)> {
+        let prices = self.by_pair.get(source)?.get(target)?;
+        let index = prices.partition_point(|(date, _)| date.as_str() <= at);
+        let (date, rate) = prices.get(index.checked_sub(1)?)?;
+        Some((date.as_str(), *rate))
+    }
+}
+
+/// The conversion in force for `account` in `month`, newest declaration wins.
+fn conversion_for<'a>(
+    conversions: &'a BTreeMap<String, Vec<&'a Conversion>>,
+    account: &str,
+    month: Month,
+) -> Option<&'a Conversion> {
+    conversions
+        .get(account)?
+        .iter()
+        .rev()
+        .find(|conversion| conversion.month <= month)
+        .copied()
+}
+
+/// Whether `commodity` is the one this conversion values.
+fn converts(conversion: &Conversion, commodity: &str) -> bool {
+    match &conversion.source {
+        Some(source) => commodity == source,
+        None => commodity != conversion.target,
+    }
+}
+
 /// Build the plan for `config` from the booked directive stream.
 ///
 /// `directives` is the host's post-booking stream: transaction postings have
@@ -221,6 +301,44 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         .collect();
     let movements = movements(config, &mappings, &budget_accounts, directives);
 
+    let mut conversions: BTreeMap<String, Vec<&Conversion>> = BTreeMap::new();
+    for conversion in &config.conversions {
+        conversions
+            .entry(conversion.account.clone())
+            .or_default()
+            .push(conversion);
+    }
+    let price_book = PriceBook::new(directives, &config.conversions);
+    let last_horizon = *horizon.last().expect("horizon is never empty");
+
+    // Units held per on-budget account, split before and inside the horizon.
+    // These are used only by `book to market`; normal money still comes from
+    // the per-postings pass below.
+    let mut pre_units: BTreeMap<String, Inventory> = BTreeMap::new();
+    let mut month_units: BTreeMap<Month, BTreeMap<String, Inventory>> = BTreeMap::new();
+    for movement in &movements {
+        if !movement.on_budget
+            || accounts::is_generated(&movement.account)
+            || !conversions.contains_key(&movement.account)
+        {
+            continue;
+        }
+        let account = movement.account.clone();
+        if movement.month < config.start {
+            pre_units
+                .entry(account)
+                .or_default()
+                .add(&movement.units.currency, movement.units.value);
+        } else if movement.month <= last_horizon {
+            month_units
+                .entry(movement.month)
+                .or_default()
+                .entry(account)
+                .or_default()
+                .add(&movement.units.currency, movement.units.value);
+        }
+    }
+
     // Assignments grouped by category and commodity, so each month can pick the
     // newest declaration at or before it.
     let mut funds: BTreeMap<String, BTreeMap<String, Vec<(Month, Decimal)>>> = BTreeMap::new();
@@ -239,6 +357,7 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     let mut per_month_money: BTreeMap<i32, Inventory> = BTreeMap::new();
     // Spending per month, per category account.
     let mut per_month_activity: BTreeMap<i32, BTreeMap<String, Inventory>> = BTreeMap::new();
+    let mut missing_prices: BTreeSet<(String, String, Month)> = BTreeSet::new();
 
     for movement in &movements {
         if accounts::is_generated(&movement.account) {
@@ -259,9 +378,48 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         }
         if movement.on_budget {
             let units = &movement.units;
+            let effective_month = if movement.month < config.start {
+                config.start
+            } else {
+                movement.month
+            };
+            if conversions.contains_key(&movement.account) {
+                let conversion = conversion_for(&conversions, &movement.account, effective_month);
+                let priced = conversion
+                    .filter(|conversion| converts(conversion, &units.currency))
+                    .and_then(|conversion| {
+                        price_book
+                            .rate(
+                                &units.currency,
+                                &conversion.target,
+                                &effective_month.last_day(),
+                            )
+                            .map(|(_, rate)| (conversion, rate))
+                    });
+                if conversion.is_some_and(|conversion| converts(conversion, &units.currency))
+                    && priced.is_none()
+                    && missing_prices.insert((
+                        movement.account.clone(),
+                        units.currency.clone(),
+                        effective_month,
+                    ))
+                {
+                    let target = conversion
+                        .map(|conversion| conversion.target.as_str())
+                        .unwrap_or("the target currency");
+                    diagnostics.push(PluginError::error(format!(
+                        "envelope: book to market: no price for {} in {target} at or before {}",
+                        units.currency,
+                        effective_month.last_day()
+                    )));
+                }
+                if priced.is_some() {
+                    continue;
+                }
+            }
             if movement.month < config.start {
                 pre_horizon.add(&units.currency, units.value);
-            } else if movement.month <= *horizon.last().expect("horizon is never empty") {
+            } else if movement.month <= last_horizon {
                 per_month_money
                     .entry(movement.month.index())
                     .or_default()
@@ -275,6 +433,41 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     let mut generated: BTreeSet<String> = BTreeSet::new();
     generated.insert(MONEY.to_string());
     generated.insert(TO_BE_BUDGETED.to_string());
+    if !config.conversions.is_empty() {
+        generated.insert(VALUATION.to_string());
+    }
+
+    // Holdings used by `book to market`. `counted` follows the same
+    // `include starting balance` policy as the normal money, and `normal` is
+    // the subset still contributing units rather than a valuation.
+    let mut counted: BTreeMap<String, Inventory> = if config.include_starting_balance {
+        pre_units.clone()
+    } else {
+        BTreeMap::new()
+    };
+    let mut normal: BTreeMap<String, Inventory> = BTreeMap::new();
+    if config.include_starting_balance {
+        for (account, units) in &pre_units {
+            let conversion = conversion_for(&conversions, account, config.start);
+            for (commodity, amount) in units.iter() {
+                let priced = conversion.is_some_and(|conversion| {
+                    converts(conversion, commodity)
+                        && price_book
+                            .rate(commodity, &conversion.target, &config.start.last_day())
+                            .is_some()
+                });
+                if !priced {
+                    normal
+                        .entry(account.clone())
+                        .or_default()
+                        .add(commodity, amount);
+                }
+            }
+        }
+    }
+    let mut bridged: BTreeMap<String, Inventory> = BTreeMap::new();
+    let mut bridge_value: BTreeMap<String, Decimal> = BTreeMap::new();
+    let mut stale_prices: BTreeSet<(String, String, Month)> = BTreeSet::new();
 
     let mut months = Vec::with_capacity(horizon.len());
     for (position, &month) in horizon.iter().enumerate() {
@@ -284,6 +477,36 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
             entries: Vec::new(),
             assertions: Vec::new(),
         };
+
+        // Holdings at the start of the month, then the month's unit movements.
+        // Converted commodities with a price stop contributing units to normal
+        // money and are handled by the valuation entry below.
+        let counted_start = counted.clone();
+        let normal_start = normal.clone();
+        let bridged_start = bridged.clone();
+        if let Some(accounts) = month_units.get(&month) {
+            for (account, units) in accounts {
+                counted
+                    .entry(account.clone())
+                    .or_default()
+                    .add_inventory(units);
+                let conversion = conversion_for(&conversions, account, month);
+                for (commodity, amount) in units.iter() {
+                    let priced = conversion.is_some_and(|conversion| {
+                        converts(conversion, commodity)
+                            && price_book
+                                .rate(commodity, &conversion.target, &month.last_day())
+                                .is_some()
+                    });
+                    if !priced {
+                        normal
+                            .entry(account.clone())
+                            .or_default()
+                            .add(commodity, amount);
+                    }
+                }
+            }
+        }
 
         // 1. The month's change in on-budget money, mirrored as the contra the
         //    pool is backed by. The first month also carries what was held
@@ -485,7 +708,142 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
             });
         }
 
-        // 5. The rollover policy, applied at the boundary this month ends.
+        // 5. Mark converted holdings to the month-end price. The previous
+        //    month's bridge balance is the opening valuation, so buys and sells
+        //    only need their actual cash legs elsewhere.
+        let mut valuation = Vec::new();
+        for account in conversions.keys() {
+            let Some(conversion) = conversion_for(&conversions, account, month) else {
+                continue;
+            };
+            let start_units = counted_start.get(account);
+            let end_units = counted.get(account);
+            let start_normal = normal_start.get(account);
+            let start_bridged = bridged_start.get(account);
+
+            let mut commodities: BTreeSet<String> = BTreeSet::new();
+            if let Some(units) = start_units {
+                commodities.extend(units.iter().map(|(commodity, _)| commodity.to_string()));
+            }
+            if let Some(units) = end_units {
+                commodities.extend(units.iter().map(|(commodity, _)| commodity.to_string()));
+            }
+
+            let mut value_end = Decimal::ZERO;
+            for commodity in commodities {
+                if !converts(conversion, &commodity) {
+                    continue;
+                }
+                let units_start = start_units
+                    .map(|units| units.get(&commodity))
+                    .unwrap_or_default();
+                let units_end = end_units
+                    .map(|units| units.get(&commodity))
+                    .unwrap_or_default();
+                let normal_start = start_normal
+                    .map(|units| units.get(&commodity))
+                    .unwrap_or_default();
+                let bridged_start = start_bridged
+                    .map(|units| units.get(&commodity))
+                    .unwrap_or_default();
+
+                let Some((price_date, rate)) =
+                    price_book.rate(&commodity, &conversion.target, &month.last_day())
+                else {
+                    if !units_end.is_zero()
+                        && missing_prices.insert((account.clone(), commodity.clone(), month))
+                    {
+                        diagnostics.push(PluginError::error(format!(
+                            "envelope: book to market: no price for {commodity} in {} at or before {}",
+                            conversion.target,
+                            month.last_day()
+                        )));
+                    }
+                    continue;
+                };
+
+                if let Some(price_month) = Month::from_date(price_date)
+                    && month.index() - price_month.index() > 2
+                    && stale_prices.insert((account.clone(), commodity.clone(), month))
+                {
+                    diagnostics.push(PluginError::warning(format!(
+                        "envelope: book to market: stale price for {commodity} in {}: {price_date} is more than two months old",
+                        conversion.target
+                    )));
+                }
+
+                if bridged_start.is_zero() {
+                    let money = -(units_end - normal_start);
+                    if !units_end.is_zero() {
+                        valuation.push(Leg {
+                            account: VALUATION.to_string(),
+                            amount: Money::new(units_end, commodity.clone()),
+                        });
+                    }
+                    if !money.is_zero() {
+                        valuation.push(Leg {
+                            account: MONEY.to_string(),
+                            amount: Money::new(money, commodity.clone()),
+                        });
+                    }
+                    if !normal_start.is_zero() {
+                        valuation.push(Leg {
+                            account: TO_BE_BUDGETED.to_string(),
+                            amount: Money::new(-normal_start, commodity.clone()),
+                        });
+                        tbb.add(&commodity, -normal_start);
+                    }
+                } else {
+                    let delta = units_end - units_start;
+                    if !delta.is_zero() {
+                        valuation.push(Leg {
+                            account: VALUATION.to_string(),
+                            amount: Money::new(delta, commodity.clone()),
+                        });
+                        valuation.push(Leg {
+                            account: MONEY.to_string(),
+                            amount: Money::new(-delta, commodity.clone()),
+                        });
+                    }
+                }
+
+                value_end += units_end * rate;
+                normal
+                    .entry(account.clone())
+                    .or_default()
+                    .add(&commodity, -normal_start);
+                bridged
+                    .entry(account.clone())
+                    .or_default()
+                    .add(&commodity, units_end - bridged_start);
+            }
+
+            let value_end = value_end.round_dp(2);
+            let value_start = bridge_value.get(account).copied().unwrap_or_default();
+            let value_delta = value_end - value_start;
+            if !value_delta.is_zero() {
+                valuation.push(Leg {
+                    account: VALUATION.to_string(),
+                    amount: Money::new(-value_delta, conversion.target.clone()),
+                });
+                valuation.push(Leg {
+                    account: TO_BE_BUDGETED.to_string(),
+                    amount: Money::new(value_delta, conversion.target.clone()),
+                });
+                tbb.add(&conversion.target, value_delta);
+            }
+            bridge_value.insert(account.clone(), value_end);
+        }
+        if !valuation.is_empty() {
+            plan.entries.push(Entry {
+                kind: EntryKind::Valuation,
+                date: date.clone(),
+                narration: format!("{} {}", EntryKind::Valuation.label(), month.label()),
+                legs: valuation,
+            });
+        }
+
+        // 6. The rollover policy, applied at the boundary this month ends.
         let mut sweep = Vec::new();
         for (node, policy) in effective_rollovers(config, month) {
             let account = match accounts::category_account(&node, &config.expense_root) {
@@ -921,11 +1279,11 @@ mod tests {
 
     use rust_decimal::Decimal;
     use rustledger_plugin_types::{
-        AmountData, DirectiveData, MetaValueData, PostingData, TransactionData,
+        AmountData, DirectiveData, MetaValueData, PostingData, PriceData, TransactionData,
     };
 
     use super::*;
-    use crate::config::{Adjustment, Fund, Mapping, RolloverDecl};
+    use crate::config::{Adjustment, Conversion, Fund, Mapping, RolloverDecl};
 
     fn money(number: &str, currency: &str) -> Money {
         Money::new(
@@ -947,6 +1305,7 @@ mod tests {
             targets: Vec::new(),
             rollovers: Vec::new(),
             mappings: Vec::new(),
+            conversions: Vec::new(),
             include_starting_balance: false,
             assert_balances: true,
             strict: false,
@@ -984,6 +1343,23 @@ mod tests {
                         span: None,
                     })
                     .collect(),
+            }),
+        }
+    }
+
+    fn price_directive(date: &str, source: &str, number: &str, target: &str) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: "price".to_string(),
+            date: date.to_string(),
+            filename: Some("prices.bean".to_string()),
+            lineno: Some(9),
+            data: DirectiveData::Price(PriceData {
+                currency: source.to_string(),
+                amount: AmountData {
+                    number: number.to_string(),
+                    currency: target.to_string(),
+                },
+                metadata: Vec::new(),
             }),
         }
     }
@@ -2104,6 +2480,170 @@ mod tests {
         assert!(
             !messages.iter().any(|message| message.contains("USD")),
             "{messages:?}"
+        );
+    }
+
+    fn conversion(month: &str, account: &str, source: Option<&str>, target: &str) -> Conversion {
+        Conversion {
+            month: Month::parse(month).expect("test month parses"),
+            account: account.to_string(),
+            source: source.map(str::to_string),
+            target: target.to_string(),
+        }
+    }
+
+    #[test]
+    fn book_to_market_bridges_holdings_into_the_target_currency() {
+        let mut config = config("2026-10", 1);
+        config.include_starting_balance = true;
+        config.conversions.push(conversion(
+            "2026-10",
+            "Assets:Bank:Fund",
+            Some("ENR"),
+            "TRY",
+        ));
+
+        let directives = vec![
+            price_directive("2026-10-31", "ENR", "1.25", "TRY"),
+            txn(
+                "2026-09-01",
+                &[
+                    ("Assets:Bank:Fund", "100", "ENR"),
+                    ("Assets:Bank", "-100", "TRY"),
+                ],
+            ),
+        ];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Valuation),
+            vec![
+                "Equity:Envelope:Valuation 100.00 ENR",
+                "Equity:Envelope:Money -100.00 ENR",
+                "Equity:Envelope:Valuation -125.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 125.00 TRY",
+            ]
+        );
+        // The cash side is still normal money: the bridge does not touch it.
+        assert_eq!(
+            rendered(&plan, EntryKind::Money),
+            vec![
+                "Equity:Envelope:Money 100.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -100.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn book_to_market_revalues_only_the_price_change_in_later_months() {
+        let mut config = config("2026-10", 2);
+        config.include_starting_balance = true;
+        config.conversions.push(conversion(
+            "2026-10",
+            "Assets:Bank:Fund",
+            Some("ENR"),
+            "TRY",
+        ));
+
+        let directives = vec![
+            price_directive("2026-10-31", "ENR", "1.25", "TRY"),
+            price_directive("2026-11-30", "ENR", "1.30", "TRY"),
+            txn(
+                "2026-09-01",
+                &[
+                    ("Assets:Bank:Fund", "100", "ENR"),
+                    ("Assets:Bank", "-100", "TRY"),
+                ],
+            ),
+        ];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        let rendered = rendered(&plan, EntryKind::Valuation);
+        assert_eq!(
+            rendered,
+            vec![
+                "Equity:Envelope:Valuation 100.00 ENR",
+                "Equity:Envelope:Money -100.00 ENR",
+                "Equity:Envelope:Valuation -125.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 125.00 TRY",
+                "Equity:Envelope:Valuation -5.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 5.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn book_to_market_handles_a_buy_inside_the_month() {
+        let mut config = config("2026-10", 1);
+        config.include_starting_balance = true;
+        config.conversions.push(conversion(
+            "2026-10",
+            "Assets:Bank:Fund",
+            Some("ENR"),
+            "TRY",
+        ));
+
+        let directives = vec![
+            price_directive("2026-10-31", "ENR", "1.30", "TRY"),
+            txn(
+                "2026-09-01",
+                &[
+                    ("Assets:Bank:Fund", "100", "ENR"),
+                    ("Assets:Bank", "-100", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-10-15",
+                &[
+                    ("Assets:Bank:Fund", "50", "ENR"),
+                    ("Assets:Bank", "-60", "TRY"),
+                ],
+            ),
+        ];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Valuation),
+            vec![
+                "Equity:Envelope:Valuation 150.00 ENR",
+                "Equity:Envelope:Money -150.00 ENR",
+                "Equity:Envelope:Valuation -195.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 195.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn book_to_market_without_a_price_falls_back_to_normal_units() {
+        let mut config = config("2026-10", 1);
+        config.include_starting_balance = true;
+        config.conversions.push(conversion(
+            "2026-10",
+            "Assets:Bank:Fund",
+            Some("ENR"),
+            "TRY",
+        ));
+
+        let directives = vec![txn(
+            "2026-09-01",
+            &[
+                ("Assets:Bank:Fund", "100", "ENR"),
+                ("Assets:Bank", "-100", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        assert!(rendered(&plan, EntryKind::Valuation).is_empty());
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("no price for ENR")),
+            "{:?}",
+            plan.diagnostics
         );
     }
 }

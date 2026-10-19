@@ -33,6 +33,7 @@ plugin "rustledger_envelope.wasm"
 | `Equity:Envelope:<path>` | the category for the expense account `<path>` (`Expenses:Groceries:Bread` → `Equity:Envelope:Groceries:Bread`) |
 | `Equity:Envelope:To-Be-Budgeted` | money not yet assigned, per commodity |
 | `Equity:Envelope:Money` | the contra of your on-budget money; it is what makes `To-Be-Budgeted` a real figure |
+| `Equity:Envelope:Valuation` | the bridge for `book to market`: holds the converted account's units and their target-currency value |
 | `Equity:Envelope:Uncategorized` | postings on the bare expense root (`Expenses 12.00 TRY`) |
 
 Everything the plugin generates is inside that one prefix, so a single string is
@@ -57,6 +58,7 @@ last day:
 | funding | the assignments in force (`fund`, inherited until replaced) |
 | activity | your spending, mirrored category by category |
 | adjustment | `adjust`, `zero` and `pad` operations |
+| valuation | `book to market`: mark selected holdings to the month-end price |
 | rollover | the boundary policy (`rollover`) |
 
 `To-Be-Budgeted = on-budget money − Σ category balances`, per commodity; that is
@@ -68,6 +70,47 @@ Every generated transaction carries the tag `#envelope` and the metadata
 `envelope-kind` (`Envelope funding`, `Envelope activity`, …) and `envelope-month`
 (`2026-10`), so a query or a UI can find, group or hide them without parsing
 narrations.
+
+## Book to market
+
+A cash-like account can be held in units — a money-market fund, for example.
+`book to market` values such an account in a target currency for the budget:
+
+```beancount
+2026-10-01 custom "envelope" "book to market" Assets:TR:Enpara:Investment "TRY"
+```
+
+Currencies are quoted strings because rustledger's `custom` parser rejects bare
+currency tokens. The plugin uses the latest `price` directive at or before each
+month end:
+
+```beancount
+2026-10-31 price ENR 1.2535 TRY
+```
+
+The conversion is a budget valuation, not a ledger transaction:
+
+- the account's non-target units stop contributing units to `To-Be-Budgeted`;
+- `Equity:Envelope:Valuation` bridges those units to the target-currency value;
+- the previous month's bridge balance is the opening valuation, so buys and
+  sells are handled by their actual cash legs in the other on-budget accounts;
+- `include starting balance TRUE` values pre-horizon holdings at the first
+  month end; `FALSE` counts only units acquired inside the horizon.
+
+```beancount
+2026-10-31 * "Envelope valuation 2026-10" #envelope
+  Equity:Envelope:Valuation        46,298 ENR
+  Equity:Envelope:Money           -46,298 ENR
+  Equity:Envelope:Valuation       -58,034.54 TRY
+  Equity:Envelope:To-Be-Budgeted   58,034.54 TRY
+```
+
+If no `price` exists for a converted commodity, the plugin reports an error and
+leaves that commodity as normal units rather than silently dropping value. A
+price older than two months is carried with a warning.
+
+`book to market` does not change the account's cost basis or tax lots; the real
+ledger keeps its units and costs.
 
 ## Worked example
 
@@ -176,6 +219,7 @@ directive at or before a month is the one in force for it.
 | `rollover` | account, `TRUE`\|`FALSE` | carry the balance into the next month, or reset it to zero at the boundary |
 | `rollover` | account, amount | carry up to the amount, sweeping the excess back to `To-Be-Budgeted` |
 | `map` | regex, account | send matching postings to that category instead of their own (first match wins) |
+| `book to market` | account, [STRING,] STRING | value the account's holdings in the target currency at the latest `price` at or before each month end; inherited from its month onward |
 | `include starting balance` | bool | count money held before `start date` as available (default `FALSE`) |
 | `assert` | bool | emit a month-end assertion per category and commodity (default `TRUE`) |
 | `strict` | bool | warn about spending in a category that was never assigned (default `FALSE`) |
@@ -204,6 +248,10 @@ the two sides of the budget are measured differently on purpose:
 Because of that, funding USD beyond the USD you hold is reported in USD while TRY
 stays untouched — which is precisely the case you fix by buying currency, an
 ordinary on-budget transfer in your ledger.
+
+`book to market` is the deliberate exception: it is an opt-in valuation of a
+selected account's holdings, not a conversion of the transactions themselves.
+Without a `book to market` directive, the plugin still never converts.
 
 ## Getting it
 

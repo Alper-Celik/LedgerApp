@@ -27,6 +27,12 @@ pub const MONEY: &str = "Equity:Envelope:Money";
 /// Category a posting on the bare expense root lands in.
 pub const UNCATEGORIZED: &str = "Equity:Envelope:Uncategorized";
 
+/// The bridge between an account's actual holdings and the currency its
+/// envelope is valued in. It holds the marked-to-market holdings on one side
+/// and the target-currency value on the other, so the namespace still sums to
+/// zero per commodity.
+pub const VALUATION: &str = "Equity:Envelope:Valuation";
+
 /// Whether `account` is one of the plugin's generated accounts.
 #[must_use]
 pub fn is_generated(account: &str) -> bool {
