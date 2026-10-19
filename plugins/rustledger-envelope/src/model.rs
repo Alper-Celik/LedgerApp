@@ -55,7 +55,7 @@
 //! account *holds*, its units, so buying USD with TRY puts USD in the pool
 //! rather than the TRY the USD cost.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 
 use regex_lite::Regex;
@@ -173,6 +173,10 @@ pub struct Assertion {
 struct Movement {
     month: Month,
     account: String,
+    /// The envelope category this posting spends from, when it is an expense.
+    category: Option<String>,
+    /// Whether the posting touches an on-budget account.
+    on_budget: bool,
     /// What the account holds, in the commodity it holds it in: an FX purchase
     /// must show the currency it bought, not that currency's cost.
     units: Money,
@@ -215,7 +219,7 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
                 .map(|pattern| (pattern, mapping.node.clone()))
         })
         .collect();
-    let movements = movements(directives);
+    let movements = movements(config, &mappings, &budget_accounts, directives);
 
     // Assignments grouped by category and commodity, so each month can pick the
     // newest declaration at or before it.
@@ -240,7 +244,7 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         if accounts::is_generated(&movement.account) {
             continue;
         }
-        if let Some(category) = category_for(config, &mappings, &movement.account) {
+        if let Some(category) = &movement.category {
             let Some(weight) = &movement.weight else {
                 continue;
             };
@@ -248,12 +252,12 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
                 .entry(movement.month.index())
                 .or_default();
             month
-                .entry(category)
+                .entry(category.clone())
                 .or_default()
                 .add(&weight.currency, weight.value);
             continue;
         }
-        if matches(budget_accounts.as_slice(), &movement.account) {
+        if movement.on_budget {
             let units = &movement.units;
             if movement.month < config.start {
                 pre_horizon.add(&units.currency, units.value);
@@ -644,8 +648,18 @@ fn horizon(config: &Config, directives: &[DirectiveWrapper]) -> Result<Vec<Month
 }
 
 /// Every posting of every transaction, reduced to a value in one commodity.
-fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
+fn movements(
+    config: &Config,
+    mappings: &[(Regex, String)],
+    budget_accounts: &[AccountPattern],
+    directives: &[DirectiveWrapper],
+) -> Vec<Movement> {
     let mut movements = Vec::new();
+    // Classifying an account is the same work for every posting on it, and a
+    // ledger reuses a few dozen accounts across hundreds of postings. Cache it
+    // so the WASM guest allocates one category string per account, not per
+    // posting.
+    let mut classifications: HashMap<&str, (Option<String>, bool)> = HashMap::new();
     for directive in directives {
         let DirectiveData::Transaction(transaction) = &directive.data else {
             continue;
@@ -657,6 +671,22 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
             let Some(units) = posting.units.as_ref() else {
                 continue;
             };
+            // Only postings the budget can use are worth decoding: expense
+            // categories and on-budget money. Off-budget investments and
+            // income would otherwise pay for a decimal parse and a cost
+            // computation on every posting, which is what exhausted the WASM
+            // fuel budget on a full ledger.
+            let (category, on_budget) = classifications
+                .entry(posting.account.as_str())
+                .or_insert_with(|| {
+                    (
+                        category_for(config, mappings, &posting.account),
+                        matches(budget_accounts, &posting.account),
+                    )
+                });
+            if category.is_none() && !*on_budget {
+                continue;
+            }
             let Ok(quantity) = Decimal::from_str(units.number.trim()) else {
                 continue;
             };
@@ -666,9 +696,15 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
             movements.push(Movement {
                 month,
                 account: posting.account.clone(),
+                category: category.clone(),
+                on_budget: *on_budget,
                 units: Money::new(quantity, units.currency.clone()),
-                weight: posting_value(posting),
-                filename: directive.filename.clone(),
+                weight: posting_value(posting, quantity),
+                filename: if config.strict {
+                    directive.filename.clone()
+                } else {
+                    None
+                },
                 lineno: directive.lineno,
             });
         }
@@ -682,9 +718,8 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
 /// price annotation does, else the units themselves. Nothing is converted: this
 /// is the same figure beancount uses to balance the transaction, so an expense
 /// always costs the envelope exactly what the ledger says it cost.
-fn posting_value(posting: &PostingData) -> Option<Money> {
+fn posting_value(posting: &PostingData, quantity: Decimal) -> Option<Money> {
     let units = posting.units.as_ref()?;
-    let quantity = Decimal::from_str(units.number.trim()).ok()?;
 
     if let Some(cost) = &posting.cost
         && let Some(currency) = &cost.currency
@@ -809,16 +844,74 @@ fn target_month(target: &Target) -> Month {
     }
 }
 
+/// A compiled on-budget account pattern.
+///
+/// A regex `is_match` is a substring search, so the patterns users actually
+/// write — an account name, `^Prefix`, `Suffix$`, `Prefix.*` — can be answered
+/// with plain string operations. That matters in WASM: a full `regex-lite`
+/// match costs microseconds, and the budget matches every posting against every
+/// pattern, which is enough to exhaust rustledger's fuel budget on a real
+/// ledger.
+#[derive(Debug, Clone)]
+enum AccountPattern {
+    /// A literal pattern: regex search semantics are `contains`.
+    Contains(String),
+    /// `^Literal`.
+    StartsWith(String),
+    /// `Literal$`.
+    EndsWith(String),
+    /// Anything else.
+    Regex(Regex),
+}
+
+impl AccountPattern {
+    fn new(pattern: &str) -> Option<Self> {
+        const META: [char; 13] = [
+            '\\', '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}',
+        ];
+        let has_meta = |text: &str| text.chars().any(|c| META.contains(&c) || c == '|');
+
+        if !has_meta(pattern) {
+            return Some(Self::Contains(pattern.to_string()));
+        }
+        if let Some(rest) = pattern.strip_prefix('^')
+            && !has_meta(rest)
+        {
+            return Some(Self::StartsWith(rest.to_string()));
+        }
+        if let Some(rest) = pattern.strip_suffix('$')
+            && !has_meta(rest)
+        {
+            return Some(Self::EndsWith(rest.to_string()));
+        }
+        if let Some(rest) = pattern.strip_suffix(".*")
+            && !has_meta(rest)
+        {
+            return Some(Self::Contains(rest.to_string()));
+        }
+        Regex::new(pattern).ok().map(Self::Regex)
+    }
+
+    fn is_match(&self, account: &str) -> bool {
+        match self {
+            Self::Contains(pattern) => account.contains(pattern.as_str()),
+            Self::StartsWith(pattern) => account.starts_with(pattern.as_str()),
+            Self::EndsWith(pattern) => account.ends_with(pattern.as_str()),
+            Self::Regex(pattern) => pattern.is_match(account),
+        }
+    }
+}
+
 /// Compile the configured patterns; the parser already rejected broken ones.
-fn compile(patterns: &[String]) -> Vec<Regex> {
+fn compile(patterns: &[String]) -> Vec<AccountPattern> {
     patterns
         .iter()
-        .filter_map(|pattern| Regex::new(pattern).ok())
+        .filter_map(|pattern| AccountPattern::new(pattern))
         .collect()
 }
 
 /// Whether `account` matches any on-budget pattern.
-fn matches(patterns: &[Regex], account: &str) -> bool {
+fn matches(patterns: &[AccountPattern], account: &str) -> bool {
     patterns.iter().any(|pattern| pattern.is_match(account))
 }
 

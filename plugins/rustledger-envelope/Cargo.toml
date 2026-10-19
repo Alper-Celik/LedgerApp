@@ -29,6 +29,8 @@ rustledger-core = "0.24.0"
 rustledger-validate = "0.24.0"
 
 [profile.release]
-opt-level = "s"
+# Speed over size: rustledger meters plugin fuel, and the budget for a real
+# ledger has to finish inside the default 30M-unit budget.
+opt-level = 3
 lto = true
 strip = true
