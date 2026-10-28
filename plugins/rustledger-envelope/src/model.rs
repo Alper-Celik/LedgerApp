@@ -61,7 +61,8 @@ use std::str::FromStr;
 use regex_lite::Regex;
 use rust_decimal::Decimal;
 use rustledger_plugin_types::{
-    CostNumberData, DirectiveData, DirectiveWrapper, PluginError, PostingData, PriceAnnotationView,
+    AmountData, CostNumberData, DirectiveData, DirectiveWrapper, PluginError, PostingData,
+    PriceAnnotationView,
 };
 
 use crate::accounts::{self, MONEY, TO_BE_BUDGETED};
@@ -105,17 +106,17 @@ pub struct MonthPlan {
     pub assertions: Vec<Assertion>,
 }
 
-/// Which step of a month an entry belongs to.
+/// Which step of a month an entry belongs to, in the order the steps apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
     /// Contra of the change in on-budget money.
     Money,
     /// Inherited category assignments.
     Funding,
-    /// One-off `adjust` / `zero` / `pad` operations.
-    Adjustment,
     /// The month's mirrored spending.
     Activity,
+    /// One-off `adjust` / `zero` / `pad` operations.
+    Adjustment,
     /// The rollover policy applied at the month boundary.
     Sweep,
 }
@@ -156,7 +157,8 @@ pub struct Leg {
     pub amount: Money,
 }
 
-/// A balance assertion at a month's end.
+/// A balance assertion for a month's closing balances, dated the first day of
+/// the following month so it sees the whole month, sweep included.
 #[derive(Clone, Debug)]
 pub struct Assertion {
     /// Date of the assertion.
@@ -184,6 +186,9 @@ struct Movement {
     filename: Option<String>,
     lineno: Option<u32>,
 }
+
+/// A ledger location for a diagnostic: the transaction that caused it.
+type SourceLocation = (Option<String>, Option<u32>);
 
 /// Build the plan for `config` from the booked directive stream.
 ///
@@ -233,14 +238,25 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     // baseline), and what each month adds to it.
     let mut pre_horizon = Inventory::new();
     let mut per_month_money: BTreeMap<i32, Inventory> = BTreeMap::new();
-    // Spending per month, per category account.
+    // Spending per month, per category account, and — only when `strict` needs
+    // it — the location of the first posting that landed in each category, so a
+    // warning can point back at the ledger without re-scanning (or re-matching)
+    // every posting per category.
     let mut per_month_activity: BTreeMap<i32, BTreeMap<String, Inventory>> = BTreeMap::new();
+    let mut per_month_locations: BTreeMap<i32, BTreeMap<String, SourceLocation>> = BTreeMap::new();
 
     for movement in &movements {
         if accounts::is_generated(&movement.account) {
             continue;
         }
         if let Some(category) = category_for(config, &mappings, &movement.account) {
+            if config.strict {
+                per_month_locations
+                    .entry(movement.month.index())
+                    .or_default()
+                    .entry(category.clone())
+                    .or_insert_with(|| (movement.filename.clone(), movement.lineno));
+            }
             let Some(weight) = &movement.weight else {
                 continue;
             };
@@ -253,7 +269,7 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
                 .add(&weight.currency, weight.value);
             continue;
         }
-        if matches(budget_accounts.as_slice(), &movement.account) {
+        if matches_any(budget_accounts.as_slice(), &movement.account) {
             let units = &movement.units;
             if movement.month < config.start {
                 pre_horizon.add(&units.currency, units.value);
@@ -271,6 +287,14 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     let mut generated: BTreeSet<String> = BTreeSet::new();
     generated.insert(MONEY.to_string());
     generated.insert(TO_BE_BUDGETED.to_string());
+
+    // Rollover policies are declared per category: iterate the declared nodes in
+    // name order and resolve each month's policy from them.
+    let rollover_nodes: BTreeSet<&str> = config
+        .rollovers
+        .iter()
+        .map(|declaration| declaration.node.as_str())
+        .collect();
 
     let mut months = Vec::with_capacity(horizon.len());
     for (position, &month) in horizon.iter().enumerate() {
@@ -350,14 +374,16 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         if let Some(spending) = per_month_activity.remove(&month.index()) {
             for (account, spent) in spending {
                 if config.strict && !assigned.contains(&account) {
-                    let location = movements
-                        .iter()
-                        .find(|movement| {
-                            movement.month == month
-                                && category_for(config, &mappings, &movement.account).as_deref()
-                                    == Some(account.as_str())
-                        })
-                        .and_then(|movement| Some((movement.filename.clone()?, movement.lineno?)));
+                    // The first posting that landed in the category this month,
+                    // recorded during the scan; a transaction with no source
+                    // location reports the warning without one.
+                    let location = per_month_locations
+                        .get(&month.index())
+                        .and_then(|locations| locations.get(&account))
+                        .and_then(|location| match location {
+                            (Some(file), Some(line)) => Some((file.clone(), *line)),
+                            _ => None,
+                        });
                     let mut problem = PluginError::warning(format!(
                         "{}: spending in {account} with no assignment",
                         month.label()
@@ -483,8 +509,9 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
 
         // 5. The rollover policy, applied at the boundary this month ends.
         let mut sweep = Vec::new();
-        for (node, policy) in effective_rollovers(config, month) {
-            let account = match accounts::category_account(&node, &config.expense_root) {
+        for &node in &rollover_nodes {
+            let policy = rollover_for(config, node, month);
+            let account = match accounts::category_account(node, &config.expense_root) {
                 Some(account) => account,
                 None => continue,
             };
@@ -607,43 +634,54 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
 /// The budget horizon: `start date` through `end date`, else `months ahead` past
 /// the newest directive in the ledger.
 fn horizon(config: &Config, directives: &[DirectiveWrapper]) -> Result<Vec<Month>, PluginError> {
+    let start = i64::from(config.start.index());
+    // A derived end is clamped to the start (the ledger may be older than the
+    // budget); an explicit one before the start is a configuration error below.
     let end = match config.end {
-        Some(end) => end,
+        Some(end) => i64::from(end.index()),
         None => {
             let newest = directives
                 .iter()
                 .filter_map(|directive| Month::from_date(&directive.date))
                 .max()
                 .unwrap_or(config.start);
-            let end = Month::from_index(newest.index() + config.months_ahead as i32);
-            if end < config.start {
-                config.start
-            } else {
-                end
-            }
+            (i64::from(newest.index()) + i64::from(config.months_ahead)).max(start)
         }
     };
-    if end < config.start {
+    if end < start {
+        let end = config.end.expect("a derived end is clamped to the start");
         return Err(PluginError::error(format!(
             "end date {} is before start date {}",
             end.label(),
             config.start.label()
         )));
     }
-    let count = (end.index() - config.start.index() + 1) as usize;
-    if count > MAX_MONTHS {
+    // The span is counted in i64 so a `months ahead` past i32 cannot wrap into a
+    // shorter horizon: it reaches the limit check and is refused.
+    let count = end - start + 1;
+    if count > MAX_MONTHS as i64 {
+        // An explicit or moderate derived end is labelled exactly as before; a
+        // `months ahead` beyond the i32 index space has no month to name.
+        let horizon = i32::try_from(end).map_or_else(
+            |_| format!("from {}", config.start.label()),
+            |index| {
+                format!(
+                    "{}..{}",
+                    config.start.label(),
+                    Month::from_index(index).label()
+                )
+            },
+        );
         return Err(PluginError::error(format!(
-            "budget horizon {}..{} spans {count} months; refusing to generate more than {MAX_MONTHS}",
-            config.start.label(),
-            end.label()
+            "budget horizon {horizon} spans {count} months; refusing to generate more than {MAX_MONTHS}"
         )));
     }
-    Ok((0..count)
-        .map(|offset| Month::from_index(config.start.index() + offset as i32))
+    Ok((0..count as i32)
+        .map(|offset| Month::from_index(config.start.index() + offset))
         .collect())
 }
 
-/// Every posting of every transaction, reduced to a value in one commodity.
+/// Every posting of every transaction, reduced to what budgeting reads from it.
 fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
     let mut movements = Vec::new();
     for directive in directives {
@@ -667,7 +705,7 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
                 month,
                 account: posting.account.clone(),
                 units: Money::new(quantity, units.currency.clone()),
-                weight: posting_value(posting),
+                weight: posting_value(posting, units, quantity),
                 filename: directive.filename.clone(),
                 lineno: directive.lineno,
             });
@@ -682,10 +720,9 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
 /// price annotation does, else the units themselves. Nothing is converted: this
 /// is the same figure beancount uses to balance the transaction, so an expense
 /// always costs the envelope exactly what the ledger says it cost.
-fn posting_value(posting: &PostingData) -> Option<Money> {
-    let units = posting.units.as_ref()?;
-    let quantity = Decimal::from_str(units.number.trim()).ok()?;
-
+///
+/// `quantity` is `units.number` already parsed by [`movements`].
+fn posting_value(posting: &PostingData, units: &AmountData, quantity: Decimal) -> Option<Money> {
     if let Some(cost) = &posting.cost
         && let Some(currency) = &cost.currency
     {
@@ -770,19 +807,6 @@ fn rollover_for(config: &Config, node: &str, month: Month) -> Rollover {
         .map_or(Rollover::Carry, |declaration| declaration.policy.clone())
 }
 
-/// Every rollover policy in force in `month`, one per declared category.
-fn effective_rollovers(config: &Config, month: Month) -> Vec<(String, Rollover)> {
-    let nodes: BTreeSet<&str> = config
-        .rollovers
-        .iter()
-        .map(|declaration| declaration.node.as_str())
-        .collect();
-    nodes
-        .into_iter()
-        .map(|node| (node.to_string(), rollover_for(config, node, month)))
-        .collect()
-}
-
 /// Append `change` (a signed, per-commodity change to `account`) and the
 /// opposite legs on `To-Be-Budgeted`, so the entry balances inside the namespace.
 fn push_against_pool(legs: &mut Vec<Leg>, account: &str, change: &Inventory) {
@@ -818,7 +842,7 @@ fn compile(patterns: &[String]) -> Vec<Regex> {
 }
 
 /// Whether `account` matches any on-budget pattern.
-fn matches(patterns: &[Regex], account: &str) -> bool {
+fn matches_any(patterns: &[Regex], account: &str) -> bool {
     patterns.iter().any(|pattern| pattern.is_match(account))
 }
 
@@ -1042,6 +1066,46 @@ mod tests {
     }
 
     #[test]
+    fn funding_is_inherited_per_commodity() {
+        // `0.00` stops the assignment for *its* commodity, not the category:
+        // the USD assignment declared later keeps running, and a commodity that
+        // was never assigned never appears.
+        let mut config = config("2026-01", 3);
+        config.funds.push(Fund {
+            month: Month::new(2026, 1),
+            node: "Expenses:Vps".to_string(),
+            amount: money("100.00", "TRY"),
+        });
+        config.funds.push(Fund {
+            month: Month::new(2026, 2),
+            node: "Expenses:Vps".to_string(),
+            amount: money("20.00", "USD"),
+        });
+        config.funds.push(Fund {
+            month: Month::new(2026, 3),
+            node: "Expenses:Vps".to_string(),
+            amount: money("0.00", "TRY"),
+        });
+
+        let plan = plan(&config, &[]);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Funding),
+            vec![
+                "Equity:Envelope:Vps 100.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -100.00 TRY",
+                "Equity:Envelope:Vps 100.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted -100.00 TRY",
+                "Equity:Envelope:Vps 20.00 USD",
+                "Equity:Envelope:To-Be-Budgeted -20.00 USD",
+                // March: the TRY assignment was stopped, the USD one was not.
+                "Equity:Envelope:Vps 20.00 USD",
+                "Equity:Envelope:To-Be-Budgeted -20.00 USD",
+            ]
+        );
+    }
+
+    #[test]
     fn reset_rollover_sweeps_the_surplus_and_the_deficit_back_to_the_pool() {
         let config = {
             let mut config = config("2026-01", 2);
@@ -1118,6 +1182,52 @@ mod tests {
     }
 
     #[test]
+    fn cap_rollover_only_sweeps_a_surplus_in_its_own_commodity() {
+        // The cap is a ceiling on one commodity: a deficit is carried (there is
+        // nothing to sweep back), and a position in another commodity is not
+        // measured against it.
+        let mut config = config("2026-01", 2);
+        for (number, currency) in [("100.00", "TRY"), ("5.00", "USD")] {
+            config.funds.push(Fund {
+                month: Month::new(2026, 1),
+                node: "Expenses:Fun".to_string(),
+                amount: money(number, currency),
+            });
+        }
+        config.rollovers.push(RolloverDecl {
+            month: Month::new(2026, 1),
+            node: "Expenses:Fun".to_string(),
+            policy: Rollover::Cap(money("50.00", "TRY")),
+        });
+        let directives = vec![txn(
+            "2026-02-05",
+            &[
+                ("Expenses:Fun", "200.00", "TRY"),
+                ("Assets:Bank", "-200.00", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Sweep),
+            vec![
+                // January held 100.00 TRY against a 50.00 TRY cap…
+                "Equity:Envelope:Fun -50.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 50.00 TRY",
+                // …February ends at -50.00 TRY, below the cap, so nothing is
+                // swept; the USD position was never subject to the TRY cap.
+            ]
+        );
+        assert!(
+            assertions(&plan).contains(&"2026-03-01 Equity:Envelope:Fun -50.00 TRY".to_string())
+        );
+        assert!(
+            assertions(&plan).contains(&"2026-03-01 Equity:Envelope:Fun 10.00 USD".to_string())
+        );
+    }
+
+    #[test]
     fn carry_rollover_emits_no_sweep() {
         let config = {
             let mut config = config("2026-01", 1);
@@ -1136,6 +1246,54 @@ mod tests {
 
         let plan = plan(&config, &[]);
         assert!(legs(&plan, EntryKind::Sweep).is_empty());
+    }
+
+    #[test]
+    fn a_rollover_crosses_the_year_boundary() {
+        // December's sweep lands on 2026-12-31 and January's assertion on
+        // 2027-02-01: the month arithmetic, not just `Month`, has to step into
+        // the next year.
+        let mut config = config("2026-11", 3);
+        config.funds.push(Fund {
+            month: Month::new(2026, 11),
+            node: "Expenses:Fun".to_string(),
+            amount: money("100.00", "TRY"),
+        });
+        config.rollovers.push(RolloverDecl {
+            month: Month::new(2026, 12),
+            node: "Expenses:Fun".to_string(),
+            policy: Rollover::Reset,
+        });
+        // January switches back to carrying, so its assertion is the one dated
+        // in the new year.
+        config.rollovers.push(RolloverDecl {
+            month: Month::new(2027, 1),
+            node: "Expenses:Fun".to_string(),
+            policy: Rollover::Carry,
+        });
+
+        let plan = plan(&config, &[]);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Sweep),
+            vec![
+                // December resets the two months of assignments…
+                "Equity:Envelope:Fun -200.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 200.00 TRY",
+                // …and January carries.
+            ]
+        );
+        assert_eq!(
+            assertions(&plan),
+            vec![
+                "2026-12-01 Equity:Envelope:Fun 100.00 TRY",
+                "2026-12-01 Equity:Envelope:To-Be-Budgeted -100.00 TRY",
+                // January's reset leaves nothing to assert at 2027-01-01, so the
+                // next assertions are February's, dated in the new year.
+                "2027-02-01 Equity:Envelope:Fun 100.00 TRY",
+                "2027-02-01 Equity:Envelope:To-Be-Budgeted -100.00 TRY",
+            ]
+        );
     }
 
     #[test]
@@ -1472,6 +1630,21 @@ mod tests {
     fn an_absurd_horizon_is_refused_instead_of_generated() {
         let mut config = config("2026-01", 1);
         config.end = Some(Month::new(3026, 1));
+
+        let plan = plan(&config, &[]);
+        assert!(plan.months.is_empty());
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert!(plan.diagnostics[0].message.contains("refusing to generate"));
+    }
+
+    #[test]
+    fn a_months_ahead_past_i32_is_refused_not_wrapped() {
+        // `months ahead` is parsed as a u32; casting it to the i32 index space
+        // would wrap a large value into the past and quietly produce a one-month
+        // horizon instead of refusing.
+        let mut config = config("2026-01", 1);
+        config.end = None;
+        config.months_ahead = u32::MAX;
 
         let plan = plan(&config, &[]);
         assert!(plan.months.is_empty());

@@ -283,7 +283,7 @@ mod tests {
     /// ever disagree, this test fails.
     #[test]
     fn the_readme_worked_example_holds() {
-        use rustledger_plugin_types::{OpenData, PluginOutput};
+        use rustledger_plugin_types::PluginOutput;
 
         fn open(account: &str) -> DirectiveWrapper {
             DirectiveWrapper {

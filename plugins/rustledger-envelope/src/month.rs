@@ -13,9 +13,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Month {
     /// Gregorian year.
-    pub year: i32,
-    /// Month of the year, 1-12.
-    pub month: u32,
+    year: i32,
+    /// Month of the year, 1-12 (see [`Month::new`], which clamps it).
+    month: u32,
 }
 
 impl Month {
@@ -76,7 +76,7 @@ impl Month {
     /// `YYYY-MM-01`.
     #[must_use]
     pub fn first_day(self) -> String {
-        format!("{}", self.label()) + "-01"
+        format!("{}-01", self.label())
     }
 
     /// `YYYY-MM-<last day>`.

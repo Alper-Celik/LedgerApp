@@ -166,8 +166,8 @@ directive at or before a month is the one in force for it.
 | `end date` | `"YYYY-MM"` | last budget month; default: `months ahead` past the ledger's newest directive |
 | `months ahead` | number | months to budget past the newest directive (default 0) |
 | `budget account` | regex | an account holding spendable money (**required**, repeatable) |
-| `income account` | regex | read and validated for fava-envelope compatibility; availability comes from on-budget balances |
-| `fund` | account, amount | assign this month and every later month until replaced (`0.00` stops) |
+| `income account` | regex | read and validated for fava-envelope compatibility; availability comes from on-budget balances (default `^Income:`) |
+| `fund` | account, amount | assign this month and every later month until replaced (`0.00` stops it for that commodity) |
 | `adjust` | account, amount | one-off signed change for that month only |
 | `zero` | account | release the category subtree's whole balance to `To-Be-Budgeted` |
 | `pad` | account, amount | set the subtree balance in that commodity to `amount` |
@@ -291,7 +291,7 @@ than the source:
 | `regex-lite` | MIT OR Apache-2.0 |
 | their transitive dependencies | permissive (MIT / Apache-2.0), except the above |
 
-`rustledger-loader` and `rustledger-validate` (test-only here) are GPL-3.0-only as
+`rustledger-core` and `rustledger-validate` (test-only here) are GPL-3.0-only as
 well. A distributed module therefore carries GPL-3.0 terms — in practice
 AGPL-3.0 *without* the "or later", since an "only" component forbids choosing a
 later version — and the permissive components' notices have to travel with it.

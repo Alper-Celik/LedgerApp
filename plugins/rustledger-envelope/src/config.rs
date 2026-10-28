@@ -18,7 +18,7 @@
 //! | `months ahead` | NUMBER | How many months past the newest ledger directive to budget. Default 0. |
 //! | `budget account` | STRING regex | An on-budget account: assets and liabilities holding spendable money. Repeatable; at least one is required. |
 //! | `income account` | STRING regex | Accepted and validated (its regex must compile) so a file shared with fava-envelope keeps working. The budget's availability comes from the on-budget accounts, per commodity, so this changes no number. Repeatable; default `^Income:`. |
-//! | `fund` | ACCOUNT, AMOUNT | Assign `AMOUNT` to the category at ACCOUNT in the directive's month. **Inherited**: every later month keeps assigning it until a `fund` for the same category replaces it (`0.00` stops it). |
+//! | `fund` | ACCOUNT, AMOUNT | Assign `AMOUNT` to the category at ACCOUNT in the directive's month. **Inherited**: every later month keeps assigning it until a `fund` for the same category replaces it (`0.00` stops it for that commodity). |
 //! | `adjust` | ACCOUNT, AMOUNT | One-off, month-scoped signed change to the category's balance (moving money to/from `To-Be-Budgeted`). Never inherited. |
 //! | `zero` | ACCOUNT | One-off: release the category subtree's whole balance (every commodity) to `To-Be-Budgeted`. |
 //! | `pad` | ACCOUNT, AMOUNT | One-off: set the category subtree's balance in that commodity to `AMOUNT`, taking from or giving back to `To-Be-Budgeted`. |
@@ -28,7 +28,7 @@
 //! | `rollover` | ACCOUNT, AMOUNT | Carries the balance up to `AMOUNT`, sweeping the excess to `To-Be-Budgeted`. |
 //! | `map` | STRING regex, ACCOUNT | Optional: send postings matching the account pattern to ACCOUNT's category instead of their own. First match wins. |
 //! | `include starting balance` | BOOL | Whether the on-budget money held before the first budget month counts as available. Default `FALSE`. |
-//! | `assert` | BOOL | Emit a `balance` assertion per category and commodity at each month end. Default `TRUE`. |
+//! | `assert` | BOOL | Emit a `balance` assertion per category and commodity at each month's close, dated the first day of the next month. Default `TRUE`. |
 //! | `strict` | BOOL | Report spending in a category that was never funded. Default `FALSE`. |
 //!
 //! # Rules the parser enforces
@@ -46,6 +46,10 @@
 //!   `adjust`, `zero`, `pad`, `balance`) the account must be under
 //!   [`Config::expense_root`]; an account elsewhere is an error naming the key
 //!   and the account.
+//! * `rollover` and `map` take an ACCOUNT but accept any account path: only
+//!   expense accounts have a category to resolve to, so a `rollover` outside
+//!   the expense tree never applies, and a `map` pointing outside it leaves the
+//!   postings it matches unbudgeted.
 //! * A `rollover` may not be declared on a category that has an ancestor or a
 //!   descendant with one — overlapping policies would sweep the same money
 //!   twice.
@@ -179,7 +183,9 @@ pub enum Rollover {
 pub struct RolloverDecl {
     /// Month the policy starts being effective.
     pub month: Month,
-    /// The category, as an expense account path.
+    /// The category, as an expense account path. A declaration outside the
+    /// expense tree parses but can never apply: only expense accounts are
+    /// mirrored into the envelope namespace.
     pub node: String,
     /// The policy.
     pub policy: Rollover,
@@ -190,7 +196,9 @@ pub struct RolloverDecl {
 pub struct Mapping {
     /// Regex matched against the posting's account.
     pub pattern: String,
-    /// The category, as an expense account path.
+    /// The category, as an expense account path. Matching postings whose
+    /// target is outside the expense tree resolve to no category and are left
+    /// out of the budget.
     pub node: String,
 }
 
@@ -704,7 +712,7 @@ impl<'a> Parser<'a> {
 ///
 /// `None` means the directive wrote the wrong kind of value, which the parser
 /// reports as an error naming the key and the expected kind.
-pub mod value {
+mod value {
     use rust_decimal::Decimal;
     use rustledger_plugin_types::MetaValueData;
 

@@ -42,12 +42,6 @@ pub fn is_under(account: &str, node: &str) -> bool {
             && account.as_bytes()[node.len()] == b':')
 }
 
-/// Whether `account` is a category: the expense root, or under it.
-#[must_use]
-pub fn is_category(account: &str, expense_root: &str) -> bool {
-    is_under(account, expense_root)
-}
-
 /// The category account for an expense posting account.
 ///
 /// `Expenses:Groceries:Bread` with root `Expenses` becomes
@@ -55,7 +49,7 @@ pub fn is_category(account: &str, expense_root: &str) -> bool {
 /// [`UNCATEGORIZED`]. Returns `None` for accounts outside the expense tree.
 #[must_use]
 pub fn category_account(expense_account: &str, expense_root: &str) -> Option<String> {
-    if !is_category(expense_account, expense_root) {
+    if !is_under(expense_account, expense_root) {
         return None;
     }
     let tail = expense_account
@@ -105,6 +99,5 @@ mod tests {
 
         assert!(is_generated("Equity:Envelope:Uncategorized"));
         assert!(!is_generated("Equity:Opening-Balances"));
-        assert!(is_category("Expenses", "Expenses"));
     }
 }

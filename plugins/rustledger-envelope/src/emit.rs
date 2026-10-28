@@ -17,9 +17,10 @@
 //! * one `transaction` per [`Entry`](crate::model::Entry), postings in the
 //!   order the model produced them;
 //! * one `open` per planned account, dated at the first budget month;
-//! * one `balance` per [`Assertion`](crate::model::Assertion), dated at the
-//!   month's end — rustledger's Late validation then verifies the plugin's own
-//!   arithmetic;
+//! * one `balance` per [`Assertion`](crate::model::Assertion), carrying the date
+//!   the model chose — the first day of the following month, so the assertion
+//!   sees the whole month including its sweep — and rustledger's Late
+//!   validation then verifies the plugin's own arithmetic;
 //! * every diagnostic from the plan (the host validates the op list's coverage
 //!   of the input, so this module does not re-check it in production code).
 
