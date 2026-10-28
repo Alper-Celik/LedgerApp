@@ -1,0 +1,3 @@
+[submodule "vendor/TauriQt"]
+	path = vendor/TauriQt
+	url = https://github.com/Alper-Celik/TauriQt

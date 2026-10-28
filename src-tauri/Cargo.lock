@@ -5005,8 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-runtime-qt"
-version = "0.1.0"
-source = "git+https://github.com/Alper-Celik/TauriQt#4740ee452f513a7d4b231b05aaf34717a0fdecdf"
+version = "0.0.1"
 dependencies = [
  "cookie",
  "cxx",
@@ -5024,8 +5023,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-runtime-qt-core"
-version = "0.1.0"
-source = "git+https://github.com/Alper-Celik/TauriQt#4740ee452f513a7d4b231b05aaf34717a0fdecdf"
+version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "cookie",

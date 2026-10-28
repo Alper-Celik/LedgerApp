@@ -50,11 +50,11 @@ rust_decimal = "1"
 # and HTTPS transports (and their OpenSSL/libssh2 build chain) are dead weight.
 git2 = { version = "0.21", default-features = false }
 
-# Linux: the Qt runtime from the TauriQt repo — Qt windowing (QWindow/QWidget)
-# replaces tao and QtWebEngine replaces webkit2gtk. Follows `main`; Cargo.lock
-# pins the exact commit.
+# Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
+# builds against the checkout so runtime fixes land here first. Qt windowing
+# (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk.
 [target.'cfg(target_os = "linux")'.dependencies]
-tauri-runtime-qt = { git = "https://github.com/Alper-Celik/TauriQt" }
+tauri-runtime-qt = { path = "../vendor/TauriQt/tauri-runtime-qt" }
 
 # Windows / macOS: the stock wry runtime. Enabling `wry` only here keeps
 # WebView2/WKWebView out of the Linux build and Qt out of the others.

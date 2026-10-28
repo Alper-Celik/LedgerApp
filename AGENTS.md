@@ -10,6 +10,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 - **Package Manager**: npm
 - **Add-ons**: paraglide, ai-tools
 
+## Rust backend (`src-tauri/src`)
+
+- `lib.rs` — crate root: runtime alias, module list, `run()` (specta registration + bindings export).
+- `commands.rs` — the Tauri/specta command surface; frontend-facing names live here, keep them thin.
+- `session.rs` — `AppState`, the loaded `Ledger` plus its per-file baseline, ledger path resolution.
+- `accounts.rs` — account tree balances and the register (`balance_view` walks, envelope filtering).
+- `source.rs` — `balance_view` ↔ source-directive mapping, transaction span lookup, line/column helpers.
+- `editing.rs` — the edit pipeline: write, reload, roll back on new loader errors, stage.
+- `folders.rs` — the in-app folder picker's directory listing and root-journal detection.
+- `rewrite.rs` — pure byte-range source surgery (header and posting rewrites).
+- `git.rs` — working-tree change detection, diff rendering, committing the ledger's own files.
+- `model.rs` — serde/specta types exported to `src/bindings.ts`.
+- `testing.rs` — shared test fixtures (temp dirs, throwaway repos, loaded `AppState`); tests sit beside their module.
+
+## Qt runtime (`vendor/TauriQt`, git submodule)
+
+`src-tauri/Cargo.toml` takes `tauri-runtime-qt` from that checkout by path, so runtime fixes are made there first and the app builds them immediately. That repo has its own AGENTS.md (commit as you go; Qt-bearing crates cannot link a test binary, so behaviour is verified by its demo + `scripts/smoke.sh`). The demo grades itself into the window title and the smoke script asserts `DEMO_OK`.
+
 ---
 
 # Svelte MCP server

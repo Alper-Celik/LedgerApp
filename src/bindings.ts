@@ -18,10 +18,40 @@ export const commands = {
 	 */
 	accountTransactions: (account: string) => __TAURI_INVOKE<TransactionView[]>("account_transactions", { account }),
 	/**
-	 *  Parse, book, and validate a beancount file, then keep it as app state.
-	 *  A failed load leaves the previously loaded ledger untouched.
+	 *  Parse, book, and validate a beancount journal, then keep it as app state.
+	 *  `path` may be the journal itself or a directory holding one (`main.bean` and
+	 *  friends, found by the loader). A failed load leaves the previously loaded
+	 *  ledger untouched.
 	 */
 	loadLedger: (path: string) => typedError<LoadSummary, string>(__TAURI_INVOKE("load_ledger", { path })),
+	/**
+	 *  The ledger currently open — its root journal and what the load found — or
+	 *  `None` when nothing is loaded. The UI reads this to show which journal it is
+	 *  looking at, including the one opened at startup.
+	 */
+	ledgerSummary: () => __TAURI_INVOKE<{
+	/**  Path of the loaded root journal. */
+	path: string,
+	/**  Number of loaded directives (after booking and plugins). */
+	directive_count: number,
+	/**
+	 *  Number of validation/processing errors collected; the ledger is still
+	 *  loaded and usable.
+	 */
+	error_count: number,
+} | null>("ledger_summary"),
+	/**
+	 *  The folders inside `path` — or inside the user's home when `None` — for the
+	 *  in-app folder picker: each one's absolute path, and whether a root journal
+	 *  sits in it.
+	 * 
+	 *  There is deliberately no native dialog behind this: the Qt runtime drops
+	 *  `run_on_main_thread` closures (so tauri-plugin-dialog never opens), and a
+	 *  GTK dialog in this process segfaults because rfd initialises GTK on one
+	 *  thread while the idle that builds the widget is dispatched on Qt's. Listing
+	 *  directories needs neither a toolkit nor a portal.
+	 */
+	listFolders: (path: string | null) => typedError<FolderListing, string>(__TAURI_INVOKE("list_folders", { path })),
 	/**
 	 *  Rewrite one transaction's own lines in the `.bean` file it came from, reload
 	 *  the ledger from disk, and stage the file.
@@ -98,6 +128,36 @@ export type AccountBalance = {
 	 *  up the account tree so the sidebar can mark a branch.
 	 */
 	modified: boolean,
+};
+
+/**  One folder in the in-app folder picker. */
+export type FolderEntry = {
+	name: string,
+	/**  Absolute path, the argument that opens it. */
+	path: string,
+	/**
+	 *  A root journal sits directly inside it (`main.bean` and friends), so
+	 *  opening this folder loads a ledger rather than failing.
+	 */
+	ledger: boolean,
+};
+
+/**
+ *  One directory as the folder picker lists it: its own path, the way back up,
+ *  and the folders inside it.
+ */
+export type FolderListing = {
+	/**  Absolute path of the directory being listed. */
+	path: string,
+	/**  Its parent, or `None` at the filesystem root. */
+	parent: string | null,
+	/**
+	 *  A root journal sits directly in *this* directory, so it can be opened as
+	 *  it stands.
+	 */
+	ledger: boolean,
+	/**  The folders inside it, hidden ones left out, name-sorted. */
+	folders: FolderEntry[],
 };
 
 /**  Summary of a successful ledger load. */

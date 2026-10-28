@@ -1,0 +1,113 @@
+// SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Where a `balance_view` entry came from: its source directive, its file, and
+//! the byte-offset lookups the editors and the change tracking need.
+
+use std::collections::HashMap;
+
+use rustledger_core::{Directive, Spanned, Transaction};
+use rustledger_loader::{Ledger, SourceFile};
+
+/// The index into `ledger.directives` of the source directive behind each entry
+/// of `ledger.balance_view()`.
+///
+/// `balance_view` hands out bare `Directive`s, so a transaction's source
+/// location has to be recovered from the directive stream. The two are the same
+/// stream — both sorted by date — with synthesized pad transactions inserted, so
+/// walking them in lockstep and advancing the source stream only on a match
+/// pairs every entry of the view with the directive it came from.
+pub(crate) fn source_directive_index(ledger: &Ledger, view: &[Directive]) -> Vec<Option<usize>> {
+    let mut sources = Vec::with_capacity(view.len());
+    let mut next = 0;
+    for directive in view {
+        let matched = ledger
+            .directives
+            .get(next)
+            .filter(|source| source.value == *directive)
+            .map(|_| next);
+        if matched.is_some() {
+            next += 1;
+        }
+        sources.push(matched);
+    }
+    sources
+}
+
+/// The transaction behind a `TransactionView.id` — the entry at `id` in the
+/// ledger's transaction stream — together with its source span and the file it
+/// was loaded from. Every edit path starts by locating its transaction this
+/// way, so an unknown id fails the same way whichever editor asked.
+pub(crate) fn source_of_transaction<'a>(
+    ledger: &'a Ledger,
+    id: u32,
+) -> Result<(&'a Spanned<Directive>, &'a Transaction, &'a SourceFile), String> {
+    let view = ledger.balance_view();
+    let sources = source_directive_index(ledger, &view);
+    let source = sources
+        .get(id as usize)
+        .copied()
+        .flatten()
+        .map(|index| &ledger.directives[index])
+        .ok_or_else(|| format!("no transaction with id {id}"))?;
+    let Directive::Transaction(tx) = &source.value else {
+        return Err(format!("directive {id} is not a transaction"));
+    };
+    let file = ledger
+        .source_map
+        .get(source.file_id as usize)
+        .ok_or_else(|| format!("no source file for transaction {id}"))?;
+    Ok((source, tx, file))
+}
+
+/// The 1-based line and UTF-16 column of `byte` in `text` — Monaco's own
+/// coordinates. A byte offset that is not a character boundary (or past the
+/// end) answers for the largest boundary before it, so a stale offset can never
+/// panic.
+pub(crate) fn line_column(text: &str, byte: usize) -> (u32, u32) {
+    let head = text.get(..byte.min(text.len())).unwrap_or(text);
+    let line = head.bytes().filter(|byte| *byte == b'\n').count() as u32 + 1;
+    let line_start = head.rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let column = text[line_start..head.len()]
+        .chars()
+        .map(char::len_utf16)
+        .sum::<usize>() as u32
+        + 1;
+    (line, column)
+}
+
+pub(crate) fn touches_changes(
+    ledger: &Ledger,
+    changed: &HashMap<u16, Vec<(u32, u32)>>,
+    line_starts: &mut HashMap<u16, Vec<usize>>,
+    source: &Spanned<Directive>,
+) -> bool {
+    let Some(ranges) = changed.get(&source.file_id) else {
+        return false;
+    };
+    let Some(file) = ledger.source_map.get(source.file_id as usize) else {
+        return false;
+    };
+    let text: &str = &file.source;
+    let starts = line_starts
+        .entry(source.file_id)
+        .or_insert_with(|| line_starts_of(text));
+    let body = text.get(source.span.start..source.span.end).unwrap_or("");
+    let last_byte = source.span.start + body.trim_end().len();
+    let first = line_of(starts, source.span.start);
+    let last = line_of(starts, last_byte.saturating_sub(1).max(source.span.start));
+    ranges.iter().any(|&(from, to)| from <= last && first <= to)
+}
+
+/// The byte offset at which each line of `text` starts, for offset → line lookup.
+pub(crate) fn line_starts_of(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+    starts
+}
+
+/// The 1-based line `offset` falls on, given the file's line starts.
+pub(crate) fn line_of(starts: &[usize], offset: usize) -> u32 {
+    u32::try_from(starts.partition_point(|&start| start <= offset)).unwrap_or(u32::MAX)
+}
