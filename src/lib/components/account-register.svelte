@@ -17,6 +17,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
+	import { IsMobile } from "$lib/hooks/is-mobile.svelte.js";
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
@@ -85,6 +86,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		"col-amount",
 		"col-amount",
 	];
+
+	/**
+	 * Phones lay the register out in four columns (see the colgroups below), so
+	 * the rows that span the whole register — an edit's error, the source
+	 * editor, an entry's leg holder — span four there and six from `md` up. A
+	 * colspan wider than the table would add phantom trailing columns and
+	 * squeeze the description.
+	 */
+	const isMobile = new IsMobile();
+	const columnSpan = $derived(isMobile.current ? 4 : COLUMNS.length);
 
 	/** The style choice sticks across accounts and reloads. */
 	let view = $state<ViewId>(
@@ -252,9 +263,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 )}
 	{@const outward = posting.units.startsWith("-")}
 	<Table.Row>
-		<Table.Cell></Table.Cell>
-		<Table.Cell class="border-s border-border"></Table.Cell>
-		<Table.Cell class="border-s border-border"></Table.Cell>
+		<Table.Cell class="hidden md:table-cell"></Table.Cell>
+		<Table.Cell class="hidden border-s border-border md:table-cell"></Table.Cell>
+		<Table.Cell class="hidden border-s border-border md:table-cell"></Table.Cell>
 		<!--
 			Colour, not opacity, separates the legs that hit this account from the
 			ones that do not: an alpha would drop small text under the 4.5:1
@@ -335,9 +346,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		<!--
 			Fixed layout: widths come from the colgroup, never from content, so a
 			long description or an opened entry cannot shift the amount columns.
+			Phones drop the transfer column and fold both amount columns into one
+			(below), so the table is only as wide as its four remaining tracks;
+			`md` and up restores the full register's minimum.
 		-->
-		<Table.Root class="table-fixed min-w-176 animate-enter">
-			<colgroup>
+		<Table.Root class="table-fixed min-w-0 animate-enter md:min-w-176">
+			<colgroup class="md:hidden">
+				<col class="col-actions" />
+				<col class="col-date" />
+				<col class="col-description" />
+				<col class="col-amount" />
+			</colgroup>
+			<colgroup class="hidden md:table-column-group">
 				{#each COLUMNS as column, index (index)}
 					<col class={column} />
 				{/each}
@@ -346,12 +366,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				<Table.Row>
 					<Table.Head class="h-7"></Table.Head>
 					<Table.Head class="h-7 border-s border-border pl-2">Date</Table.Head>
-					<Table.Head class="h-7 border-s border-border pl-2">Description</Table.Head>
-					<Table.Head class="h-7 border-s border-border pl-2">{mode.transferColumn}</Table.Head>
-					<Table.Head class="h-7 border-s border-border px-2 text-right">
+					<Table.Head class="h-7 border-s border-border pl-2">
+						<span class="md:hidden">Details</span>
+						<span class="hidden md:inline">Description</span>
+					</Table.Head>
+					<Table.Head class="h-7 border-s border-border px-2 pr-3 text-right md:hidden">
+						Amount
+					</Table.Head>
+					<Table.Head class="hidden h-7 border-s border-border pl-2 md:table-cell">
+						{mode.transferColumn}
+					</Table.Head>
+					<Table.Head class="hidden h-7 border-s border-border px-2 text-right md:table-cell">
 						{mode.amountColumns[0]}
 					</Table.Head>
-					<Table.Head class="h-7 border-s border-border px-2 pr-3 text-right">
+					<Table.Head
+						class="hidden h-7 border-s border-border px-2 pr-3 text-right md:table-cell"
+					>
 						{mode.amountColumns[1]}
 					</Table.Head>
 				</Table.Row>
@@ -419,7 +449,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 								opens; in the auto-split ledger only entries with
 								legs outside this account can.
 							-->
-							<span class="inline-flex items-center gap-0.5">
+							<!--
+								The row's three actions: 20px icons are a mouse target,
+								so phones give them a thumb-sized 28px box instead.
+							-->
+							<span
+								class="inline-flex items-center gap-0.5 max-md:[&_[data-slot='button']]:size-7 max-md:[&_svg]:size-3.5"
+							>
 								{#if mode.expandWhen !== "none" &&
 									(mode.expandWhen === "any-entry" ? tx.postings.length > 1 : hiddenCount(tx) > 0)}
 									<Button
@@ -500,14 +536,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							-->
 							<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
 							{#if editing === tx.id && draft}
-								<span class="flex min-w-0 items-center gap-1">
+								<span class="flex min-w-0 items-center gap-1 max-md:flex-col max-md:items-stretch">
 									<Input
 										class="h-6 min-w-0 flex-1 px-1"
 										placeholder="Payee"
 										bind:value={draft.payee}
 										aria-label="Payee"
 									/>
-									<span class="text-muted-foreground">—</span>
+									<span class="text-muted-foreground max-md:hidden">—</span>
 									<Input
 										class="h-6 min-w-0 flex-2 px-1"
 										placeholder="Narration"
@@ -523,11 +559,23 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							{/if}
 						</Table.Cell>
 						<!--
+							Phones show one amount column where `md` and up show two:
+							both directions sit in the cell, each in the sign colour
+							its column would have given it.
+						-->
+						<Table.Cell
+							class="border-s border-border overflow-hidden px-2 py-1.5 pr-3 text-right font-medium md:hidden"
+						>
+							{@render amounts([...flow.deposits, ...flow.withdrawals])}
+						</Table.Cell>
+						<!--
 							The basic ledger names the other side; the split styles
 							instead say how many legs are still hidden, so an entry that
 							can be opened is obvious without hunting for the chevron.
 						-->
-						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 text-muted-foreground">
+						<Table.Cell
+							class="hidden border-s border-border truncate py-1.5 pr-3 pl-2 text-muted-foreground md:table-cell"
+						>
 							{#if mode.namesOtherSide}
 								{transferLabel(tx)}
 							{:else if !mode.showAllPostings && hiddenCount(tx) > 0 && current !== tx.id}
@@ -537,19 +585,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							{/if}
 						</Table.Cell>
 						<Table.Cell
-							class="border-s border-border overflow-hidden px-2 py-1.5 text-right font-medium"
+							class="hidden border-s border-border overflow-hidden px-2 py-1.5 text-right font-medium md:table-cell"
 						>
 							{@render amounts(flow.deposits)}
 						</Table.Cell>
 						<Table.Cell
-							class="border-s border-border overflow-hidden px-2 py-1.5 pr-3 text-right font-medium"
+							class="hidden border-s border-border overflow-hidden px-2 py-1.5 pr-3 text-right font-medium md:table-cell"
 						>
 							{@render amounts(flow.withdrawals)}
 						</Table.Cell>
 					</Table.Row>
 					{#if editing === tx.id && editError}
 						<Table.Row>
-							<Table.Cell colspan={COLUMNS.length} class="py-1 pr-3 pl-2">
+							<Table.Cell colspan={columnSpan} class="py-1 pr-3 pl-2">
 								<Alert variant="destructive">
 									<AlertDescription>{editError}</AlertDescription>
 								</Alert>
@@ -563,7 +611,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					-->
 					{#if sourceEditing === tx.id}
 						<Table.Row>
-							<Table.Cell colspan={COLUMNS.length} class="p-0">
+							<Table.Cell colspan={columnSpan} class="p-0">
 								{#key editorScope.scope}
 									<SourceEditor
 										id={tx.id}
@@ -598,7 +646,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						}}
 						onfocusout={(event) => commitOnLeave(event, tx)}
 					>
-						<Table.Cell colspan={COLUMNS.length} class="p-0">
+						<Table.Cell colspan={columnSpan} class="p-0">
 							<div
 								class={cn("fold", current === tx.id && "fold-open")}
 								ontransitionend={() => {
@@ -607,7 +655,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							>
 								<div class="overflow-hidden">
 									<Table.Root class="table-fixed">
-										<colgroup>
+										<!--
+											Phones hide the legs' three empty leading
+											cells and keep the account beside its two
+											amounts; `md` and up is the full grid.
+										-->
+										<colgroup class="md:hidden">
+											<col class="col-description" />
+											<col class="col-amount" />
+											<col class="col-amount" />
+										</colgroup>
+										<colgroup class="hidden md:table-column-group">
 											{#each COLUMNS as column, index (index)}
 												<col class={column} />
 											{/each}

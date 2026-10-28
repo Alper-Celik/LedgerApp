@@ -37,7 +37,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	<div class="flex flex-wrap items-center gap-2">
 		<Input
-			class="h-8 max-w-xs"
+			class="h-8 w-full sm:max-w-xs"
 			placeholder="Search transactions…"
 			aria-label="Search transactions"
 			bind:value={filters.query}

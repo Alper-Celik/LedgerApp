@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { setMode, userPrefersMode } from "mode-watcher";
+	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import {
@@ -13,6 +14,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		setEditorScope,
 		type EditorScope,
 	} from "$lib/editor-scope.svelte.js";
+	import { ledger, openLedgerFolder } from "$lib/ledger.svelte.js";
 	import {
 		SIDEBAR_DEFAULT_WIDTH,
 		setSidebarWidth,
@@ -38,10 +40,41 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 <div class="flex flex-col gap-4 p-4">
 	<div class="flex flex-wrap items-center gap-2">
 		<h1 class="text-lg font-semibold tracking-tight">Settings</h1>
-		<span class="text-muted-foreground text-xs">appearance, the source editor and the sidebar</span>
+		<span class="text-muted-foreground text-xs"
+			>the ledger, appearance, the source editor and the sidebar</span
+		>
 	</div>
 
 	<div class="flex max-w-2xl flex-col gap-6">
+		<div class="flex flex-col gap-2">
+			<div class="flex flex-col gap-0.5">
+				<h2 class="text-sm font-medium">Ledger</h2>
+				<p class="text-muted-foreground text-xs">
+					The journal the app has open. Opening a folder loads the journal inside it —
+					<code>main.bean</code> or the first root file the loader recognises.
+				</p>
+			</div>
+			<div class="flex flex-wrap items-center gap-2">
+				<Button
+					size="sm"
+					variant="secondary"
+					disabled={ledger.opening}
+					onclick={openLedgerFolder}
+				>
+					{ledger.opening ? "Opening…" : "Open folder…"}
+				</Button>
+				<span
+					class="text-muted-foreground min-w-0 truncate font-mono text-xs"
+					title={ledger.summary?.path ?? ""}
+				>
+					{ledger.summary?.path ?? "no ledger loaded"}
+				</span>
+			</div>
+			{#if ledger.error}
+				<Alert variant="destructive">{ledger.error}</Alert>
+			{/if}
+		</div>
+
 		<div class="flex flex-col gap-2">
 			<div class="flex flex-col gap-0.5">
 				<h2 class="text-sm font-medium">Appearance</h2>

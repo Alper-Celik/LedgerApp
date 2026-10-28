@@ -7,6 +7,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 <script lang="ts">
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
+	import FolderPicker from "$lib/components/folder-picker.svelte";
 	import { sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import "../app.css";
 	import { ModeWatcher } from "mode-watcher";
@@ -19,6 +20,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<ModeWatcher />
 	<AppSidebar />
 	<Sidebar.Inset>
+		<!--
+			Below `md` the sidebar is a sheet, so this bar is the only way in: it
+			carries the trigger and stays while the page scrolls. Desktop keeps
+			the fixed sidebar and sees none of it.
+		-->
+		<header
+			class="bg-background/85 sticky top-0 z-20 flex h-11 items-center gap-1 border-b px-2 backdrop-blur md:hidden"
+		>
+			<Sidebar.Trigger class="size-9 -ms-1" aria-label="Open navigation" />
+			<span class="truncate text-sm font-semibold">Ledger</span>
+		</header>
 		{@render children?.()}
 	</Sidebar.Inset>
+	<!-- One picker for the whole app: the sidebar and Settings both just open it. -->
+	<FolderPicker />
 </Sidebar.Provider>

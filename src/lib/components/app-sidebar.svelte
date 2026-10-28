@@ -11,6 +11,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import {
 		ChevronRightIcon,
 		FileDiffIcon,
+		FolderOpenIcon,
 		GitCommitIcon,
 		Settings01Icon,
 	} from "@hugeicons/core-free-icons";
@@ -24,6 +25,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	} from "$lib/accounts.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
+	import { ledger, openLedgerFolder, refreshLedger } from "$lib/ledger.svelte.js";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import {
 		SIDEBAR_WIDTH_STORAGE_KEY,
@@ -33,6 +35,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
+
+	const sidebar = Sidebar.useSidebar();
+
+	/**
+	 * Below `md` this sidebar is a sheet, and a sheet left open covers the page
+	 * the link that was tapped navigated to. Every navigation closes it — the
+	 * pathname read is the dependency — while the desktop sidebar's own open
+	 * state is left alone.
+	 */
+	$effect(() => {
+		void page.url.pathname;
+		if (sidebar.isMobile) sidebar.setOpenMobile(false);
+	});
 
 	/**
 	 * The accounts the backend marks uncommitted, by full name. Its flag is
@@ -107,6 +122,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	onMount(async () => {
 		accounts = await loadAccounts();
+		// Which journal the app opened (the CLI argument, LEDGER_PATH or
+		// main.bean), so Settings can name it before a folder is picked.
+		refreshLedger();
 	});
 
 	$effect(() => {
@@ -314,6 +332,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</Sidebar.Content>
 	<Sidebar.Footer>
 		<Sidebar.Menu>
+			<!--
+				Pointing the app at another ledger: a native folder picker whose
+				choice is loaded as the session's journal. In the sidebar (and so
+				in the mobile sheet) because it is app-wide, like Settings.
+			-->
+			<Sidebar.MenuItem>
+				<Sidebar.MenuButton
+					size="sm"
+					class="rounded-none"
+					aria-disabled={ledger.opening}
+					onclick={openLedgerFolder}
+				>
+					<HugeiconsIcon icon={FolderOpenIcon} strokeWidth={2} data-icon="inline-start" />
+					<span class="min-w-0 flex-1 truncate">
+						{ledger.opening ? "Opening…" : "Open folder…"}
+					</span>
+				</Sidebar.MenuButton>
+			</Sidebar.MenuItem>
 			<Sidebar.MenuItem>
 				<Sidebar.MenuButton
 					size="sm"

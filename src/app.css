@@ -315,3 +315,34 @@ html.sidebar-resizing [data-slot="sidebar-container"] {
 @utility col-amount {
 	width: 7rem;
 }
+
+/*
+	Phones, the other side of Tailwind's `md`. The register drops its transfer
+	column and folds both amount columns into one there (see
+	account-register), so the tracks that remain are sized for a ~360px
+	viewport: the action buttons grew to a 28px thumb target, which the actions
+	track pays for, and the description keeps whatever is left.
+*/
+@media (max-width: 767px) {
+	.col-actions {
+		width: 5.75rem;
+	}
+
+	.col-date {
+		width: 5.25rem;
+	}
+
+	.col-amount {
+		width: 5.5rem;
+	}
+}
+
+/*
+	The mobile sidebar is a sheet: its rows are laid out for a mouse pointer, so
+	the sheet's own menu buttons get a 36px floor to be hittable with a thumb.
+	Desktop keeps the denser rows.
+*/
+[data-mobile="true"] [data-slot="sidebar-menu-button"] {
+	min-height: 2.25rem;
+}
+
