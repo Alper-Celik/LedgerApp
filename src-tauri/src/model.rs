@@ -53,7 +53,8 @@ pub struct TransactionView {
 
 /// Fields the register may change about one transaction. `id` is the
 /// `TransactionView.id` the frontend already has: the transaction's index in the
-/// ledger's transaction stream, which this command re-derives the same way.
+/// ledger's transaction stream, which `update_transaction` re-derives the same
+/// way.
 #[derive(Debug, serde::Deserialize, specta::Type)]
 pub struct TransactionEdit {
     pub id: u32,

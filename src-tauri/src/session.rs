@@ -60,9 +60,14 @@ impl Loaded {
 /// after an edit agree on what "changed" means.
 pub(crate) fn load_baselined(path: &Path) -> Result<Loaded, String> {
     let root = journal_in(path)?;
-    rustledger_loader::load(&root, &LoadOptions::default())
-        .map(|ledger| Loaded::fresh(ledger, root))
-        .map_err(|e| e.to_string())
+    load_journal(&root).map(|ledger| Loaded::fresh(ledger, root))
+}
+
+/// Load the journal at `root` with the app's loader options — the one place the
+/// loader is configured, so a reload after an edit parses the file exactly as
+/// opening it did.
+pub(crate) fn load_journal(root: &Path) -> Result<Ledger, String> {
+    rustledger_loader::load(root, &LoadOptions::default()).map_err(|e| e.to_string())
 }
 
 /// The journal a path names: the file itself, or the root journal directly

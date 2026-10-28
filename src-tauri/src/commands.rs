@@ -90,10 +90,8 @@ pub fn ledger_summary(state: State<'_, AppState>) -> Option<LoadSummary> {
 /// sits in it.
 ///
 /// There is deliberately no native dialog behind this: the Qt runtime drops
-/// `run_on_main_thread` closures (so tauri-plugin-dialog never opens), and a
-/// GTK dialog in this process segfaults because rfd initialises GTK on one
-/// thread while the idle that builds the widget is dispatched on Qt's. Listing
-/// directories needs neither a toolkit nor a portal.
+/// `run_on_main_thread` closures, and a GTK dialog in this process segfaults.
+/// Listing directories needs neither a toolkit nor a portal.
 #[tauri::command]
 #[specta::specta]
 pub fn list_folders(path: Option<String>) -> Result<FolderListing, String> {

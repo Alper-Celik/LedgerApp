@@ -46,10 +46,8 @@ export const commands = {
 	 *  sits in it.
 	 * 
 	 *  There is deliberately no native dialog behind this: the Qt runtime drops
-	 *  `run_on_main_thread` closures (so tauri-plugin-dialog never opens), and a
-	 *  GTK dialog in this process segfaults because rfd initialises GTK on one
-	 *  thread while the idle that builds the widget is dispatched on Qt's. Listing
-	 *  directories needs neither a toolkit nor a portal.
+	 *  `run_on_main_thread` closures, and a GTK dialog in this process segfaults.
+	 *  Listing directories needs neither a toolkit nor a portal.
 	 */
 	listFolders: (path: string | null) => typedError<FolderListing, string>(__TAURI_INVOKE("list_folders", { path })),
 	/**
@@ -193,7 +191,8 @@ export type PostingView = {
 /**
  *  Fields the register may change about one transaction. `id` is the
  *  `TransactionView.id` the frontend already has: the transaction's index in the
- *  ledger's transaction stream, which this command re-derives the same way.
+ *  ledger's transaction stream, which `update_transaction` re-derives the same
+ *  way.
  */
 export type TransactionEdit = {
 	id: number,

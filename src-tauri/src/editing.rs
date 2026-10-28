@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use rustledger_loader::{LedgerError, LoadOptions};
+use rustledger_loader::LedgerError;
 
 use crate::git::stage_file;
 use crate::model::{TransactionEdit, TransactionFile};
 use crate::rewrite::rewrite_transaction;
-use crate::session::{AppState, Loaded};
+use crate::session::{AppState, Loaded, load_journal};
 use crate::source::{line_column, source_of_transaction};
 
 /// The body of [`update_transaction`](crate::commands::update_transaction), split
@@ -86,8 +86,10 @@ pub(crate) fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> 
     apply_file_edit(state, &path, &previous, rewritten, reported)
 }
 
-/// The body of [`transaction_file`]: the file the entry came from, its whole
-/// text, and the entry's own position in it (1-based line, UTF-16 column).
+/// The body of
+/// [`transaction_file`](crate::commands::transaction_file): the file the entry
+/// came from, its whole text, and the entry's own position in it (1-based line,
+/// UTF-16 column).
 pub(crate) fn transaction_file_view(state: &AppState, id: u32) -> Result<TransactionFile, String> {
     let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     let loaded = guard.as_ref().ok_or("no ledger loaded")?;
@@ -104,10 +106,11 @@ pub(crate) fn transaction_file_view(state: &AppState, id: u32) -> Result<Transac
     })
 }
 
-/// The body of [`update_file_source`]: the whole file text replaces the loaded
-/// copy, and the result goes through the same pipeline as
-/// [`edit_transaction_source`] — [`apply_file_edit`] reloads, reverts on a new
-/// loader error, and stages what survives.
+/// The body of
+/// [`update_file_source`](crate::commands::update_file_source): the whole file
+/// text replaces the loaded copy, and the result goes through the same pipeline
+/// as [`edit_transaction_source`] — [`apply_file_edit`] reloads, reverts on a
+/// new loader error, and stages what survives.
 pub(crate) fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<(), String> {
     let (path, previous, reported) = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
@@ -126,16 +129,12 @@ pub(crate) fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<
     apply_file_edit(state, &path, &previous, text.to_string(), reported)
 }
 
-/// Write a transaction edit's `rewritten` file text over the loaded copy at
-/// `path`, reload the ledger from disk, and stage the file — the shared tail of
-/// both edit paths (field-by-field and source text).
+/// Write an edit's `rewritten` file text over the loaded copy at `path`, reload
+/// the ledger from disk, and stage the file — the shared tail of every edit
+/// path: field-by-field, transaction source, and whole file.
 ///
-/// The reload is the authority on whether the edit was legal (a balanced
-/// transaction, a parseable header): when it fails or raises an error the
-/// ledger did not already have, the file is put back exactly as it was and the
-/// loader's complaint is returned, so an edit can never leave a broken ledger
-/// on disk. A ledger outside a git repository is still written, there is simply
-/// nothing to stage.
+/// A refused reload puts the file back exactly as it was; a ledger outside a
+/// git repository is still written, there is simply nothing to stage.
 fn apply_file_edit(
     state: &AppState,
     path: &Path,
@@ -159,10 +158,8 @@ fn apply_file_edit(
         ));
     }
 
-    // Reload the journal this session was opened with, not the file just
-    // written: an included file on its own has none of the `open` directives
-    // its parent carries, so reloading it alone would report every account it
-    // touches as never opened and refuse a perfectly good edit.
+    // Reload the journal this session was opened with, never the file just
+    // written: `Loaded::root` explains why.
     let root = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         guard
@@ -172,7 +169,7 @@ fn apply_file_edit(
     };
 
     fs::write(path, rewritten.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
-    let reloaded = match rustledger_loader::load(&root, &LoadOptions::default()) {
+    let reloaded = match load_journal(&root) {
         Ok(ledger) => ledger,
         Err(e) => {
             let _ = fs::write(path, &previous_bytes);
@@ -236,8 +233,7 @@ mod tests {
 
     /// A journal split across files — the root holds the `open` directives, an
     /// included file the entries — is editable like any other: the reload after
-    /// a write has to follow the `include`, or the included file on its own
-    /// reports every account it touches as never opened and the edit is refused.
+    /// a write has to follow the `include` (see `Loaded::root`).
     #[test]
     fn an_edit_to_an_included_file_reloads_the_whole_journal() {
         let dir = TempDir::new("included");

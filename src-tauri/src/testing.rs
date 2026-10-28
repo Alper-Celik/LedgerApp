@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Fixtures shared by the edit and git tests: temporary directories, throwaway
+//! Fixtures shared by the module tests: temporary directories, throwaway
 //! repositories, and the same `AppState` the app builds.
 
 use std::fs;

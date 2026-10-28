@@ -30,6 +30,20 @@ fn is_envelope_account(account: &str) -> bool {
             && account.as_bytes()[ENVELOPE_NAMESPACE.len()] == b':')
 }
 
+/// Every colon-prefix of `account`, the account itself included, in prefix
+/// order: `A:B:C` visits `A`, then `A:B`, then `A:B:C`.
+fn for_each_account_prefix(account: &str, mut visit: impl FnMut(&str)) {
+    let mut prefix = String::new();
+    for part in account.split(':') {
+        prefix = if prefix.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{prefix}:{part}")
+        };
+        visit(&prefix);
+    }
+}
+
 /// The accounts touched by at least one uncommitted transaction, with every
 /// colon-prefix ancestor of each — the same "changed since HEAD or since this
 /// session's baseline" test [`account_transaction_views`] runs per row, rolled
@@ -65,15 +79,9 @@ pub(crate) fn modified_accounts(
             continue;
         }
         for posting in &tx.postings {
-            let mut prefix = String::new();
-            for part in posting.value.account.as_str().split(':') {
-                prefix = if prefix.is_empty() {
-                    part.to_owned()
-                } else {
-                    format!("{prefix}:{part}")
-                };
-                marked.insert(prefix.clone());
-            }
+            for_each_account_prefix(posting.value.account.as_str(), |prefix| {
+                marked.insert(prefix.to_owned());
+            });
         }
     }
     marked
@@ -201,18 +209,12 @@ pub(crate) fn account_balances(
     // Adding to a parent that also has postings is correct: its entry then
     // holds own + descendants, exactly the subtree total.
     for (name, currencies) in totals.drain().collect::<Vec<_>>() {
-        let mut prefix = String::new();
-        for part in name.split(':') {
-            prefix = if prefix.is_empty() {
-                part.to_owned()
-            } else {
-                format!("{prefix}:{part}")
-            };
-            let node = totals.entry(prefix.clone()).or_default();
+        for_each_account_prefix(&name, |prefix| {
+            let node = totals.entry(prefix.to_owned()).or_default();
             for (currency, units) in &currencies {
                 *node.entry(currency.clone()).or_default() += units;
             }
-        }
+        });
     }
     let mut balances: Vec<AccountBalance> = totals
         .iter()

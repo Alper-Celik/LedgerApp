@@ -87,7 +87,11 @@ mod tests {
         fs::create_dir(dir.dir().join("archive")).unwrap();
         fs::create_dir(dir.dir().join(".hidden")).unwrap();
         fs::write(dir.dir().join("notes.txt"), "not a folder").unwrap();
-        fs::write(dir.dir().join("Books/main.bean"), "2026-01-01 open Assets:Bank\n").unwrap();
+        fs::write(
+            dir.dir().join("Books/main.bean"),
+            "2026-01-01 open Assets:Bank\n",
+        )
+        .unwrap();
 
         let listing = list_folders(dir.dir()).unwrap();
         let names: Vec<&str> = listing.folders.iter().map(|f| f.name.as_str()).collect();
@@ -99,13 +103,18 @@ mod tests {
         assert!(books.ledger);
         assert_eq!(
             books.path,
-            fs::canonicalize(dir.file("Books")).unwrap().display().to_string()
+            fs::canonicalize(dir.file("Books"))
+                .unwrap()
+                .display()
+                .to_string()
         );
         let canonical = fs::canonicalize(dir.dir()).unwrap();
         assert_eq!(listing.path, canonical.display().to_string());
         assert_eq!(
             listing.parent,
-            canonical.parent().map(|parent| parent.display().to_string())
+            canonical
+                .parent()
+                .map(|parent| parent.display().to_string())
         );
     }
 }

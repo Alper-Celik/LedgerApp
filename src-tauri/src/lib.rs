@@ -4,8 +4,9 @@
 
 //! Ledger app backend: the Tauri command surface (`commands`), the loaded
 //! ledger session (`session`), the ledger-derived views (`accounts`, `source`),
-//! the file edits behind the editors (`editing`, `rewrite`), and the git
-//! integration (`git`).
+//! the file edits behind the editors (`editing`, `rewrite`), the in-app folder
+//! picker (`folders`), the git integration (`git`), and the shapes the frontend
+//! sends and receives (`model`).
 
 mod accounts;
 pub mod commands;
@@ -24,9 +25,9 @@ use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
 
 use commands::{
-    account_transactions, accounts, commit_ledger, greet, ledger_diff, ledger_summary, list_folders,
-    load_ledger, transaction_file, transaction_source, update_file_source, update_transaction,
-    update_transaction_source,
+    account_transactions, accounts, commit_ledger, greet, ledger_diff, ledger_summary,
+    list_folders, load_ledger, transaction_file, transaction_source, update_file_source,
+    update_transaction, update_transaction_source,
 };
 use session::AppState;
 
@@ -40,23 +41,21 @@ pub type AppRuntime = tauri::Wry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = Builder::<AppRuntime>::new()
-        // Then register them (separated by a comma)
-        .commands(collect_commands![
-            greet,
-            accounts,
-            account_transactions,
-            load_ledger,
-            ledger_summary,
-            list_folders,
-            update_transaction,
-            transaction_source,
-            update_transaction_source,
-            transaction_file,
-            update_file_source,
-            ledger_diff,
-            commit_ledger,
-        ]);
+    let builder = Builder::<AppRuntime>::new().commands(collect_commands![
+        greet,
+        accounts,
+        account_transactions,
+        load_ledger,
+        ledger_summary,
+        list_folders,
+        update_transaction,
+        transaction_source,
+        update_transaction_source,
+        transaction_file,
+        update_file_source,
+        ledger_diff,
+        commit_ledger,
+    ]);
 
     // Only export bindings on non-release builds
     #[cfg(debug_assertions)]

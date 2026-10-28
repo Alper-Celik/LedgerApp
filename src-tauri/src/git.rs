@@ -23,13 +23,9 @@ pub(crate) fn ledger_diff_text(state: &AppState) -> Result<String, String> {
     let (repo, _) = ledger_repo(ledger).ok_or("the ledger is not inside a git repository")?;
     let mut options = git2::DiffOptions::new();
     // Only the ledger's own files: the repository around it may hold anything.
-    for file in ledger.source_map.files() {
-        if let Some((owner, relative)) = repo_and_relative(&file.path) {
-            if owner.path() == repo.path() {
-                if let Some(spec) = relative.to_str() {
-                    options.pathspec(spec);
-                }
-            }
+    for relative in ledger_files_in(&repo, ledger) {
+        if let Some(spec) = relative.to_str() {
+            options.pathspec(spec);
         }
     }
     options.include_untracked(true);
@@ -68,13 +64,7 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
             .map_err(|e| format!("git index: {e}"))?;
     }
     let mut tracked = 0;
-    for file in ledger.source_map.files() {
-        let Some((owner, relative)) = repo_and_relative(&file.path) else {
-            continue;
-        };
-        if owner.path() != repo.path() {
-            continue;
-        }
+    for relative in ledger_files_in(&repo, ledger) {
         if let Some(entry) = index.get_path(&relative, 0) {
             staged.add(&entry).map_err(|e| format!("git index: {e}"))?;
             tracked += 1;
@@ -130,6 +120,20 @@ fn repo_and_relative(path: &Path) -> Option<(git2::Repository, PathBuf)> {
     let workdir = fs::canonicalize(repo.workdir()?).ok()?;
     let relative = absolute.strip_prefix(&workdir).ok()?.to_path_buf();
     Some((repo, relative))
+}
+
+/// The ledger's files that live in `repo`, as paths relative to it — the guard
+/// that keeps unrelated files of the same repository out of the ledger's diff
+/// and commit.
+fn ledger_files_in(repo: &git2::Repository, ledger: &Ledger) -> Vec<PathBuf> {
+    ledger
+        .source_map
+        .files()
+        .iter()
+        .filter_map(|file| repo_and_relative(&file.path))
+        .filter(|(owner, _)| owner.path() == repo.path())
+        .map(|(_, relative)| relative)
+        .collect()
 }
 
 /// The repository's HEAD tree, or `None` while HEAD has no commit yet.
@@ -291,9 +295,6 @@ fn changed_lines(old: &str, new: &str) -> Vec<(u32, u32)> {
     }
     ranges
 }
-
-/// Whether a directive's own source lines are among the working tree's changes
-/// for its file. A span's trailing trivia — the blank line or comment after the
 
 #[cfg(test)]
 mod tests {

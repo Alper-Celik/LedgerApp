@@ -77,6 +77,9 @@ pub(crate) fn line_column(text: &str, byte: usize) -> (u32, u32) {
     (line, column)
 }
 
+/// Whether a directive's own source lines are among the working tree's changes
+/// for its file. A span's trailing trivia — the blank line or comment after the
+/// last posting — belongs to no transaction and is ignored.
 pub(crate) fn touches_changes(
     ledger: &Ledger,
     changed: &HashMap<u16, Vec<(u32, u32)>>,
@@ -101,13 +104,13 @@ pub(crate) fn touches_changes(
 }
 
 /// The byte offset at which each line of `text` starts, for offset → line lookup.
-pub(crate) fn line_starts_of(text: &str) -> Vec<usize> {
+fn line_starts_of(text: &str) -> Vec<usize> {
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
     starts
 }
 
 /// The 1-based line `offset` falls on, given the file's line starts.
-pub(crate) fn line_of(starts: &[usize], offset: usize) -> u32 {
+fn line_of(starts: &[usize], offset: usize) -> u32 {
     u32::try_from(starts.partition_point(|&start| start <= offset)).unwrap_or(u32::MAX)
 }
