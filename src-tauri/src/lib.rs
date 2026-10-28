@@ -8,11 +8,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rustledger_core::{Decimal, Directive, IncompleteAmount, MetaValue, Span, Spanned, Transaction};
 use rustledger_loader::{Ledger, LedgerError, LoadOptions, SourceFile};
-use tauri::State;
+use tauri::{Emitter, State};
+
+mod lsp;
 
 /// The runtime this app runs on: the Qt runtime (Qt windowing + QtWebEngine)
 /// on Linux, wry everywhere else — or on Linux too when built with
@@ -269,6 +271,9 @@ fn load_baselined(path: &Path) -> Result<Loaded, String> {
 #[derive(Default)]
 struct AppState {
     loaded: RwLock<Option<Loaded>>,
+    /// The embedded language server, started by the first editor that asks
+    /// and replaced when the ledger's root journal changes.
+    lsp: Mutex<Option<lsp::Session>>,
 }
 
 impl AppState {
@@ -288,6 +293,7 @@ impl AppState {
         };
         Self {
             loaded: RwLock::new(loaded),
+            lsp: Mutex::new(None),
         }
     }
 }
@@ -335,7 +341,73 @@ fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSummary, 
     // its contents are still consistent, so recover rather than propagating it as
     // a permanent failure to every later command.
     *state.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
+    // A server started for the old journal has the old ledger in memory; the
+    // next editor starts one for this one.
+    *state.lsp.lock().unwrap_or_else(|e| e.into_inner()) = None;
     Ok(summary)
+}
+
+/// Start the embedded language server for the loaded journal, if it is not
+/// already running for that journal.
+///
+/// The result says whether the caller still has to send `initialize`: a new
+/// server is waiting for it, while one an earlier editor already initialized
+/// refuses a second one. Messages come back as `lsp-message` events, one
+/// JSON-RPC object each; the editor talks to the server from then on through
+/// [`lsp_send`]. The server loads the journal itself, from disk, so the account
+/// and currency completions cover every included file and not only the open
+/// buffer.
+#[tauri::command]
+#[specta::specta]
+fn lsp_start(
+    app: tauri::AppHandle<AppRuntime>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let journal = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        std::path::absolute(&loaded.root)
+            .map_err(|e| format!("cannot resolve {}: {e}", loaded.root.display()))?
+    };
+    let mut session = state.lsp.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(running) = session.as_ref()
+        && running.journal() == journal
+    {
+        return Ok(!running.initialized());
+    }
+    // Dropping the previous session closes its channel; that is the server's
+    // stop signal, so no explicit shutdown message is needed here.
+    *session = None;
+    *session = Some(lsp::Session::start(journal, move |message| {
+        let _ = app.emit("lsp-message", message);
+    })?);
+    Ok(true)
+}
+
+/// One JSON-RPC message to the language server, as [`lsp_start`] left it.
+#[tauri::command]
+#[specta::specta]
+fn lsp_send(message: String, state: State<'_, AppState>) -> Result<(), String> {
+    let message: lsp_server::Message = serde_json::from_str(&message)
+        .map_err(|e| format!("invalid language server message: {e}"))?;
+    let guard = state.lsp.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(session) => session.send(message),
+        None => Err("the language server is not running".to_string()),
+    }
+}
+
+/// The absolute path of a journal file, the form a `file:` URI needs.
+///
+/// The loader keeps the paths it read — the root journal's spelling and its
+/// `include`s — which may be relative to the process, while the language
+/// server's URIs are absolute. This is the one conversion those two need.
+#[tauri::command]
+#[specta::specta]
+fn lsp_file_path(file: String) -> Result<String, String> {
+    std::path::absolute(&file)
+        .map(|path| path.display().to_string())
+        .map_err(|e| format!("cannot resolve {file}: {e}"))
 }
 
 /// One entry per account that appears in the tree — accounts with postings
@@ -2652,6 +2724,9 @@ pub fn run() {
             accounts,
             account_transactions,
             load_ledger,
+            lsp_start,
+            lsp_send,
+            lsp_file_path,
             update_transaction,
             transaction_source,
             update_transaction_source,
@@ -2705,6 +2780,9 @@ mod tests {
                 accounts,
                 account_transactions,
                 load_ledger,
+                lsp_start,
+                lsp_send,
+                lsp_file_path,
                 update_transaction,
                 transaction_source,
                 update_transaction_source,
@@ -3023,6 +3101,7 @@ option \"operating_currency\" \"USD\"
     fn loaded_state(path: &Path) -> AppState {
         AppState {
             loaded: RwLock::new(Some(load_baselined(path).unwrap())),
+            lsp: Mutex::new(None),
         }
     }
 

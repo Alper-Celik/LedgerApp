@@ -44,6 +44,13 @@ rustledger-parser = "0.24.0"
 # `plugins/rustledger-envelope` reaches the app.
 rustledger-loader = { version = "0.24.0", features = ["wasm-plugins"] }
 rustledger-query = "0.24.0"
+# The journal's language server, embedded in-process. Its `run_main_loop`
+# takes the channels below as its transport, so the editor's completion, hover
+# and diagnostics are the same handlers `rledger-lsp` runs over stdio.
+rustledger-lsp = "0.24.0"
+crossbeam-channel = "0.5"
+lsp-server = "0.10"
+lsp-types = "0.97"
 rust_decimal = "1"
 # libgit2 bindings for staging and diffing the ledger against HEAD. Default
 # features stay off: this app only ever touches a local repository, so the SSH

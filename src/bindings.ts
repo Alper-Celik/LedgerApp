@@ -23,6 +23,29 @@ export const commands = {
 	 */
 	loadLedger: (path: string) => typedError<LoadSummary, string>(__TAURI_INVOKE("load_ledger", { path })),
 	/**
+	 *  Start the embedded language server for the loaded journal, if it is not
+	 *  already running for that journal.
+	 * 
+	 *  The result says whether the caller still has to send `initialize`: a new
+	 *  server is waiting for it, while one an earlier editor already initialized
+	 *  refuses a second one. Messages come back as `lsp-message` events, one
+	 *  JSON-RPC object each; the editor talks to the server from then on through
+	 *  [`lsp_send`]. The server loads the journal itself, from disk, so the account
+	 *  and currency completions cover every included file and not only the open
+	 *  buffer.
+	 */
+	lspStart: () => typedError<boolean, string>(__TAURI_INVOKE("lsp_start")),
+	/**  One JSON-RPC message to the language server, as [`lsp_start`] left it. */
+	lspSend: (message: string) => typedError<null, string>(__TAURI_INVOKE("lsp_send", { message })),
+	/**
+	 *  The absolute path of a journal file, the form a `file:` URI needs.
+	 * 
+	 *  The loader keeps the paths it read — the root journal's spelling and its
+	 *  `include`s — which may be relative to the process, while the language
+	 *  server's URIs are absolute. This is the one conversion those two need.
+	 */
+	lspFilePath: (file: string) => typedError<string, string>(__TAURI_INVOKE("lsp_file_path", { file })),
+	/**
 	 *  Rewrite one transaction's own lines in the `.bean` file it came from, reload
 	 *  the ledger from disk, and stage the file.
 	 * 

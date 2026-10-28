@@ -18,6 +18,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import type { EditorScope } from "$lib/editor-scope.svelte.js";
+	import { attachLanguageServer } from "$lib/lsp.js";
 	import { cn } from "$lib/utils.js";
 
 	/**
@@ -70,6 +71,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** Monaco loads lazily, so the instance is spoken to through this handle. */
 	let editor: MonacoEditor.IStandaloneCodeEditor | null = null;
+
+	/** Set once the server has the document; clears its markers on unmount. */
+	let detachLanguageServer: (() => void) | null = null;
 
 	/**
 	 * The entry's own range in `file` scope, as a Monaco decoration so it
@@ -183,6 +187,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	onMount(() => {
 		let disposed = false;
 		let themeObserver: MutationObserver | null = null;
+		/** The document key the editor opens: the real file when it shows one,
+		 * or a key of its own for a transaction's lines. A fragment is not the
+		 * file — sending it as the file would make the server treat the whole
+		 * journal as one entry — but the server's loaded ledger still supplies
+		 * the accounts and payees that complete it. */
+		let lspPath: string | undefined = file;
+		/** Whole files get diagnostics; a fragment's standalone validation
+		 * would only report what the surrounding ledger already answers. */
+		let lspDiagnostics = file !== undefined;
 
 		(async () => {
 			// Monaco is a browser-only dependency the size of an app of its own:
@@ -227,6 +240,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					return;
 				}
 				text = result.data.text;
+				lspPath = result.data.path;
+				lspDiagnostics = true;
 				entry = {
 					startLineNumber: result.data.start_line,
 					startColumn: result.data.start_column,
@@ -241,6 +256,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					return;
 				}
 				text = result.data;
+				// A key, not a file: the fragment is opened as a document of its
+				// own so completion and hover can use the loaded ledger without
+				// the server mistaking these lines for the file's contents.
+				lspPath = `.rustledger-entry-${id}.bean`;
 			}
 
 			// The app's theme is the `dark` class on `<html>`; Monaco takes an
@@ -284,11 +303,28 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			}
 			themeObserver = new MutationObserver(() => monaco.editor.setTheme(theme()));
 			themeObserver.observe(document.documentElement, { attributeFilter: ["class"] });
+
+			// Whole files get the journal's language server: completion, hover
+			// and diagnostics are its answers, and the editor is an ordinary
+			// one without them if it cannot start.
+			const model = editor.getModel();
+			if (lspPath !== undefined && model) {
+				void attachLanguageServer(monaco, model, lspPath, lspDiagnostics)
+					.then((detach) => {
+						if (disposed) detach();
+						else detachLanguageServer = detach;
+					})
+					.catch((cause: unknown) => {
+						console.error("language server did not start", cause);
+					});
+			}
 		})();
 
 		return () => {
 			disposed = true;
 			themeObserver?.disconnect();
+			detachLanguageServer?.();
+			detachLanguageServer = null;
 			entryRange?.clear();
 			entryRange = null;
 			editor?.getModel()?.dispose();
