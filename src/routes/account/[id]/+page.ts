@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { commands } from "../../../bindings";
+import { messageOf } from "$lib/errors.js";
 import type { PageLoad } from "./$types";
 
 /**
@@ -18,7 +19,3 @@ export const load: PageLoad = async ({ params }) => {
 		return { account, transactions: [], error: messageOf(cause) };
 	}
 };
-
-function messageOf(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { AccountBalance } from "../bindings";
-import { signOf } from "./money.js";
+import { signOf, type Amount } from "./money.js";
 
 export type AccountNode = {
 	/** Last path segment, e.g. "Checking" */
@@ -11,11 +11,11 @@ export type AccountNode = {
 	fullName: string;
 	/** Balance from the backend (exact decimal string + its commodity); null
 	 *  for tree intermediate nodes the backend did not report */
-	balance: { units: string; currency: string } | null;
+	balance: Amount | null;
 	children: AccountNode[];
 };
 
-export type AccountSection = {
+type AccountSection = {
 	label: string;
 	/** Top-level account names (e.g. "Assets") in this section. Omit for a catch-all of everything else. */
 	roots?: string[];
@@ -25,14 +25,13 @@ export type AccountSection = {
 export const LEDGER_LABEL = "All accounts";
 
 /**
- * Sidebar layout. Edit here (or load from settings later) to change which
- * sections appear, their order, and whether they collapse to a single total.
- * Currently one tree of all accounts.
+ * Sidebar layout: which sections appear and in what order. Currently one tree
+ * of all accounts.
  */
 export const ACCOUNT_SECTIONS: AccountSection[] = [{ label: LEDGER_LABEL }];
 
 /** Top-level accounts pinned before the rest (rest stays alphabetical). */
-export const TOP_LEVEL_ORDER: string[] = ["Assets", "Liabilities"];
+const TOP_LEVEL_ORDER: string[] = ["Assets", "Liabilities"];
 
 /** Accounts belonging to a section; the section without `roots` catches the rest. */
 export function accountsForSection(
@@ -83,8 +82,10 @@ export function isSubAccountOf(account: string, ancestor: string): boolean {
 	return account === ancestor || account.startsWith(`${ancestor}:`);
 }
 
-/** Green for positive, red for negative, muted for zero. */
-/** Invert income/expense display here later (e.g. multiply by -1 per section). */
+/**
+ * Green for positive, red for negative, muted for zero. Invert income/expense
+ * display here later (e.g. multiply by -1 per section).
+ */
 export function amountColorClass(units: string | null): string {
 	const sign = units === null ? 0 : signOf(units);
 	if (sign > 0) return "text-emerald-600 dark:text-emerald-400";

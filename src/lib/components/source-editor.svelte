@@ -13,11 +13,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		BEANCOUNT_LIGHT,
 		fieldSnippet,
 		registerBeanLanguage,
-	} from "$lib/beancount";
+	} from "$lib/beancount.js";
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import type { EditorScope } from "$lib/editor-scope.svelte.js";
+	import { messageOf } from "$lib/errors.js";
 	import { cn } from "$lib/utils.js";
 
 	/**
@@ -295,7 +296,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			// command, a payload the webview's IPC refused — arrives as a thrown
 			// Error. It has to be shown and `saving` has to come back down, or the
 			// button stays disabled and says nothing about why.
-			error = cause instanceof Error ? cause.message : String(cause);
+			error = messageOf(cause);
 			return;
 		} finally {
 			saving = false;

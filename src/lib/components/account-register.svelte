@@ -21,7 +21,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
-	import { signOf, sumDecimals } from "$lib/money.js";
+	import { signOf, sumDecimals, type Amount } from "$lib/money.js";
 	import { cn } from "$lib/utils.js";
 
 	/**
@@ -99,14 +99,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The style choice sticks across accounts and reloads. */
 	let view = $state<ViewId>(
-		(VIEWS.find((candidate) => candidate.id === localStorage.getItem(VIEW_KEY))?.id ?? "effect") as ViewId
+		VIEWS.find((candidate) => candidate.id === localStorage.getItem(VIEW_KEY))?.id ?? "effect"
 	);
-	/**
-	 * Both toggles are `single` groups whose pressed segment can be cleared by
-	 * clicking it again. Neither may be empty — a register always has a style
-	 * and the editor always a scope — so an empty value is ignored and the
-	 * stray click is a no-op.
-	 */
+
+	/** The selected style's row of `VIEWS`, which is what the markup reads. */
 	let mode = $derived(VIEWS.find((candidate) => candidate.id === view) ?? VIEWS[0]);
 
 	/** The register's *current transaction*, as GnuCash highlights it. */
@@ -217,8 +213,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			if (!isSubAccountOf(posting.account, account)) continue;
 			(legs[posting.currency] ??= []).push(posting.units);
 		}
-		const deposits: { units: string; currency: string }[] = [];
-		const withdrawals: { units: string; currency: string }[] = [];
+		const deposits: Amount[] = [];
+		const withdrawals: Amount[] = [];
 		for (const [currency, units] of Object.entries(legs)) {
 			const total = sumDecimals(units);
 			const sign = signOf(total);
@@ -247,7 +243,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	};
 </script>
 
-{#snippet amounts(values: { units: string; currency: string }[])}
+{#snippet amounts(values: Amount[])}
 	<span class="inline-flex flex-wrap justify-end gap-x-2">
 		{#each values as value, index (index)}
 			<MoneyAmount units={value.units} currency={value.currency} signed={false} />
@@ -316,7 +312,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<span class="text-muted-foreground text-xs" title="What the source editor opens"> Source editor </span>
 			<ToggleGroup.Root
 				type="single"
-				value={editorScope.scope}
+				value={editorScope.value}
 				onValueChange={(next) => next && setEditorScope(next as EditorScope)}
 				aria-label="Source editor scope"
 			>
@@ -526,13 +522,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
 							<!--
 								The uncommitted state, said in the sidebar's own
-								words: one dot in the diff's green, named for the
-								entry so it is not silent. It rides in the
-								description cell — the column that absorbs the
-								slack — because the actions column is already
-								full: an expander, a pencil and the braces fill
-								it to the pixel, and a fourth child would spill
-								over its border.
+								words: one dot in the diff's green, named in the
+								tooltip and for assistive tech so it is not
+								silent. It rides in the description cell — the
+								column that absorbs the slack — because the
+								actions column is already full: an expander, a
+								pencil and the braces fill it to the pixel, and a
+								fourth child would spill over its border.
 							-->
 							<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
 							{#if editing === tx.id && draft}
@@ -612,10 +608,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					{#if sourceEditing === tx.id}
 						<Table.Row>
 							<Table.Cell colspan={columnSpan} class="p-0">
-								{#key editorScope.scope}
+								{#key editorScope.value}
 									<SourceEditor
 										id={tx.id}
-										scope={editorScope.scope}
+										scope={editorScope.value}
 										onSaved={() => {
 											sourceEditing = null;
 											invalidateAll();

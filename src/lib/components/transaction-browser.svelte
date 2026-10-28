@@ -14,8 +14,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/**
 	 * A register for one account, or for the whole ledger when `account` is
-	 * empty (the sidebar's virtual root). Filters are global, so a chart can
-	 * zoom a date range and this view follows it.
+	 * empty (the sidebar's virtual root). Filters are shared, so the search
+	 * carries across accounts.
 	 */
 	let { account, transactions, error = "" }: {
 		account: string;
@@ -42,13 +42,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			aria-label="Search transactions"
 			bind:value={filters.query}
 		/>
-		{#if filters.from || filters.to}
-			<!-- A chart sets this range on the shared filters and the register follows it. -->
-			<span class="text-muted-foreground text-xs">
-				{filters.from || "…"} → {filters.to || "…"}
-			</span>
-		{/if}
-		{#if filters.query || filters.from || filters.to}
+		{#if filters.query}
 			<Button size="sm" variant="ghost" onclick={clearFilters}>Clear</Button>
 		{/if}
 	</div>

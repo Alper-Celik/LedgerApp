@@ -25,13 +25,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	} from "$lib/accounts.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
-	import { ledger, openLedgerFolder, refreshLedger } from "$lib/ledger.svelte.js";
+	import { ledger, openFolderPicker, refreshLedger } from "$lib/ledger.svelte.js";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
-	import {
-		SIDEBAR_WIDTH_STORAGE_KEY,
-		setSidebarWidth,
-		sidebarWidth,
-	} from "$lib/sidebar-width.svelte.js";
+	import { setSidebarWidth, sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
@@ -59,10 +55,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		new Set(accounts.filter((account) => account.modified).map((account) => account.name))
 	);
 
-	/**
-	 * Non-account views. Future budget and dashboard views belong in this group
-	 * (or a sibling group) the same way.
-	 */
+	/** Non-account views: the ledger's git routes. */
 	const GIT_VIEWS = [
 		{ href: "/diff", label: "Diff", icon: FileDiffIcon },
 		{ href: "/commit", label: "Commit", icon: GitCommitIcon },
@@ -110,7 +103,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		const handle = event.currentTarget as HTMLElement;
 		if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
 		document.documentElement.classList.remove("sidebar-resizing");
-		localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth.px));
 	}
 
 	let sections = $derived(
@@ -233,9 +225,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<Sidebar.Header>
 		<Sidebar.Menu>
 			<Sidebar.MenuItem>
-				<Sidebar.MenuButton size="lg" isActive={page.url.pathname === resolve("/")}>
+				<Sidebar.MenuButton size="lg" isActive={page.url.pathname === resolve("/ledger")}>
 					{#snippet child({ props })}
-						<a {...props} href={resolve("/")}>
+						<a {...props} href={resolve("/ledger")}>
 							<span class="min-w-0 flex-1 truncate">Ledger</span>
 						</a>
 					{/snippet}
@@ -333,16 +325,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<Sidebar.Footer>
 		<Sidebar.Menu>
 			<!--
-				Pointing the app at another ledger: a native folder picker whose
+				Pointing the app at another ledger: the in-app folder picker whose
 				choice is loaded as the session's journal. In the sidebar (and so
-				in the mobile sheet) because it is app-wide, like Settings.
+				in the mobile sheet) because it is app-wide, like Settings;
+				`+layout.svelte` mounts the picker itself.
 			-->
 			<Sidebar.MenuItem>
 				<Sidebar.MenuButton
 					size="sm"
 					class="rounded-none"
 					aria-disabled={ledger.opening}
-					onclick={openLedgerFolder}
+					onclick={openFolderPicker}
 				>
 					<HugeiconsIcon icon={FolderOpenIcon} strokeWidth={2} data-icon="inline-start" />
 					<span class="min-w-0 flex-1 truncate">

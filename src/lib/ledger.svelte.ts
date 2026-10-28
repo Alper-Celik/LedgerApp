@@ -4,6 +4,7 @@
 
 import { invalidateAll } from "$app/navigation";
 import { commands, type LoadSummary } from "../bindings";
+import { messageOf } from "./errors.js";
 import { bumpLedgerRevision } from "./ledger-revision.svelte.js";
 
 /**
@@ -35,12 +36,12 @@ export async function refreshLedger() {
 }
 
 /**
- * Show the folder picker. There is no native dialog behind it: under the Qt
+ * Open the folder picker. There is no native dialog behind it: under the Qt
  * runtime neither a plugin dialog nor an in-process GTK one can open (see
  * `folders.rs`), so the picker is part of the app and lists directories
  * through `list_folders`.
  */
-export function openLedgerFolder() {
+export function openFolderPicker() {
 	ledger.error = "";
 	ledger.pickerOpen = true;
 }
@@ -75,7 +76,7 @@ export async function openLedgerPath(path: string): Promise<boolean> {
 		await invalidateAll();
 		return true;
 	} catch (cause) {
-		ledger.error = cause instanceof Error ? cause.message : String(cause);
+		ledger.error = messageOf(cause);
 		return false;
 	} finally {
 		ledger.opening = false;

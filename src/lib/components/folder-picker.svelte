@@ -11,6 +11,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Button } from "$lib/components/ui/button/index.js";
 	import * as Sheet from "$lib/components/ui/sheet/index.js";
 	import { closeFolderPicker, ledger, openLedgerPath } from "$lib/ledger.svelte.js";
+	import { messageOf } from "$lib/errors.js";
 	import { cn } from "$lib/utils.js";
 
 	/**
@@ -39,7 +40,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			}
 			listing = result.data;
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : String(cause);
+			error = messageOf(cause);
 		} finally {
 			loading = false;
 		}
@@ -48,23 +49,36 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** Open the folder on screen; a refusal keeps the sheet up and says why. */
 	async function openHere() {
 		if (!listing) return;
-		if (await openLedgerPath(listing.path)) closeFolderPicker();
+		if (await openLedgerPath(listing.path)) close();
+	}
+
+	/** Forget where the picker was, so the next opening starts at home again. */
+	function forget() {
+		listing = null;
+		error = "";
+	}
+
+	/** Close the sheet from inside it, forgetting the folder on the way out. */
+	function close() {
+		forget();
+		closeFolderPicker();
 	}
 
 	$effect(() => {
 		// Opening the sheet starts at home, once per opening.
 		if (ledger.pickerOpen && !listing) browse(null);
 	});
-
-	/** Close and forget where we were, so the next open starts at home again. */
-	function cancel() {
-		listing = null;
-		error = "";
-		closeFolderPicker();
-	}
 </script>
 
-<Sheet.Root bind:open={() => ledger.pickerOpen, (value) => (ledger.pickerOpen = value)}>
+<Sheet.Root
+	open={ledger.pickerOpen}
+	onOpenChange={(open) => {
+		ledger.pickerOpen = open;
+		// The overlay, Escape and the sheet's own close button come through
+		// here, next to the in-sheet Cancel below.
+		if (!open) forget();
+	}}
+>
 	<Sheet.Content side="bottom" class="p-0">
 		<!--
 			The sheet's own height is auto; this fixed-height column is what gives
@@ -143,7 +157,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					>
 						{ledger.opening ? "Opening…" : "Open this folder"}
 					</Button>
-					<Button size="sm" variant="ghost" onclick={cancel}>Cancel</Button>
+					<Button size="sm" variant="ghost" onclick={close}>Cancel</Button>
 					{#if listing && !listing.ledger}
 						<span class="text-muted-foreground text-xs">No root journal here.</span>
 					{/if}

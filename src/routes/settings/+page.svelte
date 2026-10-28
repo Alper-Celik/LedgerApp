@@ -14,7 +14,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		setEditorScope,
 		type EditorScope,
 	} from "$lib/editor-scope.svelte.js";
-	import { ledger, openLedgerFolder } from "$lib/ledger.svelte.js";
+	import { ledger, openFolderPicker } from "$lib/ledger.svelte.js";
 	import {
 		SIDEBAR_DEFAULT_WIDTH,
 		setSidebarWidth,
@@ -59,7 +59,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					size="sm"
 					variant="secondary"
 					disabled={ledger.opening}
-					onclick={openLedgerFolder}
+					onclick={openFolderPicker}
 				>
 					{ledger.opening ? "Opening…" : "Open folder…"}
 				</Button>
@@ -104,7 +104,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			</div>
 			<ToggleGroup.Root
 				type="single"
-				value={editorScope.scope}
+				value={editorScope.value}
 				onValueChange={(next) => next && setEditorScope(next as EditorScope)}
 				aria-label="Source editor scope"
 			>

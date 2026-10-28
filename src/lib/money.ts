@@ -2,15 +2,18 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+/** An exact amount as the ledger writes it: decimal units and their commodity. */
+export type Amount = { units: string; currency: string };
+
 /**
  * Where a currency symbol sits relative to the digits. Most currencies are
  * written before the amount ("$12.34", "₺1.234,56"), many after it ("12,34 €"),
  * and a rare few in between — so placement is data here, not an assumption
  * baked into the rendering code.
  */
-export type CurrencyPlacement = "prefix" | "middle" | "suffix";
+type CurrencyPlacement = "prefix" | "middle" | "suffix";
 
-export type CurrencyStyle = {
+type CurrencyStyle = {
 	/** Currency symbol, or the commodity code for a quantity ("2.68 VTI"). */
 	symbol: string;
 	/** `prefix`: "€12", `middle`: "12€,34", `suffix`: "12,34 €". */
@@ -18,16 +21,6 @@ export type CurrencyStyle = {
 	/** Write a space between symbol and digits ("1 234,56 €" but "$1,234.56"). */
 	spaced: boolean;
 };
-
-/**
- * Exceptions only. Symbol, placement and spacing normally come from ICU's CLDR
- * data through `Intl` (see `detectStyle`), so nothing needs listing here — a
- * currency's own look is derived, not hand-written: `TRY` is "₺1,234.50" even
- * though the app's locale (en-US) has no lira symbol. Add an entry only to
- * deviate from CLDR for a specific code, e.g.
- * `EUR: { symbol: "€", placement: "suffix", spaced: true }`.
- */
-export const CURRENCY_STYLES: Partial<Record<string, CurrencyStyle>> = {};
 
 /**
  * Locale for money formatting (grouping separator and decimal mark), taken
@@ -125,15 +118,14 @@ function detectStyle(currency: string): CurrencyStyle {
 }
 
 // Prototype-less so a commodity can never collide with an inherited key.
-const styles: Record<string, CurrencyStyle> = Object.create(null);
+const styleCache: Record<string, CurrencyStyle> = Object.create(null);
 
-/** Style for `currency`: the exception table, else CLDR via `detectStyle`. */
-export function currencyStyle(currency: string): CurrencyStyle {
-	const cached = styles[currency];
+/** Style for `currency`, derived from CLDR once and then cached. */
+function currencyStyle(currency: string): CurrencyStyle {
+	const cached = styleCache[currency];
 	if (cached) return cached;
-	const exception = Object.hasOwn(CURRENCY_STYLES, currency) ? CURRENCY_STYLES[currency] : undefined;
-	const style = exception ?? detectStyle(currency);
-	styles[currency] = style;
+	const style = detectStyle(currency);
+	styleCache[currency] = style;
 	return style;
 }
 
@@ -160,7 +152,7 @@ export function sumDecimals(values: string[]): string {
 	return total < 0n ? `-${text}` : text;
 }
 
-export type MoneySegment = {
+type MoneySegment = {
 	text: string;
 	/** `symbol` is the currency symbol or commodity code; `amount` is sign and digits. */
 	kind: "symbol" | "amount";

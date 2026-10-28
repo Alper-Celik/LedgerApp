@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { commands } from "../../bindings";
+import { messageOf } from "$lib/errors.js";
 import type { PageLoad } from "./$types";
 
 /** The whole ledger, or an explanatory error instead of a thrown one. */
@@ -10,6 +11,6 @@ export const load: PageLoad = async () => {
 		return { account: "", transactions: await commands.accountTransactions(""), error: "" };
 	} catch (cause) {
 		console.error("accountTransactions failed", cause);
-		return { account: "", transactions: [], error: cause instanceof Error ? cause.message : String(cause) };
+		return { account: "", transactions: [], error: messageOf(cause) };
 	}
 };

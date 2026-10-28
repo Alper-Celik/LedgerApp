@@ -12,7 +12,7 @@ export const EDITOR_SCOPES = [
 ] as const satisfies readonly { id: EditorScope; label: string; hint: string }[];
 
 /** localStorage key holding the chosen scope. */
-export const EDITOR_SCOPE_STORAGE_KEY = "editor_scope";
+const EDITOR_SCOPE_STORAGE_KEY = "editor_scope";
 
 // SPA mode (`ssr = false`), so localStorage exists when this module loads.
 const stored =
@@ -25,12 +25,12 @@ const stored =
  * every register agrees and the next entry opened follows it; persisted so it
  * survives a reload.
  */
-export const editorScope = $state<{ scope: EditorScope }>({
-	scope: stored === "file" ? "file" : "entry",
+export const editorScope = $state<{ value: EditorScope }>({
+	value: stored === "file" ? "file" : "entry",
 });
 
 /** Sets the scope and remembers it across reloads. */
 export function setEditorScope(scope: EditorScope) {
-	editorScope.scope = scope;
+	editorScope.value = scope;
 	localStorage.setItem(EDITOR_SCOPE_STORAGE_KEY, scope);
 }

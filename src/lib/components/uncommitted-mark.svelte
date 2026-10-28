@@ -15,16 +15,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * Nothing is rendered when `modified` is false — callers place it
 	 * unconditionally and let the component decide.
 	 */
-	let {
-		modified,
-		label = "Uncommitted",
-		class: className,
-	}: {
-		modified: boolean;
-		/** What the marker means here, for the tooltip and assistive tech. */
-		label?: string;
-		class?: string;
-	} = $props();
+	let { modified, class: className }: { modified: boolean; class?: string } = $props();
+
+	const UNCOMMITTED = "Uncommitted";
 </script>
 
 {#if modified}
@@ -35,8 +28,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<span
 		data-slot="uncommitted-mark"
 		class={cn("bg-added inline-block size-1.5 shrink-0 rounded-full", className)}
-		title={label}
+		title={UNCOMMITTED}
 	>
-		<span class="sr-only">{label}</span>
+		<span class="sr-only">{UNCOMMITTED}</span>
 	</span>
 {/if}

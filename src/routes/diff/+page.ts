@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { commands } from "../../bindings";
+import { messageOf } from "$lib/errors.js";
 import type { PageLoad } from "./$types";
 
 /** The ledger's uncommitted changes (working tree + index) against HEAD. */
@@ -11,6 +12,6 @@ export const load: PageLoad = async () => {
 		return result.status === "ok" ? { diff: result.data, error: "" } : { diff: "", error: result.error };
 	} catch (cause) {
 		console.error("ledgerDiff failed", cause);
-		return { diff: "", error: cause instanceof Error ? cause.message : String(cause) };
+		return { diff: "", error: messageOf(cause) };
 	}
 };
