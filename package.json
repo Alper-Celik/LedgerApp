@@ -1,7 +1,7 @@
 {
   "name": "ledger-app",
   "version": "0.1.0",
-  "description": "",
+  "description": "A desktop ledger for Beancount journals",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -13,7 +13,7 @@
     "tauri": "tauri",
     "test:e2e": "playwright test"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",

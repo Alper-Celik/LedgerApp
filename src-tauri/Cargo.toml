@@ -5,8 +5,9 @@
 [package]
 name = "ledger-app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A desktop ledger for Beancount journals"
+authors = ["Alper Çelik <alper@alper-celik.dev>"]
+license = "AGPL-3.0-or-later"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -22,6 +22,31 @@ declare global {
 	}
 }
 
+/** What `load_ledger` / `ledger_summary` answer: the journal the stub pretends is open. */
+export const summary = {
+	path: "/ledger/main.bean",
+	directive_count: 12,
+	error_count: 0,
+};
+
+/** The folders the picker walks: the root, then the ledger-bearing `Books`. */
+export const folders = {
+	path: "/ledger",
+	parent: "/",
+	ledger: false,
+	folders: [
+		{ name: "Archive", path: "/ledger/Archive", ledger: false },
+		{ name: "Books", path: "/ledger/Books", ledger: true },
+	],
+};
+
+export const books = {
+	path: "/ledger/Books",
+	parent: "/ledger",
+	ledger: true,
+	folders: [{ name: "2026", path: "/ledger/Books/2026", ledger: false }],
+};
+
 export const accounts: AccountBalance[] = [
 	{ name: "Assets", balance: "60386.05", currency: "TRY", modified: true },
 	{ name: "Assets:Bank", balance: "1500.00", currency: "USD", modified: true },
@@ -82,6 +107,7 @@ export async function stubIpc(page: Page) {
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
 					log.push({ cmd, args });
+					const path = (args as { path?: string | null } | null)?.path ?? null;
 					if (window.location.search.includes("fail=1")) {
 						return Promise.reject(new Error("no ledger"));
 					}
@@ -102,6 +128,15 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.diff);
 						case "commit_ledger":
 							return Promise.resolve("abc1234");
+						case "ledger_summary":
+							return Promise.resolve(fixtures.summary);
+						case "load_ledger":
+							// `typedError`: reject to model `Err`; resolve the raw summary.
+							return path === "/ledger/Books"
+								? Promise.resolve({ ...fixtures.summary, path: "/ledger/Books/main.bean" })
+								: Promise.reject(`no root journal (main.bean, …) in ${path ?? "main.bean"}`);
+						case "list_folders":
+							return Promise.resolve(path === "/ledger/Books" ? fixtures.books : fixtures.folders);
 						default:
 							return Promise.resolve({ status: "ok", data: null });
 					}
@@ -116,7 +151,7 @@ export async function stubIpc(page: Page) {
 			});
 			Object.defineProperty(window, "__invokes", { value: log, writable: false });
 		},
-		{ accounts, transactions, source, diff }
+		{ accounts, transactions, source, diff, summary, folders, books }
 	);
 }
 
