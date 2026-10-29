@@ -2,13 +2,17 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Page } from "@playwright/test";
-import type { AccountBalance, TransactionEdit, TransactionView } from "../src/bindings";
+import type { AccountBalance, AiSettingsView, TransactionEdit, TransactionView } from "../src/bindings";
 
 /**
  * The Tauri IPC stub the e2e tests run against: fixtures defined here, never a
  * real ledger, so the tests carry no private data and need no desktop shell.
  * Every invocation is recorded on `window.__invokes`, which is how a test checks
  * the payload the UI actually sent — those payloads are the contract with Rust.
+ * An invocation no `case` below answers is recorded on `window.__stubUnknown`
+ * (and logged) while still being served permissively, and `e2e/gate.ts` fails
+ * the test that made it: a command the app calls but nobody stubbed must not be
+ * able to look healthy.
  */
 
 export type Invoke = { cmd: string; args: unknown };
@@ -17,6 +21,12 @@ declare global {
 	interface Window {
 		/** Calls the stub has served, in order. */
 		__invokes: Invoke[];
+		/**
+		 * Commands the stub had no `case` for, first occurrence only. The stub
+		 * still answers them permissively (a harmless read should not fail a
+		 * test), so this array is how `e2e/gate.ts` turns the gap into a failure.
+		 */
+		__stubUnknown: string[];
 		/** Tauri's bridge, replaced by the stub. */
 		__TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<unknown> };
 	}
@@ -295,6 +305,21 @@ export const priceQuotes = [
 	{ commodity: "AFT", currency: "TRY", date: "2026-01-30", price: "1.2345", source: "tefas" },
 ];
 
+/**
+ * The assistant, unconfigured: the endpoint's default root, no model chosen and
+ * no key stored, which is what a fresh install reports (see `ai.rs`'s
+ * `AiConfig::default`). The prompt is a stand-in for `SYSTEM_PROMPT`; nothing
+ * under test reads its wording.
+ */
+export const aiSettings: AiSettingsView = {
+	base_url: "https://api.openai.com/v1",
+	model: "",
+	max_tokens: null,
+	temperature: null,
+	has_key: false,
+	system_prompt: "You are the ledger's assistant.",
+};
+
 export const source = `2026-01-10 * "Migros" "weekly groceries"
   Assets:Bank:Checking   -123.45 TRY
   Expenses:Food:Groceries  123.45 TRY
@@ -317,6 +342,10 @@ export async function stubIpc(page: Page) {
 	await page.addInitScript(
 		(fixtures) => {
 			const log: Invoke[] = [];
+			/** Commands that fell through the switch, in first-seen order. */
+			const unknown: string[] = [];
+			/** The last id handed out by `plugin:event|listen`. */
+			let listener = 0;
 			/**
 			 * Whether another journal has been opened. `accounts` answers from the
 			 * new journal's balances after that, the way the backend's own state
@@ -419,8 +448,31 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.commitDiff);
 						case "storage_kind":
 							return Promise.resolve("local");
+						case "storage_error":
+							// The folder's last failure; `None` is the healthy answer.
+							return Promise.resolve(null);
+						case "sync_changes":
+							// Files the folder changed behind the app: none in the fixture.
+							return Promise.resolve([]);
 						case "sync_conflicts":
 							return Promise.resolve({ candidates: [], orphans: [] });
+						case "ai_settings":
+							return Promise.resolve(fixtures.aiSettings);
+						case "ai_models":
+							// Nothing downloaded from an endpoint yet: the store only reads
+							// this once a key exists, and no fixture has one.
+							return Promise.resolve([]);
+						case "conversations":
+							// No conversation files in the fixture ledger.
+							return Promise.resolve({ sessions: [], errors: [] });
+						case "plugin:event|listen":
+							// Tauri's event registry: the plugin hands back the id `unlisten`
+							// takes. `transformCallback` above keeps the handler as-is, and no
+							// fixture emits an event, so the listener never fires.
+							listener += 1;
+							return Promise.resolve(listener);
+						case "plugin:event|unlisten":
+							return Promise.resolve(null);
 						case "history":
 							return Promise.resolve([]);
 						case "index_provider_list":
@@ -440,6 +492,16 @@ export async function stubIpc(page: Page) {
 								? Promise.resolve("/ledger/Books")
 								: Promise.reject("this runtime has no native folder chooser");
 						default:
+							// Not a fixture the stub knows. Answering permissively keeps
+							// harmless reads from failing a run, but silently answering a
+							// command nobody stubbed is how a dead command shipped: name it
+							// loudly and let `e2e/gate.ts` fail the test.
+							if (!unknown.includes(cmd)) {
+								unknown.push(cmd);
+								console.error(
+									`[e2e/stub] unhandled Tauri command "${cmd}": add a case to e2e/stub.ts`
+								);
+							}
 							return Promise.resolve({ status: "ok", data: null });
 					}
 				},
@@ -452,6 +514,7 @@ export async function stubIpc(page: Page) {
 				configurable: false,
 			});
 			Object.defineProperty(window, "__invokes", { value: log, writable: false });
+			Object.defineProperty(window, "__stubUnknown", { value: unknown, writable: false });
 		},
 		{
 			accounts,
@@ -473,6 +536,7 @@ export async function stubIpc(page: Page) {
 			priceSources,
 			priceTargets,
 			priceQuotes,
+			aiSettings,
 			commits,
 			commitDiff,
 		}
@@ -482,6 +546,15 @@ export async function stubIpc(page: Page) {
 /** The recorded calls, in order. */
 export function invokes(page: Page): Promise<Invoke[]> {
 	return page.evaluate(() => window.__invokes);
+}
+
+/**
+ * The commands the stub answered by falling through to its permissive default,
+ * i.e. the ones the app called that `e2e/stub.ts` has no fixture for. Empty is
+ * the only good answer; `e2e/gate.ts` asserts it after every test.
+ */
+export function unknownCommands(page: Page): Promise<string[]> {
+	return page.evaluate(() => window.__stubUnknown ?? []);
 }
 
 /** Narrows a recorded `update_transaction` argument to the UI's payload type. */

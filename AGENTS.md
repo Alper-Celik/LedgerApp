@@ -14,7 +14,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 - `lib.rs` — crate root: runtime alias, module list, `command_builder()` (the one specta registry,
   installed by `run()` and reused by the export test) and `run()`.
-- `commands.rs` — the Tauri/specta command surface; frontend-facing names live here, keep them thin.
+- `commands/` — the Tauri/specta command surface, one file per group (`mod`, `git`, `storage`,
+  `assistant`, `history`, `views`, `misc`); frontend-facing names live here, keep them thin.
 - `fsutil.rs` — the one whole-file writer (temp file, flush, mode, rename, directory flush); every
   store that replaces a file goes through it instead of hand-rolling a temp name.
 - **Ledger views** — `session.rs` (`AppState`, the loaded `Ledger` + baseline, path resolution), `accounts.rs`
@@ -41,8 +42,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 - **Assistant** — `ai.rs` (OpenAI-compatible transport, settings that never leak the key), `ai_cmd.rs`
   (IPC surface, system prompt, tool table), `ai_stream.rs` (streaming reads forwarded as `ai://delta`),
   `query.rs` (BQL → text cells, the assistant's one aggregate tool), `suggest.rs` (quick-add's last pair
-  and ranked categories), `tools/` (hashline read/edit, grep, glob, one registry rendered twice: OpenAI
-  tools and a Python stub), `attachments.rs` (MuPDF pages, calamine sheets, CSV),
+  and ranked categories), `tools/` (hashline read/edit, grep, glob; one definition list, rendered as
+  the model's OpenAI `tools` and mirrored by the hand-written Python stub), `attachments.rs` (MuPDF
+  pages, calamine sheets, CSV),
   `conversations.rs` (markdown conversations inside the ledger, so they sync with it).
 - **CLI** — `api.rs` (a `pub`, Tauri-free façade over the same modules) and `src/bin/ledger.rs` (the
   `ledger` binary: check/query/budget/report/prices/index/ask/chart); `sync.rs` reports files a synced

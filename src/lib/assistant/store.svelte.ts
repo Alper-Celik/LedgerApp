@@ -37,6 +37,7 @@ import {
 	type ToolSchema,
 } from "../../bindings";
 import { messageOf } from "../errors.js";
+import { refreshStorageError } from "../ledger.svelte.js";
 import { aiStream } from "./api.js";
 import { mediaPartsOf, visionOf, type Attachment } from "./media.js";
 import {
@@ -666,6 +667,10 @@ export class Assistant {
 				this.saveError = "";
 				this.sessionsError = "";
 			}
+			// The transcript reached the ledger's mirror; whether it reached the
+			// folder is a separate answer the backend records rather than failing
+			// the append over.
+			void refreshStorageError();
 			return id || result.data.id;
 		} catch (cause) {
 			if (this.current(turn)) this.saveError = messageOf(cause);

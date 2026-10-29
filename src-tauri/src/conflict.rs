@@ -22,37 +22,65 @@
 //!
 //! # Identity
 //!
-//! A key is a canonical string built from a directive's primary operands, not
-//! from its bytes, so reformatting a file does not look like an edit:
+//! A key is a canonical string built from everything that makes a directive
+//! what it is, not from its bytes, so reformatting a file does not look like an
+//! edit:
 //!
-//! - `transaction`: date, flag, payee, narration and the sorted set of
-//!   `account=units` pairs (amounts included — see the caveat below).
-//! - `balance`: date, account, amount currency.
-//! - `open` / `close` / `note`: date, account.
-//! - `commodity`: date, currency.
-//! - `pad`: date, account.
-//! - `event`: date, event type.
-//! - `query`: date, name.
-//! - `document`: date, account, path.
-//! - `price`: date, currency, quote currency.
-//! - `custom`: date, custom type.
+//! - `transaction`: date, flag, payee, narration, the sorted set of postings
+//!   (`account`, units, posting flag, `{cost}`, `@price` and posting metadata —
+//!   amounts included, see the caveat below), plus its tags, links and
+//!   metadata.
+//! - `balance`: date, account, amount currency, metadata.
+//! - `open`: date, account, allowed currencies, booking method, metadata.
+//! - `close` / `note`: date, account, metadata.
+//! - `commodity`: date, currency, metadata.
+//! - `pad`: date, account, metadata.
+//! - `event`: date, event type, metadata.
+//! - `query`: date, name, metadata.
+//! - `document`: date, account, path, tags, links, metadata.
+//! - `price`: date, currency, quote currency, metadata.
+//! - `custom`: date, custom type, values, metadata.
 //! - `option` / `include` / `plugin`: name (these carry no date).
 //!
-//! When the same key occurs more than once on a side, occurrence order
-//! disambiguates and the key gains a `#n` suffix. Identical duplicates are
-//! genuinely indistinguishable — which of the two the user edited cannot be
-//! recovered from the text — so such decisions are flagged
-//! [`ambiguous`](DirectiveDecision::ambiguous) and, where picking the wrong
-//! one could drop or duplicate text, escalated to
+//! Everything the directive carries is in the key because any of it can be the
+//! one thing that tells two lookalikes apart: a transaction inserted next to
+//! another with the same date and narration, differing only in a tag, a posting
+//! flag, a cost, a price or a metadata value, must not be able to steal the
+//! other's counterpart in the merge. When the same key occurs more than once on
+//! a side, occurrence order disambiguates and the key gains a `#n` suffix.
+//! Identical duplicates are genuinely indistinguishable — which of the two the
+//! user edited cannot be recovered from the text — so such decisions are
+//! flagged [`ambiguous`](DirectiveDecision::ambiguous) and, where picking the
+//! wrong one could drop or duplicate text, escalated to
 //! [`Resolution::NeedsUser`].
 //!
-//! Because amounts are part of a transaction's key, changing an amount changes
-//! the key. Matching therefore runs in two passes: exact keys first, then a
-//! *loose* key (a transaction's date/flag/payee/narration with the postings
-//! dropped, an `open`'s account without its date, and so on) but only where
-//! that pairing is unambiguous — one claimant, one candidate. That is what
-//! makes "we changed the groceries amount, they added a salary entry" merge
-//! automatically instead of looking like a delete plus an add.
+//! Because amounts (and tags, costs, prices, metadata …) are part of a
+//! transaction's key, editing one changes the key. Matching therefore runs in
+//! two passes: exact keys first, then a *loose* key (a transaction's
+//! date/flag/payee/narration with the postings dropped, an `open`'s account
+//! without its date, and so on) but only where that pairing is unambiguous —
+//! one claimant, one candidate. That is what makes "we changed the groceries
+//! amount, they added a salary entry" merge automatically instead of looking
+//! like a delete plus an add.
+//!
+//! # Inherited context
+//!
+//! `pushtag` / `poptag` and `pushmeta` / `popmeta` are not directives the
+//! parser hands back: it folds them into the directives they cover
+//! (`transaction.tags`, `directive.meta`) and leaves the lines themselves in
+//! the text between directives, which is `ours`' to copy. So the same
+//! transaction is `#trip` whether the tag sits on its line or in the scope
+//! above it — but the *text* is still scoped, and a block moved out of its
+//! scope loses the tag while a block moved into one gains it.
+//!
+//! The scope is therefore read out of each side's gaps and compared along with
+//! the directive text: two directives whose scopes mean different things are
+//! *not* unchanged, because a tag is part of what a transaction is. And when
+//! [`render`] emits a block whose destination scope differs from the one it
+//! was written in, it emits the `poptag` / `pushtag` / `pushmeta` / `popmeta`
+//! frames that make the destination scope equal to the source's around the
+//! block, then the frames that put the destination's scope back. The merged
+//! file never gains or loses a tag or a metadata value by moving a block.
 //!
 //! # Rendering
 //!
@@ -70,12 +98,16 @@
 //!   pick reinstates) is inserted after the nearest preceding directive of
 //!   `theirs` that `ours` also has, or before the first directive when there is
 //!   none, so additions land among the neighbours they were written next to.
+//! - A block taken from `theirs` is emitted inside the scope it was written
+//!   in: when the destination's `pushtag` / `pushmeta` scope differs, the
+//!   frames that make up the difference are emitted around it and the
+//!   destination's scope is restored afterwards (see "Inherited context").
 //! - Line endings and the final-newline habit follow `ours`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use rustledger_core::{Directive, IncompleteAmount, Transaction};
+use rustledger_core::{Directive, IncompleteAmount, Metadata, Posting, Transaction};
 use rustledger_parser::{ParseErrorKind, parse};
 use serde::{Deserialize, Serialize};
 
@@ -252,6 +284,9 @@ struct Layout {
     gaps: Vec<String>,
     /// The merged file, as a sequence of gaps and decisions.
     pieces: Vec<Piece>,
+    /// Where each decision's text lands, by index into
+    /// [`MergePlan::directives`], so a block can be re-scoped on the way in.
+    emissions: Vec<Emission>,
     /// Line ending the output uses: the one `ours` uses.
     newline: &'static str,
     /// Whether `ours` ended with a newline, so the merge mirrors it.
@@ -315,9 +350,13 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
             (None, Some(base_index)) => (&base.blocks, base_index),
             (None, None) => continue,
         };
-        let anchor = (0..position)
-            .rev()
-            .find_map(|previous| ours.by_key.get(&side[previous].key).copied());
+        let anchor = (0..position).rev().find_map(|previous| {
+            let block = &side[previous];
+            ours.by_key
+                .get(&block.key)
+                .or_else(|| ours.by_identity.get(&block.identity))
+                .copied()
+        });
         match anchor {
             Some(position) => after[position].push(index),
             None => head.push(index),
@@ -332,9 +371,11 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
 
     let mut directives = Vec::with_capacity(groups.len());
     let mut blank_before = HashMap::new();
+    let mut emissions = Vec::with_capacity(groups.len());
     let mut pieces = Vec::with_capacity(groups.len() * 2 + 1);
     pieces.push(Piece::Gap(0));
 
+    let head_context = ours.head_context.clone();
     for index in &head {
         push_decision(
             *index,
@@ -343,12 +384,18 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
             &ours,
             &theirs,
             base_found,
+            head_context.clone(),
             &mut directives,
+            &mut emissions,
             &mut pieces,
             &mut blank_before,
         );
     }
     for position in 0..ours.blocks.len() {
+        // An addition anchored here lands between this block and the gap that
+        // follows it, because `Gap(position + 1)` is pushed after it — so both
+        // are written in this block's scope.
+        let context = ours.blocks[position].context.clone();
         if let Some(index) = group_of_ours[position] {
             push_decision(
                 index,
@@ -357,7 +404,9 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
                 &ours,
                 &theirs,
                 base_found,
+                context.clone(),
                 &mut directives,
+                &mut emissions,
                 &mut pieces,
                 &mut blank_before,
             );
@@ -370,7 +419,9 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
                 &ours,
                 &theirs,
                 base_found,
+                context.clone(),
                 &mut directives,
+                &mut emissions,
                 &mut pieces,
                 &mut blank_before,
             );
@@ -383,6 +434,7 @@ pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<Me
         layout: Layout {
             gaps: ours.gaps,
             pieces,
+            emissions,
             newline: ours.newline,
             trailing_newline: ours.trailing_newline,
             blank_before,
@@ -438,7 +490,7 @@ pub fn render(plan: &MergePlan, picks: &HashMap<Key, Choice>) -> Result<String, 
                             // Unreachable: NeedsUser without a pick returned above.
                             Resolution::NeedsUser => Choice::Drop,
                         });
-                emit(&mut out, decision, choice, &plan.layout);
+                emit(&mut out, *index, decision, choice, &plan.layout);
             }
         }
     }
@@ -489,7 +541,9 @@ fn push_decision(
     ours: &Side,
     theirs: &Side,
     base_found: bool,
+    dest: Context,
     directives: &mut Vec<DirectiveDecision>,
+    emissions: &mut Vec<Emission>,
     pieces: &mut Vec<Piece>,
     blank_before: &mut HashMap<Key, bool>,
 ) {
@@ -498,6 +552,13 @@ fn push_decision(
         || group.theirs.is_some_and(|i| theirs.blocks[i].blank_before);
     let decision = decision_of(group, base, ours, theirs, base_found);
     blank_before.insert(decision.key.clone(), blank);
+    emissions.push(Emission {
+        dest,
+        theirs: group
+            .theirs
+            .map(|i| theirs.blocks[i].context.clone())
+            .unwrap_or_default(),
+    });
     pieces.push(Piece::Decision(directives.len()));
     directives.push(decision);
 }
@@ -574,7 +635,7 @@ fn classify(base: Option<&Block>, ours: Option<&Block>, theirs: Option<&Block>) 
         (None, Some(_), None) => Classification::AddedOurs,
         (None, None, Some(_)) => Classification::AddedTheirs,
         (None, Some(ours), Some(theirs)) => {
-            if ours.canonical == theirs.canonical {
+            if same_content(ours, theirs) {
                 Classification::SameChange
             } else {
                 Classification::BothAdded
@@ -584,14 +645,14 @@ fn classify(base: Option<&Block>, ours: Option<&Block>, theirs: Option<&Block>) 
         (Some(_), None, Some(_)) => Classification::DeletedOurs,
         (Some(_), None, None) => Classification::BothDeleted,
         (Some(base), Some(ours), Some(theirs)) => {
-            let ours_changed = ours.canonical != base.canonical;
-            let theirs_changed = theirs.canonical != base.canonical;
+            let ours_changed = !same_content(ours, base);
+            let theirs_changed = !same_content(theirs, base);
             match (ours_changed, theirs_changed) {
                 (false, false) => Classification::Unchanged,
                 (true, false) => Classification::OnlyOurs,
                 (false, true) => Classification::OnlyTheirs,
                 (true, true) => {
-                    if ours.canonical == theirs.canonical {
+                    if same_content(ours, theirs) {
                         Classification::SameChange
                     } else {
                         Classification::BothChanged
@@ -603,6 +664,18 @@ fn classify(base: Option<&Block>, ours: Option<&Block>, theirs: Option<&Block>) 
         // change cannot panic here.
         (None, None, None) => Classification::BothDeleted,
     }
+}
+
+/// Whether two versions say the same thing: the same directive text, written
+/// under scopes that mean the same.
+///
+/// The text comparison alone is not enough. The parser folds a `pushtag` into
+/// the transaction's tags and a `pushmeta` into its metadata, but the lines
+/// themselves live in the gaps around the block, so a transaction that gained a
+/// tag from a scope added above it has *changed* even though its own lines are
+/// identical — and merging it as "unchanged" would drop the tag with the gap.
+fn same_content(left: &Block, right: &Block) -> bool {
+    left.canonical == right.canonical && left.context.same_meaning(&right.context)
 }
 
 /// The auto-resolution table. Deletions always ask: dropping a directive is the
@@ -625,10 +698,24 @@ const fn resolution_of(class: Classification) -> Resolution {
     }
 }
 
-fn emit(out: &mut String, decision: &DirectiveDecision, choice: Choice, layout: &Layout) {
+fn emit(
+    out: &mut String,
+    index: usize,
+    decision: &DirectiveDecision,
+    choice: Choice,
+    layout: &Layout,
+) {
+    let emission = &layout.emissions[index];
     match choice {
         Choice::Ours => push_block(out, decision.ours.as_deref(), layout.newline),
-        Choice::Theirs => push_block(out, decision.theirs.as_deref(), layout.newline),
+        Choice::Theirs => push_scoped(
+            out,
+            decision.theirs.as_deref(),
+            &emission.dest,
+            &emission.theirs,
+            &decision.kind,
+            layout.newline,
+        ),
         Choice::Both => {
             push_block(out, decision.ours.as_deref(), layout.newline);
             if decision.ours.is_some()
@@ -641,7 +728,14 @@ fn emit(out: &mut String, decision: &DirectiveDecision, choice: Choice, layout: 
             {
                 out.push_str(layout.newline);
             }
-            push_block(out, decision.theirs.as_deref(), layout.newline);
+            push_scoped(
+                out,
+                decision.theirs.as_deref(),
+                &emission.dest,
+                &emission.theirs,
+                &decision.kind,
+                layout.newline,
+            );
         }
         Choice::Drop => {}
     }
@@ -665,6 +759,32 @@ fn push_block(out: &mut String, text: Option<&str>, newline: &str) {
         first = false;
     }
     out.push_str(newline);
+}
+
+/// Emit a block that was written under `source`'s inherited context into
+/// `dest`'s, with the frames that make it mean what it meant where it came
+/// from and then put the destination's scope back.
+fn push_scoped(
+    out: &mut String,
+    text: Option<&str>,
+    dest: &Context,
+    source: &Context,
+    kind: &str,
+    newline: &str,
+) {
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        return;
+    };
+    let scope = Scope::between(dest, source, kind);
+    for line in &scope.enter {
+        out.push_str(line);
+        out.push_str(newline);
+    }
+    push_block(out, Some(text), newline);
+    for line in &scope.leave {
+        out.push_str(line);
+        out.push_str(newline);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -813,23 +933,28 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
 }
 
 /// The side block that is the same directive as `base`: the untaken block with
-/// the same key and the same folded text first, then the first untaken one with
-/// that key — a copy whose text moved is still that directive, and only the
-/// *order* of equally-spelled duplicates is a guess.
+/// the same identity and the same content first, then the first untaken block
+/// with that identity — a copy whose text moved is still that directive, and
+/// only the *order* of equally-spelled duplicates is a guess.
+///
+/// The content pass looks at every block sharing the *identity*, not just the
+/// one sharing the `#n` suffixed key: the suffix is per side and per text
+/// order, so an insertion above a directive shifts it, and a duplicate whose
+/// text is the base's must win over a lookalike that merely sorts first.
 fn same_key(blocks: &[Block], taken: &[bool], base: &Block) -> Option<usize> {
     let mut by_content = None;
-    let mut by_key = None;
+    let mut by_identity = None;
     for (index, block) in blocks.iter().enumerate() {
-        if taken[index] || block.key != base.key {
+        if taken[index] || block.identity != base.identity {
             continue;
         }
-        by_key.get_or_insert(index);
-        if block.canonical == base.canonical {
+        by_identity.get_or_insert(index);
+        if same_content(block, base) {
             by_content = Some(index);
             break;
         }
     }
-    by_content.or(by_key)
+    by_content.or(by_identity)
 }
 
 /// Escalate the additions that could duplicate a directive.
@@ -943,6 +1068,276 @@ fn pair_by_loose(
 }
 
 // ---------------------------------------------------------------------------
+// Inherited context
+// ---------------------------------------------------------------------------
+
+/// One `pushtag` or `pushmeta` frame: what it sets, and the line it was.
+#[derive(Debug, Clone)]
+struct Frame {
+    /// The tag (`trip`, without `#`) or the metadata key.
+    name: String,
+    /// The metadata value as written, trimmed; empty for a tag.
+    value: String,
+    /// The whole directive line, trimmed, so the same push can be emitted again
+    /// verbatim.
+    line: String,
+}
+
+/// The `pushtag` / `pushmeta` scope around one point of one side.
+///
+/// The parser applies these to the directives they cover, so a transaction is
+/// `#trip` whether the tag is on its line or in the scope above it. The text is
+/// still scoped, though: moving a block without its frames changes what it
+/// means. This is the scope read straight out of the side's gaps, which is
+/// where the parser leaves those lines.
+#[derive(Debug, Clone, Default)]
+struct Context {
+    /// Active `pushtag` frames, oldest first.
+    tags: Vec<Frame>,
+    /// Active `pushmeta` frames, oldest first. The same key can be pushed twice;
+    /// the last frame is the value in force.
+    meta: Vec<Frame>,
+}
+
+impl Context {
+    /// Read one line of a gap into the scope. Anything that is not a `pushtag`
+    /// / `poptag` / `pushmeta` / `popmeta` line is not context and is ignored.
+    fn absorb(&mut self, line: &str) {
+        let line = line.trim();
+        let Some((directive, rest)) = line.split_once(char::is_whitespace) else {
+            return;
+        };
+        match directive {
+            "pushtag" => {
+                if let Some(name) = tag_name(rest) {
+                    self.tags.push(Frame {
+                        name,
+                        value: String::new(),
+                        line: line.to_string(),
+                    });
+                }
+            }
+            "poptag" => {
+                if let Some(name) = tag_name(rest) {
+                    pop_frame(&mut self.tags, &name);
+                }
+            }
+            "pushmeta" => {
+                if let Some((name, value)) = meta_entry(rest) {
+                    self.meta.push(Frame {
+                        name,
+                        value,
+                        line: line.to_string(),
+                    });
+                }
+            }
+            "popmeta" => {
+                if let Some(name) = meta_key(rest) {
+                    pop_frame(&mut self.meta, &name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every tag this scope sets.
+    fn tag_names(&self) -> BTreeSet<&str> {
+        self.tags.iter().map(|frame| frame.name.as_str()).collect()
+    }
+
+    /// Every metadata key this scope sets.
+    fn meta_keys(&self) -> BTreeSet<&str> {
+        self.meta.iter().map(|frame| frame.name.as_str()).collect()
+    }
+
+    /// The frames that set tag `name`, oldest first.
+    fn tag_frames<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Frame> + 'a {
+        self.tags.iter().filter(move |frame| frame.name == name)
+    }
+
+    /// The frames that set metadata `key`, oldest first.
+    fn meta_frames<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a Frame> + 'a {
+        self.meta.iter().filter(move |frame| frame.name == key)
+    }
+
+    /// The metadata value in force for `key`.
+    fn meta_value<'a>(&'a self, key: &'a str) -> Option<&'a str> {
+        self.meta_frames(key)
+            .last()
+            .map(|frame| frame.value.as_str())
+    }
+
+    /// Whether the two scopes give a directive written under them the same tags
+    /// and metadata. Frame depth and spelling do not count — only what a
+    /// directive inside the scope would see.
+    fn same_meaning(&self, other: &Self) -> bool {
+        self.tag_names() == other.tag_names()
+            && self.meta_keys() == other.meta_keys()
+            && self
+                .meta_keys()
+                .iter()
+                .all(|key| self.meta_value(key) == other.meta_value(key))
+    }
+}
+
+/// The `poptag` / `pushtag` / `pushmeta` / `popmeta` frames that turn one
+/// inherited context into another — and then put the original back.
+#[derive(Debug, Default)]
+struct Scope {
+    /// Lines to emit before the block.
+    enter: Vec<String>,
+    /// Lines to emit after it, restoring the destination's scope.
+    leave: Vec<String>,
+}
+
+impl Scope {
+    /// The frames that make a block written under `source` mean the same thing
+    /// when it is emitted under `dest`.
+    ///
+    /// `kind` decides which frames can matter at all: the parser gives pushed
+    /// tags to transactions only, and pushed metadata to every directive except
+    /// `option` / `include` / `plugin`. Emitting a frame that cannot affect the
+    /// block would be noise, so none is emitted.
+    fn between(dest: &Context, source: &Context, kind: &str) -> Self {
+        let mut scope = Self::default();
+
+        if kind == "transaction" {
+            let tags: BTreeSet<&str> = dest
+                .tag_names()
+                .union(&source.tag_names())
+                .copied()
+                .collect();
+            for name in tags {
+                let here: Vec<&Frame> = dest.tag_frames(name).collect();
+                let there: Vec<&Frame> = source.tag_frames(name).collect();
+                if here.is_empty() && !there.is_empty() {
+                    // The block was written with the tag; the destination has
+                    // not got it. One push is enough: tags are a set.
+                    scope.enter.push(there[0].line.clone());
+                    scope.leave.push(format!("poptag #{name}"));
+                } else if !here.is_empty() && there.is_empty() {
+                    // The destination would hand the block a tag it never had.
+                    scope
+                        .enter
+                        .extend((0..here.len()).map(|_| format!("poptag #{name}")));
+                    scope
+                        .leave
+                        .extend(here.iter().map(|frame| frame.line.clone()));
+                }
+                // Both or neither: the tag set already means the same thing.
+            }
+        }
+
+        if !matches!(kind, "option" | "include" | "plugin") {
+            let keys: BTreeSet<&str> = dest
+                .meta_keys()
+                .union(&source.meta_keys())
+                .copied()
+                .collect();
+            for key in keys {
+                let here: Vec<&Frame> = dest.meta_frames(key).collect();
+                let there: Vec<&Frame> = source.meta_frames(key).collect();
+                let here_value = here.last().map(|frame| frame.value.as_str());
+                let there_value = there.last().map(|frame| frame.value.as_str());
+                if here_value == there_value {
+                    continue;
+                }
+                match (here_value, there_value) {
+                    (Some(_), Some(_)) => {
+                        // Shadow the destination's value with the source's;
+                        // popping the shadow brings the destination's back.
+                        scope.enter.push(there[there.len() - 1].line.clone());
+                        scope.leave.push(format!("popmeta {key}:"));
+                    }
+                    (Some(_), None) => {
+                        // The destination would hand the block a value it never
+                        // had.
+                        scope
+                            .enter
+                            .extend((0..here.len()).map(|_| format!("popmeta {key}:")));
+                        scope
+                            .leave
+                            .extend(here.iter().map(|frame| frame.line.clone()));
+                    }
+                    (None, Some(_)) => {
+                        scope.enter.push(there[there.len() - 1].line.clone());
+                        scope.leave.push(format!("popmeta {key}:"));
+                    }
+                    (None, None) => {}
+                }
+            }
+        }
+
+        scope
+    }
+}
+
+/// Where a decision's text lands, and where the `theirs` version came from.
+#[derive(Debug, Clone, Default)]
+struct Emission {
+    /// The `ours` scope at the point the decision is emitted.
+    dest: Context,
+    /// The `theirs` scope the block was written in; empty when there is no
+    /// `theirs` version.
+    theirs: Context,
+}
+
+/// The tag name in `#trip` (or `#trip ; why`), without the sigil.
+fn tag_name(rest: &str) -> Option<String> {
+    rest.split_whitespace()
+        .next()
+        .and_then(|token| token.strip_prefix('#'))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// The `key: value` of a `pushmeta` line, value trimmed of its comment.
+fn meta_entry(rest: &str) -> Option<(String, String)> {
+    let (key, value) = rest.split_once(':')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), uncomment(value).trim().to_string()))
+}
+
+/// The key of a `popmeta` line (`location:`).
+fn meta_key(rest: &str) -> Option<String> {
+    let (key, _) = rest.split_once(':')?;
+    let key = key.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// Remove the most recent frame that set `name`, as the parser does.
+fn pop_frame(frames: &mut Vec<Frame>, name: &str) {
+    if let Some(index) = frames.iter().rposition(|frame| frame.name == name) {
+        frames.remove(index);
+    }
+}
+
+/// `value` up to the first `;` that is not inside a string.
+fn uncomment(value: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else if character == '"' {
+            in_string = true;
+        } else if character == ';' {
+            return &value[..index];
+        }
+    }
+    value
+}
+
+// ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1366,8 @@ struct Block {
     text: String,
     /// [`text`](Self::text) folded for comparison only.
     canonical: String,
+    /// The `pushtag` / `pushmeta` scope this directive was written in.
+    context: Context,
     /// Whether the original had a blank line right before this directive.
     blank_before: bool,
 }
@@ -981,7 +1378,14 @@ struct Side {
     blocks: Vec<Block>,
     /// `gaps.len() == blocks.len() + 1`; always exactly as the file had it.
     gaps: Vec<String>,
+    /// The scope in force where the file's first directive (or, in an empty
+    /// file, anything at all) would be written: the first gap's frames.
+    head_context: Context,
     by_key: HashMap<Key, usize>,
+    /// Where each identity first appears, for ordering a directive whose `#n`
+    /// suffix differs from `ours`' only because the other side inserted a copy
+    /// above it.
+    by_identity: HashMap<String, usize>,
     identity_counts: HashMap<String, usize>,
     newline: &'static str,
     trailing_newline: bool,
@@ -1060,6 +1464,8 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
     let mut gaps: Vec<String> = Vec::with_capacity(raw.len() + 1);
     let mut identity_counts: HashMap<String, usize> = HashMap::new();
     let mut by_key: HashMap<Key, usize> = HashMap::new();
+    let mut by_identity: HashMap<String, usize> = HashMap::new();
+    let mut context = Context::default();
     let mut cursor = 0usize;
     let mut next_line = 0usize;
 
@@ -1105,6 +1511,10 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
         let gap = slice(text, cursor, start)?;
         let blank_before = ends_with_blank_line(gap);
         let block_text = normalize_block(slice(text, start, end)?);
+        // The frames in this gap are the scope the block is written in.
+        for line in gap.lines() {
+            context.absorb(line);
+        }
         gaps.push(gap.to_string());
         cursor = end;
         next_line = end_line;
@@ -1113,6 +1523,9 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
         let key = Key(format!("{}#{ordinal}", raw.identity));
         *ordinal += 1;
         by_key.insert(key.clone(), blocks.len());
+        by_identity
+            .entry(raw.identity.clone())
+            .or_insert(blocks.len());
         blocks.push(Block {
             key,
             identity: raw.identity,
@@ -1121,16 +1534,31 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
             date: raw.date,
             label: raw.label,
             canonical: canonical(&block_text),
+            context: context.clone(),
             blank_before,
             text: block_text,
         });
     }
     gaps.push(slice(text, cursor, text.len())?.to_string());
 
+    // A file with no directives has no block to carry its first gap's scope.
+    let head_context = match blocks.first() {
+        Some(block) => block.context.clone(),
+        None => {
+            let mut context = Context::default();
+            for line in gaps[0].lines() {
+                context.absorb(line);
+            }
+            context
+        }
+    };
+
     Ok(Side {
         blocks,
         gaps,
+        head_context,
         by_key,
+        by_identity,
         identity_counts,
         newline: if text.contains("\r\n") { "\r\n" } else { "\n" },
         trailing_newline: text.ends_with('\n'),
@@ -1168,23 +1596,26 @@ fn sig(kind: &str, fragments: &[&str]) -> String {
 }
 
 /// What makes two versions of a directive *the same* directive.
+///
+/// Everything the directive carries is in here: a lookalike that differs in one
+/// tag, posting flag, cost, price or metadata value is a *different* directive,
+/// and only identical directives fall back on occurrence order.
 fn identity(value: &Directive) -> String {
     match value {
         Directive::Transaction(transaction) => {
             let mut postings: Vec<String> = transaction
                 .postings
                 .iter()
-                .map(|posting| {
-                    let units = posting
-                        .value
-                        .units
-                        .as_ref()
-                        .map_or_else(String::new, amount_fragment);
-                    format!("{}={units}", posting.value.account)
-                })
+                .map(|posting| posting_fragment(&posting.value))
                 .collect();
             postings.sort();
             postings.dedup();
+            let mut tags: Vec<&str> = transaction.tags.iter().map(|tag| tag.as_str()).collect();
+            tags.sort_unstable();
+            tags.dedup();
+            let mut links: Vec<&str> = transaction.links.iter().map(|link| link.as_str()).collect();
+            links.sort_unstable();
+            links.dedup();
             sig(
                 "transaction",
                 &[
@@ -1196,6 +1627,9 @@ fn identity(value: &Directive) -> String {
                         .map_or("", |payee| payee.as_str()),
                     transaction.narration.as_str(),
                     &postings.join(","),
+                    &tags.join(","),
+                    &links.join(","),
+                    &meta_fragment(&transaction.meta),
                 ],
             )
         }
@@ -1205,38 +1639,155 @@ fn identity(value: &Directive) -> String {
                 &balance.date.to_string(),
                 balance.account.as_str(),
                 balance.amount.currency.as_str(),
+                &meta_fragment(&balance.meta),
             ],
         ),
-        Directive::Open(open) => sig("open", &[&open.date.to_string(), open.account.as_str()]),
-        Directive::Close(close) => sig("close", &[&close.date.to_string(), close.account.as_str()]),
+        Directive::Open(open) => {
+            let mut currencies: Vec<&str> = open
+                .currencies
+                .iter()
+                .map(|currency| currency.as_str())
+                .collect();
+            currencies.sort_unstable();
+            sig(
+                "open",
+                &[
+                    &open.date.to_string(),
+                    open.account.as_str(),
+                    &currencies.join(","),
+                    open.booking.as_deref().unwrap_or(""),
+                    &meta_fragment(&open.meta),
+                ],
+            )
+        }
+        Directive::Close(close) => sig(
+            "close",
+            &[
+                &close.date.to_string(),
+                close.account.as_str(),
+                &meta_fragment(&close.meta),
+            ],
+        ),
         Directive::Commodity(commodity) => sig(
             "commodity",
-            &[&commodity.date.to_string(), commodity.currency.as_str()],
-        ),
-        Directive::Pad(pad) => sig("pad", &[&pad.date.to_string(), pad.account.as_str()]),
-        Directive::Event(event) => sig("event", &[&event.date.to_string(), &event.event_type]),
-        Directive::Query(query) => sig("query", &[&query.date.to_string(), &query.name]),
-        Directive::Note(note) => sig("note", &[&note.date.to_string(), note.account.as_str()]),
-        Directive::Document(document) => sig(
-            "document",
             &[
-                &document.date.to_string(),
-                document.account.as_str(),
-                &document.path,
+                &commodity.date.to_string(),
+                commodity.currency.as_str(),
+                &meta_fragment(&commodity.meta),
             ],
         ),
+        Directive::Pad(pad) => sig(
+            "pad",
+            &[
+                &pad.date.to_string(),
+                pad.account.as_str(),
+                &meta_fragment(&pad.meta),
+            ],
+        ),
+        Directive::Event(event) => sig(
+            "event",
+            &[
+                &event.date.to_string(),
+                &event.event_type,
+                &meta_fragment(&event.meta),
+            ],
+        ),
+        Directive::Query(query) => sig(
+            "query",
+            &[
+                &query.date.to_string(),
+                &query.name,
+                &meta_fragment(&query.meta),
+            ],
+        ),
+        Directive::Note(note) => sig(
+            "note",
+            &[
+                &note.date.to_string(),
+                note.account.as_str(),
+                &meta_fragment(&note.meta),
+            ],
+        ),
+        Directive::Document(document) => {
+            let mut tags: Vec<&str> = document.tags.iter().map(|tag| tag.as_str()).collect();
+            tags.sort_unstable();
+            tags.dedup();
+            let mut links: Vec<&str> = document.links.iter().map(|link| link.as_str()).collect();
+            links.sort_unstable();
+            links.dedup();
+            sig(
+                "document",
+                &[
+                    &document.date.to_string(),
+                    document.account.as_str(),
+                    &document.path,
+                    &tags.join(","),
+                    &links.join(","),
+                    &meta_fragment(&document.meta),
+                ],
+            )
+        }
         Directive::Price(price) => sig(
             "price",
             &[
                 &price.date.to_string(),
                 price.currency.as_str(),
                 price.amount.currency.as_str(),
+                &meta_fragment(&price.meta),
             ],
         ),
         Directive::Custom(custom) => {
-            sig("custom", &[&custom.date.to_string(), &custom.custom_type])
+            let values: Vec<String> = custom.values.iter().map(ToString::to_string).collect();
+            sig(
+                "custom",
+                &[
+                    &custom.date.to_string(),
+                    &custom.custom_type,
+                    &values.join(","),
+                    &meta_fragment(&custom.meta),
+                ],
+            )
         }
     }
+}
+
+/// One posting as one identity fragment: the account, the units and every
+/// annotation that changes what the posting means.
+fn posting_fragment(posting: &Posting) -> String {
+    let units = posting
+        .units
+        .as_ref()
+        .map_or_else(String::new, amount_fragment);
+    let flag = posting
+        .flag
+        .map(|flag| flag.to_string())
+        .unwrap_or_default();
+    let cost = posting
+        .cost
+        .as_deref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let price = posting
+        .price
+        .as_deref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    format!(
+        "{}={units};{flag};{cost};{price};{}",
+        posting.account,
+        meta_fragment(&posting.meta)
+    )
+}
+
+/// Metadata as one identity fragment: `key=value` pairs, sorted so the order a
+/// device wrote them in is not part of the identity.
+fn meta_fragment(meta: &Metadata) -> String {
+    let mut entries: Vec<String> = meta
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    entries.sort();
+    entries.join(",")
 }
 
 /// The coarser identity used to recognise *edits*: the same directive with its
@@ -1910,5 +2461,195 @@ option \"operating_currency\" \"USD\"   \n\
         assert_eq!(summary.kinds.get("transaction"), Some(&2));
         assert_eq!(summary.kinds.get("open"), Some(&3));
         assert_eq!(summary.kinds.len(), 2);
+    }
+
+    /// The transaction called `narration` in `text`, after proving `text` parses
+    /// cleanly — a merge that emits broken text would otherwise look fine to the
+    /// string assertions.
+    fn transaction_in(text: &str, narration: &str) -> Transaction {
+        let parsed = parse(text);
+        assert!(
+            parsed.errors.is_empty(),
+            "the merged text must parse: {:?}\n{text}",
+            parsed.errors
+        );
+        parsed
+            .directives
+            .into_iter()
+            .find_map(|spanned| match spanned.value {
+                Directive::Transaction(transaction)
+                    if transaction.narration.as_str() == narration =>
+                {
+                    Some(transaction)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no transaction {narration:?} in {text}"))
+    }
+
+    fn tags_of(transaction: &Transaction) -> Vec<&str> {
+        transaction.tags.iter().map(|tag| tag.as_str()).collect()
+    }
+
+    /// `pushtag` / `pushmeta` lines are not directives: they sit in the text
+    /// between directives, and [`render`] copies only `ours`' text. A block
+    /// taken from `theirs` therefore has to carry the scope it was written in,
+    /// or the tag the scope gave it is silently dropped.
+    #[test]
+    fn a_scope_added_on_the_other_side_travels_with_its_block() {
+        let base = "\
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Dinner\"
+  Assets:Bank       -50.00 USD
+  Expenses:Food      50.00 USD
+";
+        // They put the dinner inside a tag scope and changed its amount; we did
+        // not touch the file at all.
+        let theirs = "\
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+
+pushtag #trip
+2026-01-10 * \"Dinner\"
+  Assets:Bank       -60.00 USD
+  Expenses:Food      60.00 USD
+poptag #trip
+";
+        let plan = plan(base, base, theirs, true).expect("plans");
+
+        assert_eq!(
+            decision(&plan, "2026-01-10 * \"Dinner\"").class,
+            Classification::OnlyTheirs
+        );
+        assert_eq!(summary(&plan).needs_user, 0, "{:?}", plan.directives);
+
+        let merged = render(&plan, &HashMap::new()).expect("renders");
+        // Fails before the fix: the emitted text was `ours`' block between
+        // `ours`' gaps, which have no `pushtag` line at all.
+        assert!(merged.contains("pushtag #trip"), "merged: {merged}");
+        let dinner = transaction_in(&merged, "Dinner");
+        assert_eq!(tags_of(&dinner), vec!["trip"], "merged: {merged}");
+    }
+
+    /// The other direction: a scope only `ours` has must not be handed to the
+    /// version that was written outside it.
+    #[test]
+    fn a_scope_present_only_here_is_stripped_from_the_version_taken_there() {
+        let base = "\
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Dinner\"
+  Assets:Bank       -50.00 USD
+  Expenses:Food      50.00 USD
+";
+        // We wrapped the entry in a tag scope; they changed its amount outside
+        // one. Both sides changed what the directive means, so the merge asks.
+        let ours = "\
+2026-01-01 open Expenses:Food
+
+pushtag #trip
+2026-01-10 * \"Dinner\"
+  Assets:Bank       -50.00 USD
+  Expenses:Food      50.00 USD
+poptag #trip
+";
+        let theirs =
+            base.replacen("-50.00 USD", "-60.00 USD", 1)
+                .replacen(" 50.00 USD", " 60.00 USD", 1);
+
+        let plan = plan(base, ours, &theirs, true).expect("plans");
+        let dinner = decision(&plan, "2026-01-10 * \"Dinner\"");
+        assert_eq!(dinner.class, Classification::BothChanged);
+        assert_eq!(dinner.resolution, Resolution::NeedsUser);
+
+        let merged = render(
+            &plan,
+            &picks(&plan, &[(Classification::BothChanged, Choice::Theirs)]),
+        )
+        .expect("renders");
+        // Fails before the fix: taking `theirs` emitted its unscoped block
+        // inside `ours`' `pushtag`, so the transaction silently gained `#trip`.
+        let dinner = transaction_in(&merged, "Dinner");
+        assert_eq!(
+            tags_of(&dinner),
+            Vec::<&str>::new(),
+            "gained a scope it was not written in: {merged}"
+        );
+    }
+
+    /// A lookalike inserted beside a directive, differing only in the fields the
+    /// old identity left out (tag, link, posting flag, cost, price, metadata),
+    /// must not steal that directive's base counterpart. Before the fix the
+    /// lookalike shared the base's identity, sorted first, and paired with it —
+    /// turning the entry into a `BothChanged` and leaving the real version as a
+    /// duplicate that a "keep ours" pick would emit instead of the insertion.
+    #[test]
+    fn a_lookalike_insertion_cannot_steal_a_directives_counterpart() {
+        let base = "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Broker
+2026-01-01 open Assets:Cash
+
+2026-01-10 * \"Buy\" #food
+  Assets:Broker   10 HOOL {100.00 USD}
+  Assets:Cash    -1000.00 USD
+";
+        // We re-costed the purchase…
+        let ours = base
+            .replace("{100.00 USD}", "{110.00 USD}")
+            .replace("-1000.00 USD", "-1100.00 USD");
+        // …and they inserted a lookalike above it, leaving the entry alone.
+        // Same date, narration and units: only the annotations differ.
+        let theirs = "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Broker
+2026-01-01 open Assets:Cash
+
+2026-01-10 * \"Buy\" #household ^deal
+  note: \"the other one\"
+  ! Assets:Broker   10 HOOL {100.00 USD} @ 1.00 EUR
+  Assets:Cash    -1000.00 USD
+
+2026-01-10 * \"Buy\" #food
+  Assets:Broker   10 HOOL {100.00 USD}
+  Assets:Cash    -1000.00 USD
+";
+        let plan = plan(base, &ours, theirs, true).expect("plans");
+
+        let mut classes: Vec<Classification> = plan
+            .directives
+            .iter()
+            .filter(|decision| decision.kind == "transaction")
+            .map(|decision| decision.class)
+            .collect();
+        classes.sort_unstable_by_key(|class| format!("{class:?}"));
+        // Fails before the fix: the base entry paired with the lookalike instead
+        // of its own unchanged counterpart, so it read as `BothChanged`.
+        assert_eq!(
+            classes,
+            vec![Classification::AddedTheirs, Classification::OnlyOurs],
+            "decisions: {:?}",
+            plan.directives
+        );
+        assert_eq!(summary(&plan).needs_user, 0, "{:?}", plan.directives);
+
+        let merged = render(&plan, &HashMap::new()).expect("renders");
+        assert_eq!(merged.matches("* \"Buy\"").count(), 2, "merged: {merged}");
+        assert!(
+            merged.contains("#household"),
+            "their insertion is kept: {merged}"
+        );
+        assert!(
+            merged.contains("-1100.00 USD"),
+            "our edit is kept: {merged}"
+        );
+        assert!(
+            merged.find("#household") < merged.find("#food"),
+            "the insertion keeps its place: {merged}"
+        );
     }
 }

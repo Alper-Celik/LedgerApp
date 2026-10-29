@@ -64,10 +64,9 @@ fn chooser_start(state: &AppState) -> Option<PathBuf> {
 ///   main context after initialising GTK on its own thread — see `folders.rs`),
 ///   and the portal is a D-Bus service, so nothing toolkit-shaped is loaded.
 /// * Windows / macOS: the plugin's native backend.
-/// * Phones: the plugin has no folder picker there, so this answers with an
-///   error and the frontend falls back to the in-app picker. Android's storage
-///   framework is the eventual answer — a tree URI read through a
-///   `ContentResolver`, not a filesystem path.
+/// * Android: no dialog at all. The system's Storage Access Framework returns a
+///   document-tree URI, the tree is mirrored into app-private files (the mirror
+///   is what the loader opens), and the mirror's path is what this returns.
 #[tauri::command]
 #[specta::specta]
 pub async fn pick_ledger_folder(

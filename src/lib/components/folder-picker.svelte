@@ -19,9 +19,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * at a time and opens the folder it is standing in.
 	 *
 	 * The backend lists the folders (`list_folders`) and flags the ones holding
-	 * a root journal, so the tree itself says where a ledger starts. Desktop
-	 * opens the system chooser instead (`chooseLedger` in `ledger.svelte.ts` →
-	 * `pick_ledger_folder`); this sheet is the fallback where no such chooser
+	 * a root journal, so the tree itself says where a ledger starts. It is tried
+	 * after `pick_ledger_folder` (`chooseLedger` in `ledger.svelte.ts`), which is
+	 * the normal way in; this sheet is what that falls back to where no such chooser
 	 * exists, and the reason `folders.rs` exists at all.
 	 */
 	let listing = $state<FolderListing | null>(null);

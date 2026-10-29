@@ -497,14 +497,6 @@ mod tests {
 
     use super::{Document, EditOp, LineView, apply_edits, hash_line, read_file};
 
-    fn scratch() -> TempDir {
-        TempDir::new("tool-hashline")
-    }
-
-    fn seed(dir: &TempDir, name: &str, text: &str) -> std::path::PathBuf {
-        dir.seed(name, text)
-    }
-
     fn anchor(line: &LineView) -> String {
         format!("{}@{}", line.hash, line.n)
     }
@@ -553,8 +545,8 @@ mod tests {
 
     #[test]
     fn read_reports_lines_and_hashes() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "one\ntwo\nthree\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "one\ntwo\nthree\n");
         let read = read_file(&path, None, None).unwrap();
         assert_eq!(read.total_lines, 3);
         assert_eq!(read.first, 1);
@@ -604,8 +596,8 @@ mod tests {
 
     #[test]
     fn hash_survives_an_unrelated_edit() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "one\ntwo\nthree\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "one\ntwo\nthree\n");
         let before = read_file(&path, None, None).unwrap();
 
         // Rewrite the last line; the anchors of the lines above it stay valid.
@@ -627,8 +619,8 @@ mod tests {
 
     #[test]
     fn replace_insert_delete_by_anchor() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "one\ntwo\nthree\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "one\ntwo\nthree\n");
 
         let read = read_file(&path, None, None).unwrap();
         let outcome = apply_edits(&path, &[replace(&anchor(&read.lines[1]), &["TWO"])]).unwrap();
@@ -692,7 +684,7 @@ mod tests {
 
     #[test]
     fn write_creates_and_replaces() {
-        let dir = scratch();
+        let dir = TempDir::new("tool-hashline");
         let path = dir.dir().join("new.bean");
 
         let outcome = apply_edits(
@@ -738,8 +730,8 @@ mod tests {
 
     #[test]
     fn a_stale_anchor_refuses_the_whole_batch() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "one\ntwo\nthree\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "one\ntwo\nthree\n");
         let read = read_file(&path, None, None).unwrap();
 
         // Someone else rewrites line 2 outside the tool.
@@ -771,8 +763,8 @@ mod tests {
 
     #[test]
     fn duplicate_lines_need_the_line_number() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "a\n\nb\n\nc\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "a\n\nb\n\nc\n");
         let read = read_file(&path, None, None).unwrap();
         assert_eq!(
             read.lines[1].hash, read.lines[3].hash,
@@ -791,8 +783,8 @@ mod tests {
 
     #[test]
     fn inserts_at_one_point_keep_their_order() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "a\nb\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "a\nb\n");
         let read = read_file(&path, None, None).unwrap();
         apply_edits(
             &path,
@@ -807,8 +799,8 @@ mod tests {
 
     #[test]
     fn malformed_anchors_are_explained() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "a\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "a\n");
         for raw in ["zz", "abc", "abcd:x", "abcd@0", "abcd@x", ""] {
             let error = apply_edits(&path, &[replace(raw, &["b"])]).unwrap_err();
             assert!(error.contains("operation 1"), "{raw}: {error}");
@@ -818,8 +810,8 @@ mod tests {
 
     #[test]
     fn out_of_order_and_overlapping_ops_are_refused() {
-        let dir = scratch();
-        let path = seed(&dir, "main.bean", "a\nb\nc\n");
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "a\nb\nc\n");
         let read = read_file(&path, None, None).unwrap();
 
         let error = apply_edits(
@@ -853,19 +845,19 @@ mod tests {
 
     #[test]
     fn trailing_newline_and_crlf_survive() {
-        let dir = scratch();
-        let no_newline = seed(&dir, "no.bean", "a\nb");
+        let dir = TempDir::new("tool-hashline");
+        let no_newline = &dir.seed("no.bean", "a\nb");
         let read = read_file(&no_newline, None, None).unwrap();
         apply_edits(&no_newline, &[replace(&anchor(&read.lines[0]), &["A"])]).unwrap();
         assert_eq!(fs::read_to_string(&no_newline).unwrap(), "A\nb");
 
-        let crlf = seed(&dir, "crlf.bean", "a\r\nb\r\n");
+        let crlf = &dir.seed("crlf.bean", "a\r\nb\r\n");
         let read = read_file(&crlf, None, None).unwrap();
         assert_eq!(read.lines[0].text, "a");
         apply_edits(&crlf, &[replace(&anchor(&read.lines[1]), &["B", "C"])]).unwrap();
         assert_eq!(fs::read_to_string(&crlf).unwrap(), "a\r\nB\r\nC\r\n");
 
-        let empty = seed(&dir, "empty.bean", "");
+        let empty = &dir.seed("empty.bean", "");
         let read = read_file(&empty, None, None).unwrap();
         assert_eq!(read.total_lines, 0);
         let outcome = apply_edits(
@@ -880,7 +872,7 @@ mod tests {
 
     #[test]
     fn binary_files_are_refused() {
-        let dir = scratch();
+        let dir = TempDir::new("tool-hashline");
         let path = dir.dir().join("blob.bin");
         fs::write(&path, [0u8, 159, 146, 150]).unwrap();
         let error = read_file(&path, None, None).unwrap_err();

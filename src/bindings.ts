@@ -44,8 +44,9 @@ export const commands = {
 	 *  in-app folder picker: each one's absolute path, and whether a root journal
 	 *  sits in it.
 	 * 
-	 *  This backs the in-app picker, the fallback for platforms where the desktop's
-	 *  own chooser ([`pick_ledger_folder`]) has no implementation — phones today.
+	 *  This backs the in-app picker: the fallback when the platform's own chooser
+	 *  answers with an error (no dialog in the runtime, or a phone whose Storage
+	 *  Access Framework pick was cancelled).
 	 */
 	listFolders: (path: string | null) => typedError<FolderListing, string>(__TAURI_INVOKE("list_folders", { path })),
 	/**
@@ -61,10 +62,9 @@ export const commands = {
 	 *    main context after initialising GTK on its own thread — see `folders.rs`),
 	 *    and the portal is a D-Bus service, so nothing toolkit-shaped is loaded.
 	 *  * Windows / macOS: the plugin's native backend.
-	 *  * Phones: the plugin has no folder picker there, so this answers with an
-	 *    error and the frontend falls back to the in-app picker. Android's storage
-	 *    framework is the eventual answer — a tree URI read through a
-	 *    `ContentResolver`, not a filesystem path.
+	 *  * Android: no dialog at all. The system's Storage Access Framework returns a
+	 *    document-tree URI, the tree is mirrored into app-private files (the mirror
+	 *    is what the loader opens), and the mirror's path is what this returns.
 	 */
 	pickLedgerFolder: () => typedError<string | null, string>(__TAURI_INVOKE("pick_ledger_folder")),
 	/**

@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { commands } from "../../bindings";
+	import { messageOf } from "$lib/errors.js";
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -112,9 +113,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		const pad = (value: number) => String(value).padStart(2, "0");
 		return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 	}
-
-	/** An IPC rejection arrives as a string, a thrown `Error` as itself. */
-	const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
 	/**
 	 * Ask the backend which file the entry belongs in, and ask again whenever the

@@ -231,10 +231,11 @@ pub fn render_pdf(path: &Path, options: RenderOptions) -> Result<Vec<PdfPage>, S
         // Page geometry is in points (1/72 inch), the unit dpi is relative to.
         let width_points = f64::from(bounds.x1 - bounds.x0).max(0.0);
         let height_points = f64::from(bounds.y1 - bounds.y0).max(0.0);
-        // A page that no longer fits at a readable size ends the render: the
-        // pages after it would be no better off.
+        // A page bigger than the budget asks for is skipped, not the end of the
+        // document: page sizes are independent, and a poster-sized page 1 must not
+        // hide A4 pages 2..N.
         let Some(page_dpi) = fit_dpi(dpi, width_points, height_points, allowance) else {
-            break;
+            continue;
         };
         let scale = page_dpi as f32 / 72.0;
         let pixmap = page
@@ -365,31 +366,6 @@ fn check_size(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The kind `name` and `bytes` together settle, for callers holding the bytes
-/// (an upload, a drag-and-drop payload) rather than a readable path — and for
-/// the file whose extension lies about what it is.
-///
-/// Content decides first: a `%PDF-` header, an image signature, or a zip
-/// container. A zip says only "office document", so the name picks the
-/// workbook out of it — without a workbook name, a zip stays `None` rather
-/// than being guessed at. `None` likewise for bytes that settle nothing.
-pub fn describe_bytes(name: &str, bytes: &[u8]) -> Option<AttachmentKind> {
-    if bytes.starts_with(b"%PDF-") {
-        return Some(AttachmentKind::Pdf);
-    }
-    if is_image_magic(bytes) {
-        return Some(AttachmentKind::Image);
-    }
-    if bytes.starts_with(b"PK\x03\x04") {
-        let extension = Path::new(name)
-            .extension()
-            .and_then(|extension| extension.to_str())?;
-        return kind_of_extension(&extension.to_ascii_lowercase())
-            .filter(|kind| *kind == AttachmentKind::Spreadsheet);
-    }
-    None
-}
-
 /// What the file claims to be, by extension first and by content after.
 fn kind_of(path: &Path) -> AttachmentKind {
     path.extension()
@@ -465,11 +441,27 @@ fn pdf_page_count(_path: &Path) -> Result<Option<u32>, String> {
     Ok(None)
 }
 
-/// The sheet names of a workbook, in the order the file lists them.
+/// The worksheet names of a workbook, in the order the file lists them.
+///
+/// Chart and dialog sheets are metadata, not data: calamine hands them back from
+/// `sheet_names` too, and reading one yields an empty range — an empty table that
+/// reads as "no data" instead of "not a worksheet".
 fn sheet_names(path: &Path) -> Result<Vec<String>, String> {
     let workbook = calamine::open_workbook_auto(path)
         .map_err(|error| format!("cannot open {} as a spreadsheet: {error}", path.display()))?;
-    Ok(workbook.sheet_names())
+    Ok(worksheets(&workbook))
+}
+
+/// The sheets that hold cells.
+fn worksheets<R: std::io::Read + std::io::Seek>(
+    workbook: &impl calamine::Reader<R>,
+) -> Vec<String> {
+    workbook
+        .sheets_metadata()
+        .iter()
+        .filter(|sheet| sheet.typ == calamine::SheetType::WorkSheet)
+        .map(|sheet| sheet.name.clone())
+        .collect()
 }
 
 /// The dpi at which a page of `width_points` × `height_points` fits `allowance`
@@ -534,14 +526,66 @@ fn sniff_delimiter(path: &Path) -> Result<u8, String> {
         }
         index += 1;
     }
-    // The last maximum wins a tie in `max_by_key`, so the comma — the safe
-    // guess, and what a file with no delimiter at all gets — has to come last.
-    let counts = [(b';', semicolons), (b'\t', tabs), (b',', commas)];
-    Ok(counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(delimiter, _)| delimiter)
-        .unwrap_or(b','))
+    // Frequency alone is not evidence: a semicolon export whose text fields
+    // carry unquoted commas (Excel only quotes the active separator) has more
+    // commas than semicolons, and splitting on the comma would tear every row
+    // apart. A delimiter is the one whose field count is *consistent* across the
+    // sample, so each candidate is scored on that instead — and a tie falls back
+    // to the count, then to the comma, which is what a file with no delimiter at
+    // all gets.
+    let candidates = [(b';', semicolons), (b'\t', tabs), (b',', commas)];
+    let mut best: Option<(u8, (usize, usize, usize))> = None;
+    for (delimiter, count) in candidates {
+        let fields = field_counts(&sample, delimiter);
+        let modal = fields
+            .iter()
+            .copied()
+            .max_by_key(|value| fields.iter().filter(|other| *other == value).count())
+            .unwrap_or(1);
+        let consistent = fields.iter().filter(|value| **value == modal).count();
+        // A delimiter that never occurs splits every line into one field: that is
+        // not a candidate at all, however consistent it looks. Among the ones that
+        // do split, the most agreeing rows win, then the wider split, then the raw
+        // count — and the comma wins a true tie because it is tried last and only a
+        // strictly better score replaces the incumbent.
+        let score = if modal < 2 {
+            (0, 0, 0)
+        } else {
+            (consistent, modal, count)
+        };
+        if best.is_none_or(|(_, incumbent)| score > incumbent) {
+            best = Some((delimiter, score));
+        }
+    }
+    Ok(best.map_or(b',', |(delimiter, _)| delimiter))
+}
+
+/// The field count each line of `sample` has under `delimiter`, respecting
+/// quotes the way the CSV reader will.
+fn field_counts(sample: &[u8], delimiter: u8) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut fields = 1usize;
+    let mut quoted = false;
+    let mut index = 0;
+    while index < sample.len() {
+        match sample[index] {
+            b'"' if quoted && sample.get(index + 1) == Some(&b'"') => index += 1,
+            b'"' => quoted = !quoted,
+            byte if !quoted && byte == delimiter => fields += 1,
+            b'\n' if !quoted => {
+                counts.push(fields);
+                fields = 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    // Only a real last line (no trailing newline) adds a count; an empty field
+    // group after the final newline would make "never occurs" look consistent.
+    if fields > 1 {
+        counts.push(fields);
+    }
+    counts
 }
 
 /// A CSV or TSV as rows. The first record is the header row, as it is in the
@@ -948,43 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn describe_bytes_reads_the_magic_not_the_name() {
-        // The four containers the panel meets: a PDF, a PNG, a JPEG and a
-        // workbook zip.
-        assert_eq!(
-            describe_bytes("scan", b"%PDF-1.7\n"),
-            Some(AttachmentKind::Pdf)
-        );
-        assert_eq!(
-            describe_bytes("scan", b"\x89PNG\r\n\x1a\n"),
-            Some(AttachmentKind::Image)
-        );
-        assert_eq!(
-            describe_bytes("receipt", b"\xff\xd8\xff\xe0"),
-            Some(AttachmentKind::Image)
-        );
-        assert_eq!(
-            describe_bytes("invoices.xlsx", b"PK\x03\x04"),
-            Some(AttachmentKind::Spreadsheet)
-        );
-        assert_eq!(
-            describe_bytes("rent.ods", b"PK\x03\x04"),
-            Some(AttachmentKind::Spreadsheet)
-        );
-
-        // Content wins over a name that lies: a JPEG called `statement.pdf` is
-        // an image.
-        assert_eq!(
-            describe_bytes("statement.pdf", b"\xff\xd8\xff\xe0"),
-            Some(AttachmentKind::Image)
-        );
-        // A zip that names no workbook, and bytes that settle nothing, are not
-        // guessed at.
-        assert_eq!(describe_bytes("archive.zip", b"PK\x03\x04"), None);
-        assert_eq!(describe_bytes("notes.md", b"# Notes\n"), None);
-    }
-
-    #[test]
     fn describe_refuses_a_missing_file() {
         let dir = TempDir::new("attachments-missing");
         let error = describe(&dir.file("nothing.pdf")).unwrap_err();
@@ -1217,6 +1224,29 @@ mod tests {
         let tab_table = read_table(&tabs, None, TableOptions::default()).unwrap();
         assert_eq!(tab_table.headers, ["Name", "Amount"]);
         assert_eq!(tab_table.rows, [["Rent", "1000"]]);
+    }
+
+    /// A semicolon export whose text fields carry unquoted commas has more commas
+    /// than semicolons; counting them would split every row apart.
+    #[test]
+    fn a_semicolon_export_with_commas_in_its_cells_stays_semicolon() {
+        let dir = TempDir::new("attachments-csv-commas-in-cells");
+        let path = fixture(
+            &dir,
+            "expenses.csv",
+            "Date;Description;Amount\n\
+             2026-01-02;Consulting, travel, meals;12,50\n\
+             2026-01-03;Taxi, hotel;88,00\n",
+        );
+
+        let table = read_table(&path, None, TableOptions::default()).unwrap();
+
+        assert_eq!(table.headers, ["Date", "Description", "Amount"]);
+        assert_eq!(
+            table.rows[0],
+            ["2026-01-02", "Consulting, travel, meals", "12,50"]
+        );
+        assert!(!table.truncated);
     }
 
     #[test]

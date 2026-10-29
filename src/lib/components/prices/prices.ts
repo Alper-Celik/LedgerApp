@@ -39,6 +39,12 @@ export function pairKey(commodity: string, currency: string | null): string {
  * first name the build actually offers wins; failing that an official source,
  * failing that the first one — a row always has a source to send.
  */
+/**
+ * The screen's preference, mirroring `prices::default_source` in the backend: a
+ * currency is a reference rate (ECB), everything else a market quote. The list
+ * after the first is this screen's fallback chain, which the registry order does
+ * not express; the first entry is the rule the CLI uses too.
+ */
 const PREFERRED: Record<PriceTarget["kind"], readonly string[]> = {
 	currency: ["ecb", "ratesapi"],
 	commodity: ["yahoo", "alphavantage"],

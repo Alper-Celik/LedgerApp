@@ -464,11 +464,6 @@ fn build() -> Vec<ToolDef> {
     ]
 }
 
-/// The registry rendered for a model: the OpenAI `tools` array and a Python
-/// stub module, both generated from the same definitions.
-///
-/// A later layer can put either in front of the model; a test fails if the two
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -480,19 +475,10 @@ mod tests {
 
     use super::{ToolError, expected_args, invoke, registry};
 
-    fn scratch() -> TempDir {
-        TempDir::new("tools")
-    }
-
-    fn seed(dir: &TempDir, name: &str, text: &str) {
-        dir.seed(name, text);
-    }
-
     #[test]
     fn invoke_reads_and_edits() {
-        let dir = scratch();
-        seed(
-            &dir,
+        let dir = TempDir::new("tools");
+        dir.seed(
             "main.bean",
             "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n",
         );
@@ -546,8 +532,8 @@ mod tests {
 
     #[test]
     fn invoke_refuses_paths_outside_the_root() {
-        let dir = scratch();
-        seed(&dir, "main.bean", "x\n");
+        let dir = TempDir::new("tools");
+        dir.seed("main.bean", "x\n");
         let outside = dir
             .dir()
             .parent()
@@ -632,8 +618,8 @@ mod tests {
 
     #[test]
     fn invoke_rejects_unknown_tools_and_misshapen_args() {
-        let dir = scratch();
-        seed(&dir, "main.bean", "2026-01-01 open Assets:Bank\n");
+        let dir = TempDir::new("tools");
+        dir.seed("main.bean", "2026-01-01 open Assets:Bank\n");
 
         let error = invoke(dir.dir(), "bash", &json!({})).unwrap_err();
         assert_eq!(
@@ -743,7 +729,7 @@ mod tests {
     fn every_schema_property_is_accepted() {
         for definition in registry() {
             assert!(!expected_args(&definition.schema).is_empty());
-            let dir = scratch();
+            let dir = TempDir::new("tools");
             let args = dummy(&definition.schema);
             let result = invoke(dir.dir(), definition.name, &args);
             if let Err(ToolError::BadArgs { message, .. }) = &result {
@@ -758,7 +744,7 @@ mod tests {
     #[test]
     fn every_required_argument_is_named_when_missing() {
         for definition in registry() {
-            let dir = scratch();
+            let dir = TempDir::new("tools");
             let required: Vec<String> = definition
                 .schema
                 .get("required")

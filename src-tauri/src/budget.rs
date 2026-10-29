@@ -44,7 +44,7 @@ fn is_envelope_account(account: &str) -> bool {
 
 /// Whether `text` is a `YYYY-MM` month label — the budget's unit of time, the
 /// same one the plugin's `month.rs` writes.
-fn is_month_label(text: &str) -> bool {
+pub(crate) fn is_month_label(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() == 7
         && bytes[4] == b'-'

@@ -60,6 +60,10 @@ pub(crate) fn points_from_csv(payload: &str) -> Result<Vec<IndexPoint>, String> 
         .from_reader(payload.as_bytes());
 
     let mut points = Vec::new();
+    // Exactly one row may be the header: exempting every leading non-date row
+    // would drop a month whose date the export spelled differently (`2026.01`)
+    // without saying so, and only when it happened to come first.
+    let mut header_seen = false;
     for (index, record) in reader.records().enumerate() {
         let row = index + 1;
         let record = record.map_err(|error| format!("CSV row {row}: {error}"))?;
@@ -68,10 +72,23 @@ pub(crate) fn points_from_csv(payload: &str) -> Result<Vec<IndexPoint>, String> 
         if date.is_empty() && value.is_empty() {
             continue;
         }
-        // The first row may name the columns (`date,value`, `Tarih,Değer`);
-        // every later non-date row is a real error.
-        if points.is_empty() && !starts_with_date(date) {
+        if !header_seen && !starts_with_date(date) {
+            header_seen = true;
             continue;
+        }
+        header_seen = true;
+        // Anything after the value is a field this dialect cannot express: a
+        // thousands separator (`1,000`), a decimal comma (`1.234,56`), or another
+        // column. Taking the first one would store a value that is silently wrong
+        // — by a factor of a thousand in the first case — so the row is refused.
+        let extra: Vec<&str> = record.iter().skip(2).map(str::trim).collect();
+        if extra.iter().any(|field| !field.is_empty()) {
+            return Err(format!(
+                "CSV row {row}: expected two fields (`date,value`), found {}. A value with a \
+                 thousands separator or a decimal comma cannot be read here — quote it as a \
+                 single field with a dot, e.g. \"2026-01,1000.00\"",
+                record.len()
+            ));
         }
         let point =
             IndexPoint::new(date, value).map_err(|error| format!("CSV row {row}: {error}"))?;
@@ -89,7 +106,12 @@ pub(crate) fn points_from_csv(payload: &str) -> Result<Vec<IndexPoint>, String> 
 pub(crate) fn load_indexes(dir: &Path) -> Result<Vec<IndexSeries>, String> {
     let path = index_path(dir);
     let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+        // A hand-edited file saved with a BOM: serde_json refuses one, and the
+        // error would not mention it.
+        Ok(text) => text
+            .strip_prefix('\u{feff}')
+            .map(str::to_owned)
+            .unwrap_or(text),
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(format!("cannot read {}: {error}", path.display()));

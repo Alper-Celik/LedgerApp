@@ -261,17 +261,29 @@ class LanguageServer {
 		};
 		this.documents.set(model.uri.toString(), document);
 		const attached = this.byUri.get(uri) ?? new Set<Document>();
+		const alreadyOpen = attached.size > 0;
 		attached.add(document);
 		this.byUri.set(uri, attached);
 
-		this.notify("textDocument/didOpen", {
-			textDocument: {
-				uri,
-				languageId: BEANCOUNT_LANGUAGE,
-				version: document.version,
-				text: model.getValue(),
-			},
-		});
+		if (alreadyOpen) {
+			// Another model on the same file already opened it. The server holds one
+			// buffer per URI, so a second `didOpen` would reset it (and both copies
+			// would then send versions the server cannot order); the text this model
+			// shows is what the server should have.
+			this.notify("textDocument/didChange", {
+				textDocument: { uri, version: document.version },
+				contentChanges: [{ text: model.getValue() }],
+			});
+		} else {
+			this.notify("textDocument/didOpen", {
+				textDocument: {
+					uri,
+					languageId: BEANCOUNT_LANGUAGE,
+					version: document.version,
+					text: model.getValue(),
+				},
+			});
+		}
 
 		return () => this.detach(document);
 	}
@@ -286,6 +298,9 @@ class LanguageServer {
 		if (attached?.size === 0) this.byUri.delete(document.uri);
 		document.change.dispose();
 		this.monaco?.editor.setModelMarkers(document.model, MARKER_OWNER, []);
+		// Closing the file for the *other* model still showing it would drop the
+		// server's buffer and blank its markers; the last one out closes it.
+		if (attached?.size) return;
 		this.notify("textDocument/didClose", {
 			textDocument: { uri: document.uri },
 		});
@@ -316,25 +331,51 @@ class LanguageServer {
 	}
 
 	/**
-	 * Forget the server: the journal it was started for is gone.
+	 * Reopen every surviving document on a fresh server.
 	 *
-	 * `load_ledger` stops the backend session, and the next `lspStart` builds one
-	 * for the new journal — but the startup memo here would keep the client from
-	 * ever asking again, leaving the editor attached to a server that answers
-	 * nothing. Dropping the memo (and the documents that belonged to the old
-	 * server) is what lets the next attach start it.
+	 * `load_ledger` stops the backend session on every load — including the
+	 * reload of the journal already open — and the editors stay mounted, so
+	 * discarding the client would leave them attached to nothing: no completion,
+	 * no hover, and markers frozen where they were. The documents are kept and
+	 * reopened instead, and the markers are cleared because the server's opinion
+	 * of them is gone.
 	 */
-	async shutdown(): Promise<void> {
+	async restart(): Promise<void> {
 		this.generation += 1;
-		for (const document of this.documents.values()) {
-			clearTimeout(document.timer);
-		}
-		this.documents.clear();
-		this.byUri.clear();
 		const unlisten = this.unlisten;
 		this.unlisten = null;
 		this.starting = null;
 		await unlisten?.();
+		for (const document of this.documents.values()) {
+			clearTimeout(document.timer);
+			document.pending = false;
+			document.version += 1;
+			this.monaco?.editor.setModelMarkers(document.model, MARKER_OWNER, []);
+		}
+		if (this.documents.size === 0) return;
+		try {
+			await this.ensureStarted();
+		} catch (cause) {
+			// A server that will not start is the editor's problem to show, and
+			// `ensureStarted` has already forgotten the attempt so the next attach
+			// can try again.
+			console.error("language server restart failed", cause);
+			return;
+		}
+		// One `didOpen` per URI: the server holds one buffer per file.
+		const opened = new Set<string>();
+		for (const document of this.documents.values()) {
+			if (opened.has(document.uri)) continue;
+			opened.add(document.uri);
+			this.notify("textDocument/didOpen", {
+				textDocument: {
+					uri: document.uri,
+					languageId: BEANCOUNT_LANGUAGE,
+					version: document.version,
+					text: document.model.getValue(),
+				},
+			});
+		}
 	}
 
 	private ensureStarted(): Promise<void> {
@@ -566,13 +607,13 @@ class LanguageServer {
 let shared: LanguageServer | null = null;
 
 /**
- * Another journal is open, so the language server session — and this client's
- * memo of it — belong to a ledger that is no longer loaded.
+ * The backend stopped its language server — it does on every load, not only on a
+ * journal switch — so the client has to reach the replacement with the documents
+ * it still holds. Dropping the client would orphan every mounted editor.
  */
 export function resetLanguageServer(): void {
-	const previous = shared;
-	shared = null;
-	void previous?.shutdown();
+	shared ??= new LanguageServer();
+	void shared.restart();
 }
 
 /**

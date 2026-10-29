@@ -650,6 +650,59 @@ option \"operating_currency\" \"USD\"
         }
     }
 
+    /// `pushtag` / `poptag` are not directives: they live in the text between
+    /// entries, so a merge that takes an entry from the copy has to bring the
+    /// scope it was written in. The frames the renderer emits for that have to
+    /// survive the write funnel's reload too — a scope that only exists in the
+    /// plan would be worse than no merge at all.
+    #[test]
+    fn a_scope_the_copy_added_reaches_the_written_journal() {
+        // We edited the salary; the copy put the groceries inside a tag scope
+        // and changed that amount. (Something has to differ from the base for
+        // the log to have an operation to record.)
+        let ours = BASE.replace(
+            "  Assets:Bank       200.00 USD\n  Income:Salary    -200.00 USD\n",
+            "  Assets:Bank       210.00 USD\n  Income:Salary    -210.00 USD\n",
+        );
+        let scoped = format!("pushtag #trip\n{THEIR_GROCERIES}poptag #trip");
+        let theirs = BASE.replacen(BASE_GROCERIES, &scoped, 1);
+        let case = Case::new("scope", BASE, &ours, &theirs);
+        let view = case.view();
+        assert_eq!(
+            view.summary.needs_user, 0,
+            "decisions: {:?}",
+            view.decisions
+        );
+
+        let state = case.state();
+        resolve(&state, &case.original, &[]).expect("merges");
+
+        let merged = fs::read_to_string(&case.original).unwrap();
+        assert!(merged.contains("pushtag #trip"), "merged: {merged}");
+        assert!(merged.contains("-60.00 USD"), "merged: {merged}");
+        assert!(!case.copy.exists(), "the resolved copy is gone");
+
+        // The reloaded journal, not just the text, carries the tag: that is what
+        // the rest of the app reads.
+        {
+            let guard = state
+                .loaded
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            let loaded = guard.as_ref().expect("the session still holds the ledger");
+            assert!(
+                loaded.ledger.errors.is_empty(),
+                "errors: {:?}",
+                loaded.ledger.errors
+            );
+            let tagged = loaded.ledger.directives.iter().any(|spanned| {
+                matches!(&spanned.value, rustledger_core::Directive::Transaction(transaction)
+                    if transaction.tags.iter().any(|tag| tag.as_str() == "trip"))
+            });
+            assert!(tagged, "the written journal's transaction lost the tag");
+        }
+    }
+
     #[test]
     fn a_directive_changed_on_both_sides_refuses_without_a_pick() {
         let ours = BASE.replacen(BASE_GROCERIES, OUR_GROCERIES, 1);

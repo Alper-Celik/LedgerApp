@@ -378,13 +378,6 @@ pub fn list_with_issues(
 /// <id>"`, so an undo cannot clobber an edit made after it, local or synced. A
 /// file the operation deleted is expected to be absent, and any file that
 /// reappeared in its place is the same refusal.
-#[cfg(test)]
-pub fn revert(root: &Path, id: &str) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
-    Ok(revert_plan(root, id)?
-        .into_iter()
-        .filter_map(|entry| entry.before.map(|bytes| (entry.path, bytes)))
-        .collect())
-}
 
 /// The whole undo of operation `id`: every file it touched, with the bytes to
 /// write back (`Some`) or `None` for a file the operation created, which undo
@@ -1391,6 +1384,15 @@ fn date_of(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::Hunk;
+
+    /// The bytes an undo would put back, keyed by path — the shape the tests
+    /// compare against, built from the plan they exercise.
+    fn revert(root: &Path, id: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, String> {
+        Ok(super::revert_plan(root, id)?
+            .into_iter()
+            .filter_map(|entry| entry.before.map(|bytes| (entry.path, bytes)))
+            .collect())
+    }
 
     /// A change carrying the line hunks the writer worked out — the shape the
     /// line tools will attach once they edit through the pipeline.

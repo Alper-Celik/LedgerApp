@@ -32,7 +32,14 @@ export type WidgetKind =
 	| "lifestyle-inflation"
 	| "balances-table";
 
-/** One card on a dashboard: what it is, how it is tuned, and where it sits. */
+/**
+ * One card on a dashboard: what it is, how it is tuned, and where it sits.
+ *
+ * Deliberately not derived from the generated `DashboardWidget`: that type's
+ * `kind` is a string, because a saved file may hold one this build cannot draw.
+ * This union is the set the registry can render, so adding a kind to the backend
+ * has to be a decision here rather than a silent drop at runtime.
+ */
 export type Widget = {
 	/** Stable identity, so a layout can be saved and reordered by it. */
 	id: string;

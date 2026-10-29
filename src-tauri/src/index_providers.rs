@@ -470,8 +470,13 @@ impl IndexProvider for EcbProvider {
             seen_days += 1;
             if let Some(currency_at) = block.find(&needle) {
                 let after_currency = &block[currency_at + needle.len()..];
-                if let Some(rate_at) = after_currency.find("rate=\"") {
-                    let after_rate = &after_currency[rate_at + "rate=\"".len()..];
+                // The rate has to be an attribute of *this* cube: searching the
+                // rest of the day would happily take the next currency's rate when
+                // the quoted cube spells it differently or omits it.
+                let tag_end = after_currency.find('>').unwrap_or(after_currency.len());
+                let tag = &after_currency[..tag_end];
+                if let Some(rate_at) = tag.find("rate=\"") {
+                    let after_rate = &tag[rate_at + "rate=\"".len()..];
                     if let Some(rate_end) = after_rate.find('"') {
                         let rate_text = after_rate[..rate_end].trim();
                         let rate: Decimal = rate_text.parse().map_err(|_| {

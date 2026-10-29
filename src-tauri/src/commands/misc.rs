@@ -21,8 +21,9 @@ use super::ledger_path;
 /// in-app folder picker: each one's absolute path, and whether a root journal
 /// sits in it.
 ///
-/// This backs the in-app picker, the fallback for platforms where the desktop's
-/// own chooser ([`pick_ledger_folder`]) has no implementation — phones today.
+/// This backs the in-app picker: the fallback when the platform's own chooser
+/// answers with an error (no dialog in the runtime, or a phone whose Storage
+/// Access Framework pick was cancelled).
 #[tauri::command]
 #[specta::specta]
 pub fn list_folders(path: Option<String>) -> Result<FolderListing, String> {

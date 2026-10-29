@@ -7,7 +7,7 @@
 //! # Why this module exists
 //!
 //! Every capability below is already a plain function over `&AppState` or
-//! `&Ledger`; the commands in `commands.rs` are thin wrappers that unwrap a
+//! `&Ledger`; the commands in `commands/` are thin wrappers that unwrap a
 //! `tauri::State` and hand the payload to the frontend. A binary cannot use
 //! those wrappers — they need a running Tauri app — and re-implementing them
 //! would give the terminal a second loader, a second budget reader and a
@@ -25,7 +25,7 @@
 //!
 //! - the app's config directory, where indexes and the assistant's settings
 //!   live. [`indexes_dir`] and [`ai_dir`] name the same subdirectories
-//!   `commands.rs` does, so the CLI and the app read one set of files; the
+//!   `commands/` does, so the CLI and the app read one set of files; the
 //!   caller passes the base directory in, because nothing here guesses a
 //!   platform path.
 //! - the composition of the assistant's first turn: [`SYSTEM_PROMPT`] plus the
@@ -116,6 +116,19 @@ impl Opened {
         let loaded = guard.as_ref().expect("an opened ledger keeps its ledger");
         read(loaded)
     }
+}
+
+/// The source a target of `kind` is quoted from when the caller names none —
+/// [`crate::prices::default_source`], for a caller building requests.
+pub fn default_price_source(kind: &str) -> &'static str {
+    crate::prices::default_source(kind)
+}
+
+/// Whether `label` is a `YYYY-MM` month a budget window can name. The CLI
+/// validates `--from`/`--to` with this before it opens anything, so a typo is a
+/// usage error rather than a ledger one.
+pub fn is_month_label(label: &str) -> bool {
+    crate::budget::is_month_label(label)
 }
 
 /// The report fields only: the session is a lock, and debugging a lock is not
@@ -376,7 +389,12 @@ pub fn lifestyle(
             .find(|series| series.id == id)
             .ok_or_else(|| format!("no stored index is called `{id}`"))?,
         None => match stored.len() {
-            1 => stored.into_iter().next().expect("one series"),
+            1 => match stored.into_iter().next() {
+                Some(series) => series,
+                None => {
+                    return Err("no index series is stored; import one first".to_string());
+                }
+            },
             0 => {
                 return Err(
                     "a lifestyle report needs an index series; import one with `ledger index import`"
@@ -447,7 +465,7 @@ fn journal_file(ledger: &Ledger, file: &str) -> Option<String> {
 // ------------------------------------------------------------------ indexes ---
 
 /// Where index series live under the app's config directory: the same
-/// `indexes` subdirectory `commands.rs` reads, so a series fetched in the
+/// `indexes` subdirectory `commands/` reads, so a series fetched in the
 /// window is visible here and vice versa.
 pub fn indexes_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("indexes")
@@ -479,7 +497,7 @@ pub fn index_import(
 }
 
 /// Download one provider's series and store it, blocking on the network. The
-/// id is the series id (`us-cpi`, `tr-cpi`, …), the same one `commands.rs`'s
+/// id is the series id (`us-cpi`, `tr-cpi`, …), the same one `commands/`'s
 /// `index_refresh` command takes.
 pub fn index_refresh(config_dir: &Path, id: &str) -> Result<IndexSeries, String> {
     let provider = crate::index_providers::provider(id)
@@ -492,9 +510,9 @@ pub fn index_refresh(config_dir: &Path, id: &str) -> Result<IndexSeries, String>
 // ---------------------------------------------------------------- assistant ---
 
 /// Where the assistant's settings live under the app's config directory: the
-/// same `ai` subdirectory `commands.rs` reads, so the key the window stored is
+/// same `ai` subdirectory `commands/` reads, so the key the window stored is
 /// the key the CLI uses.
-pub fn ai_dir(config_dir: &Path) -> PathBuf {
+fn ai_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("ai")
 }
 

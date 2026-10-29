@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./gate";
 import { invokes, stubIpc } from "./stub";
 
 test.beforeEach(async ({ page }) => {

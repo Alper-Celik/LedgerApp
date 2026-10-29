@@ -550,6 +550,18 @@ impl PriceFailure {
 /// The order is deliberate: validate the request, resolve the source and the
 /// ticker, consult the cache, and only then go to the network, so a request
 /// that cannot succeed never reaches a provider.
+/// The source a target of `kind` is quoted from when the caller names none.
+///
+/// The registry is the only place that knows which providers exist, and the
+/// screen and the CLI must not each carry their own order: a `currency` target
+/// is a reference rate (ECB), everything else is a market quote.
+pub fn default_source(kind: &str) -> &'static str {
+    match kind {
+        "currency" => "ecb",
+        _ => "yahoo",
+    }
+}
+
 fn quote_for(
     registry: &PriceSourceRegistry,
     tefas: &Arc<dyn PriceSource>,

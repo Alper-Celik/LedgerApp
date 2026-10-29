@@ -160,19 +160,20 @@ fn header_replacement(
             }
         }
         // A header cannot describe three literals; whatever was loaded, rewrite
-        // the whole description as the tokens the edit asks for.
+        // the whole description as the tokens the edit asks for. `header_tokens`
+        // always yields one string, and the pair is read defensively anyway: a
+        // rewrite is not a place to panic.
         _ => {
-            let last = *header
-                .strings
-                .last()
-                .expect("header_tokens keeps at least one");
+            let (Some(first), Some(last)) = (header.strings.first(), header.strings.last()) else {
+                return Err("the transaction's header line has no description".to_string());
+            };
             let description = match distinct_payee {
                 Some(payee) => {
                     format!("{} {}", quote_beancount(payee), quote_beancount(narration))
                 }
                 None => quote_beancount(narration),
             };
-            replacements.push(replace((header.strings[0].0, last.1), description));
+            replacements.push(replace((first.0, last.1), description));
         }
     }
 

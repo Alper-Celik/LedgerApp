@@ -76,7 +76,7 @@ Exit codes: `0` answered, `1` failed (reason on stderr), `2` misuse.
 
 | Path | What lives there |
 |---|---|
-| `src-tauri/src/commands.rs` | the Tauri/specta command surface |
+| `src-tauri/src/commands/` | the Tauri/specta command surface |
 | `src-tauri/src/api.rs` | the Tauri-free façade over the same modules, plain data out; the `ledger` binary's whole backend |
 | `src-tauri/src/bin/ledger.rs` | the `ledger` CLI (`check`, `query`, `budget`, `report`, `prices`, `index`, `ask`, `chart`) |
 | `src-tauri/src/` | one module per concern: ledger views (`accounts`, `source`, `files`, `budget`, `reports`), edits (`editing`, `rewrite`, `conflict*`), storage and history (`session`, `storage`, `repo`, `git`, `git_ops`, `history`), fetchers (`prices`, `index*`), assistant (`ai`, `ai_cmd`, `attachments`, `tools`, `conversations`), `lsp` (see `AGENTS.md`) |

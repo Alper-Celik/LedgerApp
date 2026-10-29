@@ -227,14 +227,18 @@ fn open_ledger(cli: &Cli) -> Result<api::Opened, CliError> {
 /// The app's config directory: the flag, else the environment variable, else
 /// the path the Tauri app resolves for the same identifier (`tauri.conf.json`),
 /// so `index list` sees what the window installed and `ask` reads its settings.
-fn config_dir(cli: &Cli) -> PathBuf {
+fn config_dir(cli: &Cli) -> Result<PathBuf, CliError> {
     if let Some(dir) = &cli.config_dir {
-        return dir.clone();
+        return absolute(dir, "--config-dir");
     }
     if let Some(dir) = std::env::var_os("LEDGER_CONFIG_DIR") {
-        return PathBuf::from(dir);
+        return absolute(&PathBuf::from(dir), "LEDGER_CONFIG_DIR");
     }
     const IDENTIFIER: &str = "dev.alper-celik.ledger-app";
+    // `dirs` ignores an XDG_CONFIG_HOME that is not absolute (an empty one is the
+    // common case in a service environment), and so does this: falling back to a
+    // relative path would put the store in whatever directory the process started
+    // in, where the window would never look for it.
     let base = if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -246,18 +250,28 @@ fn config_dir(cli: &Cli) -> PathBuf {
     } else {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
     };
-    // No usable config root (a service environment with none of the three set):
-    // refuse loudly instead of writing a private store into whatever directory
-    // the process started in, where the app would never look for it.
     let Some(base) = base else {
-        eprintln!(
-            "ledger: no config directory: set HOME, XDG_CONFIG_HOME or APPDATA, or pass --config-dir"
-        );
-        return PathBuf::from(IDENTIFIER);
+        return Err(CliError::Usage(
+            "no config directory: set HOME, XDG_CONFIG_HOME or APPDATA, or pass --config-dir"
+                .to_string(),
+        ));
     };
-    base.join(IDENTIFIER)
+    absolute(&base.join(IDENTIFIER), "the config directory")
+}
+
+/// A config path the CLI can actually find again, and that the window resolves
+/// to the same place.
+fn absolute(path: &Path, what: &str) -> Result<PathBuf, CliError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Err(CliError::Usage(format!(
+        "{what} must be an absolute path, not `{}`",
+        path.display()
+    )))
 }
 
 // ------------------------------------------------------------------ output ---
@@ -448,6 +462,20 @@ fn budget(
             "--months cannot be combined with --from/--to".to_string(),
         ));
     }
+    if months == Some(0) {
+        return Err(CliError::Usage("--months needs at least 1".to_string()));
+    }
+    // A malformed label is the caller's mistake, and saying so before loading
+    // means a missing ledger does not hide it.
+    for (flag, label) in [("--from", &from), ("--to", &to)] {
+        if let Some(label) = label
+            && !api::is_month_label(label)
+        {
+            return Err(CliError::Usage(format!(
+                "{flag} needs a month label like 2026-01, not `{label}`"
+            )));
+        }
+    }
     let opened = open_ledger(cli)?;
     if let Some(months) = months {
         return budget_range_answer(cli, &api::budget_months(&opened, months)?);
@@ -501,10 +529,12 @@ fn budget_range_answer(cli: &Cli, range: &api::BudgetRange) -> Result<u8, CliErr
         return emit_json(range);
     }
     emit(|out| {
-        writeln!(out, "{}..{} · {}", range.from, range.to, range.currency)?;
+        // Nothing to describe before there is a window: `.. · USD` reads as a
+        // range that failed to render.
         if range.months.is_empty() {
             return writeln!(out, "no budget data in this window");
         }
+        writeln!(out, "{}..{} · {}", range.from, range.to, range.currency)?;
         writeln!(out)?;
         let columns: Vec<String> = ["MONTH", "TO BE BUDGETED", "BUDGETED", "SPENT", "BALANCE"]
             .map(String::from)
@@ -600,7 +630,7 @@ fn report(cli: &Cli, report: ReportKind, months: u32, index: Option<&str>) -> Re
             })
         }
         ReportKind::Lifestyle => {
-            let config = config_dir(cli);
+            let config = config_dir(cli)?;
             let report = api::lifestyle(&opened, &config, months, index)?;
             if cli.json {
                 return emit_json(&report);
@@ -678,10 +708,12 @@ fn prices(cli: &Cli, fetch: bool, write: Option<&Path>) -> Result<u8, CliError> 
             if currency == target.commodity {
                 continue;
             }
+            // The same source the Prices screen would pick for this kind: a
+            // currency is a reference rate, a holding is a market quote.
             requests.push(api::QuoteRequest {
                 commodity: target.commodity.clone(),
                 currency: currency.to_string(),
-                source: None,
+                source: Some(api::default_price_source(&target.kind).to_string()),
                 date: None,
             });
         }
@@ -769,7 +801,7 @@ fn prices(cli: &Cli, fetch: bool, write: Option<&Path>) -> Result<u8, CliError> 
 }
 
 fn index(cli: &Cli, command: &IndexCommand) -> Result<u8, CliError> {
-    let config = config_dir(cli);
+    let config = config_dir(cli)?;
     match command {
         IndexCommand::List => {
             let series = api::index_series(&config)?;
@@ -852,7 +884,7 @@ fn series_answer(cli: &Cli, series: &api::IndexSeries) -> Result<u8, CliError> {
 }
 
 fn ask(cli: &Cli, prompt: &str) -> Result<u8, CliError> {
-    let config = config_dir(cli);
+    let config = config_dir(cli)?;
     // The assistant's read tools answer from the same opened ledger every other
     // command uses. A journal that cannot be loaded is not fatal to the
     // question: the model is told the tools have nothing to read, and the

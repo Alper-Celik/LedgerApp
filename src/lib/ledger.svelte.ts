@@ -44,9 +44,13 @@ export async function refreshLedger() {
 }
 
 /**
- * Read why the last restore failed, if it did. Called on mount beside
- * `refreshLedger`: a phone whose storage grant was revoked opens with no ledger
- * and this is the only account of it.
+ * Read the folder's last failure, if there was one.
+ *
+ * The backend records it from four places — the launch restore, a pick, the
+ * assistant's conversation flush, a git operation's note — and clears it on the
+ * next successful one. Every writer runs while the window is already up (bar the
+ * restore), so this is read after each of them, not only on mount: a failure
+ * nobody re-reads is as invisible as the stderr line it replaced.
  */
 export async function refreshStorageError() {
 	try {
@@ -62,9 +66,9 @@ export async function refreshStorageError() {
  * behind `pick_ledger_folder` — the xdg-desktop-portal on Linux, the system
  * dialog on Windows and macOS. This is the normal way in.
  *
- * A cancelled chooser does nothing. A platform with no chooser (phones, today)
- * answers with an error, and the in-app picker opens instead, so the button
- * never ends in a dead end.
+ * A cancelled chooser does nothing. A runtime whose chooser answers with an
+ * error — no dialog plugin, or a phone where the system picker failed — opens
+ * the in-app picker instead, so the button never ends in a dead end.
  */
 export async function chooseLedger() {
 	ledger.error = "";
@@ -113,6 +117,11 @@ export async function syncTree(): Promise<void> {
 		// only the failure is news, and it must not erase the conflicts whose
 		// buttons settle them.
 		noteTreeReport({ error: messageOf(cause) });
+	} finally {
+		// The backend records a folder failure from several places; this is the
+		// one call every write already goes through, so it is where the sentence
+		// becomes visible (and where a cleared one stops being shown).
+		await refreshStorageError();
 	}
 }
 
