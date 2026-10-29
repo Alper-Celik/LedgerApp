@@ -8,7 +8,8 @@
 #
 #   scripts/android-build.sh                                   # debug APK, all 4 ABIs
 #   scripts/android-build.sh --apk --debug --target aarch64    # one ABI (much faster)
-#   scripts/android-build.sh --apk --release                   # stripped APK + AAB
+#   scripts/android-build.sh --apk --target aarch64            # release APK (the default)
+#   scripts/android-build.sh --aab                             # release bundle
 #
 # `nix develop .#android` supplies the SDK, NDK, JDK and a Rust toolchain whose
 # sysroot carries the Android standard libraries; the shell hook points
@@ -23,7 +24,8 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
 # A debug APK when called with no arguments; otherwise the caller decides
-# (passing `--apk`/`--aab`/`--release`/`--target` exactly as the CLI documents).
+# (passing `--apk`/`--aab`/`--debug`/`--target` exactly as the CLI documents —
+# there is no `--release` flag, a build is release unless `--debug` says so).
 if [ "$#" -eq 0 ]; then
   set -- --apk --debug
 fi

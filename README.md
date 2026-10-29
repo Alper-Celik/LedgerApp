@@ -37,7 +37,7 @@ For the phone, the same Rust code builds an APK:
 
 ```sh
 scripts/android-build.sh                 # debug APK for aarch64
-scripts/android-build.sh --apk --release # stripped APK + AAB
+scripts/android-build.sh --apk            # release APK (release is the default)
 ```
 
 which runs `npm run tauri android build` inside `nix develop .#android` (SDK, NDK, JDK 17 and a
