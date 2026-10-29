@@ -227,12 +227,9 @@ pub fn real_amount(
     let at_date = first_of_month(at).map_err(|e| format!("price index `{}`: {e}", series.id))?;
     let base_date =
         first_of_month(base).map_err(|e| format!("price index `{}`: {e}", series.id))?;
-    let at_value = series
-        .value_at(&at_date)
-        .ok_or_else(|| missing_point(series, &at_date))?;
-    let base_value = series
-        .value_at(&base_date)
-        .ok_or_else(|| missing_point(series, &base_date))?;
+    let at_value = index_at(series, &at_date).ok_or_else(|| missing_point(series, &at_date))?;
+    let base_value =
+        index_at(series, &base_date).ok_or_else(|| missing_point(series, &base_date))?;
     let converted = amount
         .checked_mul(base_value)
         .and_then(|scaled| scaled.checked_div(at_value))

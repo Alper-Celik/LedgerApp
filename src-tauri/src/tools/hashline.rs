@@ -493,16 +493,16 @@ fn write_whole(path: &Path, text: &str) -> Result<bool, String> {
 mod tests {
     use std::fs;
 
+    use crate::testing::TempDir;
+
     use super::{Document, EditOp, LineView, apply_edits, hash_line, read_file};
 
-    fn scratch() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+    fn scratch() -> TempDir {
+        TempDir::new("tool-hashline")
     }
 
-    fn seed(dir: &tempfile::TempDir, name: &str, text: &str) -> std::path::PathBuf {
-        let path = dir.path().join(name);
-        fs::write(&path, text).unwrap();
-        path
+    fn seed(dir: &TempDir, name: &str, text: &str) -> std::path::PathBuf {
+        dir.seed(name, text)
     }
 
     fn anchor(line: &LineView) -> String {
@@ -589,7 +589,7 @@ mod tests {
                 .contains("at least 1")
         );
         assert!(
-            read_file(&dir.path().join("nope.bean"), None, None)
+            read_file(&dir.dir().join("nope.bean"), None, None)
                 .unwrap_err()
                 .contains("no such file")
         );
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn write_creates_and_replaces() {
         let dir = scratch();
-        let path = dir.path().join("new.bean");
+        let path = dir.dir().join("new.bean");
 
         let outcome = apply_edits(
             &path,
@@ -730,7 +730,7 @@ mod tests {
         assert!(error.contains("cannot be combined"), "{error}");
 
         // Anchor edits on a file that does not exist point at `write`.
-        let missing = dir.path().join("missing.bean");
+        let missing = dir.dir().join("missing.bean");
         let error = apply_edits(&missing, &[replace("0000", &["y"])]).unwrap_err();
         assert!(error.contains("no such file"), "{error}");
         assert!(!missing.exists());
@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn binary_files_are_refused() {
         let dir = scratch();
-        let path = dir.path().join("blob.bin");
+        let path = dir.dir().join("blob.bin");
         fs::write(&path, [0u8, 159, 146, 150]).unwrap();
         let error = read_file(&path, None, None).unwrap_err();
         assert!(error.contains("not a text file"), "{error}");

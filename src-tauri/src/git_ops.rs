@@ -998,9 +998,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A throwaway directory with a repository in it, removed on drop — the
-    /// same shape as the crate's `testing::TempDir`, kept local so this module
-    /// tests itself and nothing else.
+    /// A throwaway directory with a repository in it, removed on drop.
+    ///
+    /// This is a *repository* fixture on purpose, not the crate's
+    /// `testing::TempDir`: the tests here need `init_opts` with an initial
+    /// branch, an identity and the commit/read helpers below, none of which a
+    /// plain directory of files carries. Kept local so this module tests
+    /// itself and nothing else.
     struct TempRepo {
         path: PathBuf,
     }

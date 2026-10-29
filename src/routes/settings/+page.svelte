@@ -128,6 +128,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					{ledger.summary?.path ?? "no ledger loaded"}
 				</span>
 			</div>
+			{#if ledger.storageError}
+				<!--
+					A folder that could not be reopened at launch. The sentence names
+					the button above it rather than repeating it: two controls for one
+					action on one screen is a second way to do the same thing, not a
+					convenience.
+				-->
+				<Alert variant="destructive">{ledger.storageError}</Alert>
+			{/if}
 			{#if ledger.error}
 				<Alert variant="destructive">{ledger.error}</Alert>
 			{/if}

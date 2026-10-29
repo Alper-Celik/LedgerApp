@@ -417,15 +417,11 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.commits);
 						case "git_commit_diff":
 							return Promise.resolve(fixtures.commitDiff);
-						case "git_state":
-							return Promise.resolve(fixtures.gitState);
 						case "storage_kind":
 							return Promise.resolve("local");
 						case "sync_conflicts":
 							return Promise.resolve({ candidates: [], orphans: [] });
 						case "history":
-							return Promise.resolve([]);
-						case "index_series":
 							return Promise.resolve([]);
 						case "index_provider_list":
 							return Promise.resolve([

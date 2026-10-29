@@ -5,11 +5,15 @@
 //! Replacing a file's bytes whole.
 //!
 //! Every store in the backend needs the same rule — the journal, the assistant's
-//! config, the index series, dashboards, conversations, the operation log, the
+//! config, the index series, dashboards, conversations, the log's state file, the
 //! mirror's manifest: a crash must leave either the old file or the new one and
 //! never a half-written mixture, a reader must never see the temporary file, and
 //! a failed write must leave no litter behind. One implementation so those
 //! guarantees cannot drift apart per module.
+//!
+//! Two writes stay outside it on purpose: the log's blobs are named by their own
+//! hash (so the create is the identity check) and the mirror's directory swap is
+//! a rename of a whole tree, not a file.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -34,27 +38,33 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), 
     let existing = fs::metadata(path).ok().map(|meta| meta.permissions());
 
     let result = (|| -> std::io::Result<()> {
-        let mut file = File::create(&temporary)?;
+        // `create_new`, not `create`: a symlink planted at the temporary name
+        // must not be followed into some other file, and a name this process is
+        // already using is a bug worth surfacing rather than truncating.
+        let mut file = create_new(&temporary)?;
+        // The mode goes on *before* the bytes: a store that asks for 0600 (the
+        // assistant's key) must not be world-readable for the duration of the
+        // write and its flush. A target that already exists keeps its own mode,
+        // so a replacement is not a permission change; a new file keeps the
+        // umask's.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            match (mode, &existing) {
+                (Some(mode), _) => {
+                    fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?
+                }
+                (None, Some(permissions)) => fs::set_permissions(&temporary, permissions.clone())?,
+                (None, None) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (mode, &existing);
         file.write_all(bytes)?;
         // On the device before the rename, so the rename never points at bytes
         // that are still in a cache.
         file.sync_all()?;
         drop(file);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            match (mode, existing) {
-                (Some(mode), _) => {
-                    fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?
-                }
-                // Keep the target's own mode, so a replacement is not a
-                // permission change; a new file keeps the umask's.
-                (None, Some(permissions)) => fs::set_permissions(&temporary, permissions)?,
-                (None, None) => {}
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = (mode, existing);
         fs::rename(&temporary, path)?;
         // The rename is durable only once the directory itself is flushed.
         if let Ok(handle) = File::open(directory) {
@@ -69,6 +79,28 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), 
             let _ = fs::remove_file(&temporary);
             Err(format!("cannot write {}: {error}", path.display()))
         }
+    }
+}
+
+/// Create the temporary file, refusing anything already at its path.
+///
+/// `pid` and a counter make a collision another process's doing — a stale file
+/// from a recycled pid, or something planted — so it is removed once and the
+/// create retried.
+fn create_new(path: &Path) -> std::io::Result<File> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+        }
+        other => other,
     }
 }
 

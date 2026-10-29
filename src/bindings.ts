@@ -4,7 +4,6 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
-	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	/**
 	 *  One entry per account that appears in the tree — accounts with postings
 	 *  and their ancestors — each carrying its full subtree balance.
@@ -274,6 +273,19 @@ export const commands = {
 	 *  decide whether the git views can exist at all.
 	 */
 	storageKind: () => __TAURI_INVOKE<StorageKind>("storage_kind"),
+	/**
+	 *  What last went wrong with the ledger's folder rather than with the ledger, or
+	 *  `None` when the last write to it worked.
+	 * 
+	 *  The folder has four silent failure paths — the phone's restore, before any
+	 *  window exists; the assistant's flush of a conversation; the history's note of
+	 *  files a repository operation rewrote; and a folder being left for another one
+	 *  — and none of them has a command to fail, because the operation they follow
+	 *  already happened. They all record their sentence here, so the UI can show one
+	 *  alert with the picker beside it. A restore that fails is the worst case: the
+	 *  app opens with no ledger and this is its only account of why.
+	 */
+	storageError: () => __TAURI_INVOKE<string | null>("storage_error"),
 	/**
 	 *  Android: write the mirror's changed files back into the SAF tree. Called after
 	 *  a successful edit (and by the UI's explicit sync action); reports what moved

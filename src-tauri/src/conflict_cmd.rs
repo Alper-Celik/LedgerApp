@@ -166,7 +166,7 @@ pub fn compare(ledger_dir: &Path, original: &Path, copy: &Path) -> Result<Confli
 
     let log_root = log_root(ledger_dir);
     let (base_found, base) = base_of(&log_root, original)?;
-    let plan = conflict::plan(&base, &ours, &theirs)?;
+    let plan = conflict::plan(&base, &ours, &theirs, base_found)?;
 
     let summary = summary_of(&plan);
     let decisions = plan.directives.iter().map(decision_of).collect();
@@ -211,11 +211,11 @@ pub fn resolve(
     let compared = compared(original)?;
     let (file, log_root) = open_journal(state, original)?;
 
-    let (_, base) = base_of(&log_root, &file)?;
+    let (base_found, base) = base_of(&log_root, &file)?;
     let ours_bytes = fs::read(&file).map_err(|error| format!("{}: {error}", file.display()))?;
     let ours = text_of(&file, ours_bytes)?;
     let theirs = text_of(&compared.copy, compared.bytes.clone())?;
-    let plan = conflict::plan(&base, &ours, &theirs)?;
+    let plan = conflict::plan(&base, &ours, &theirs, base_found)?;
 
     let mut choices = HashMap::with_capacity(picks.len());
     for (key, value) in picks {
@@ -227,6 +227,16 @@ pub fn resolve(
 
     let merged = conflict::render(&plan, &choices)?;
     edit_named_file_source(state, &file.display().to_string(), &merged, None)?;
+    // The edit reports success for a file that already held the merged text; the
+    // copy may only go once the bytes are actually there, or a stale session
+    // would delete the version the reader chose and leave the one they rejected.
+    let on_disk = std::fs::read(&file).map_err(|error| format!("{}: {error}", file.display()))?;
+    if on_disk != merged.as_bytes() {
+        return Err(format!(
+            "{} does not hold the merged text; the conflict copy is kept",
+            file.display()
+        ));
+    }
     drop_copy(&compared)?;
     Ok(file.display().to_string())
 }

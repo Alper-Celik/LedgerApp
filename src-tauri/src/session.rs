@@ -100,10 +100,31 @@ pub(crate) fn summary_of(loaded: &Loaded) -> LoadSummary {
     }
 }
 
+/// The sentence a launch leaves behind when the folder it was pointed at could
+/// not be reopened: what failed, and that the picker is the only way back — a
+/// phone has no path to fall back on, and a storage grant can be revoked between
+/// launches.
+// The one caller is the phone's restore, which a desktop build does not have;
+// the test drives the same sentence.
+#[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+pub(crate) fn reopen_failure(error: &str) -> String {
+    format!(
+        "The ledger folder could not be reopened: {error}. Pick it again with “Open folder…” — the app may have lost access to it."
+    )
+}
+
 /// Shared app state: the currently loaded ledger, if any.
 #[derive(Default)]
 pub struct AppState {
     pub(crate) loaded: RwLock<Option<Loaded>>,
+    /// The last thing that went wrong with the ledger's *folder* rather than
+    /// with the ledger: it could not be reopened at launch, or a file the app
+    /// wrote into its private copy never reached it. Kept here because these
+    /// failures have no command to fail — a restore runs before any window
+    /// exists, and a best-effort flush has already written what the reader
+    /// asked for — so this is the only place the reader can be told. Cleared by
+    /// the next write to the folder that works.
+    pub(crate) storage_failure: RwLock<Option<String>>,
 }
 
 impl AppState {
@@ -123,7 +144,34 @@ impl AppState {
         };
         Self {
             loaded: RwLock::new(loaded),
+            storage_failure: RwLock::new(None),
         }
+    }
+
+    /// Record what went wrong with the folder, as a sentence the UI can show
+    /// over IPC (`storage_error`). It replaces any earlier one: the newest
+    /// failure is the one worth telling.
+    pub(crate) fn note_storage_failure(&self, message: impl Into<String>) {
+        *self
+            .storage_failure
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(message.into());
+    }
+
+    /// Forget it: something reached the folder, so the warning is stale.
+    pub(crate) fn clear_storage_failure(&self) {
+        *self
+            .storage_failure
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// What last went wrong with the folder, for the `storage_error` command.
+    pub(crate) fn storage_failure(&self) -> Option<String> {
+        self.storage_failure
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -145,6 +193,45 @@ mod tests {
     use std::fs;
 
     use crate::testing::TempDir;
+
+    /// The sentence a failed restore leaves behind survives being read — the UI
+    /// asks for it long after `setup` ran — and a later success clears it.
+    #[test]
+    fn a_folder_failure_is_remembered_until_the_folder_answers_again() {
+        let state = AppState::default();
+        assert_eq!(
+            state.storage_failure(),
+            None,
+            "a fresh state has nothing to say"
+        );
+
+        state.note_storage_failure(reopen_failure("permission denied"));
+        let remembered = state.storage_failure().expect("the failure was not kept");
+        assert!(
+            remembered.contains("could not be reopened"),
+            "the reason is missing: {remembered}"
+        );
+        assert!(
+            remembered.contains("Open folder"),
+            "the way out is missing: {remembered}"
+        );
+        assert!(
+            remembered.contains("permission denied"),
+            "the cause is missing: {remembered}"
+        );
+        // Reading does not consume it: the alert may be drawn more than once.
+        assert_eq!(
+            state.storage_failure().as_deref(),
+            Some(remembered.as_str())
+        );
+
+        state.clear_storage_failure();
+        assert_eq!(
+            state.storage_failure(),
+            None,
+            "a success must clear the warning"
+        );
+    }
 
     /// A folder is a ledger as soon as it holds a root journal: the loader's
     /// discovery names it, and the session's root becomes that journal — the

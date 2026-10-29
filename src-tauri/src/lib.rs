@@ -2,14 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Ledger app backend. One module per concern: the command surface
-//! (`commands`); ledger views (`session`, `accounts`, `source`, `files`,
-//! `budget`, `reports`); edits (`editing`, `rewrite`, `conflict*`); storage,
-//! git and history (`storage`, `repo`, `git`, `git_ops`, `history`); fetchers
-//! (`prices`, `index*`, `dashboards`); the assistant (`ai`, `ai_cmd`,
-//! `tools`, `attachments`, `conversations`); the embedded language server
-//! (`lsp`); and the original payload types (`model`). `AGENTS.md` says what
-//! each one is for.
+//! Ledger app backend: the same concerns the window and the `ledger` binary
+//! drive (see `AGENTS.md` for the module map — it is the one place that lists
+//! them, so a new module is named there and not here).
+//!
+//! Two rules hold for every module: one that touches Tauri lives here or in
+//! `commands`, and one that must run headless (the CLI's façade, the mirror, the
+//! loader's views) does not — which is why the backend splits into a Tauri-bound
+//! command layer over the same functions `api` exposes.
 
 mod accounts;
 mod ai;
@@ -76,7 +76,6 @@ pub type AppRuntime = tauri::Wry;
 /// backend does not know, which is invisible until something tries it.
 pub fn command_builder() -> Builder<AppRuntime> {
     Builder::<AppRuntime>::new().commands(collect_commands![
-        greet,
         accounts,
         account_transactions,
         load_ledger,
@@ -118,6 +117,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         ai_stream,
         quick_add_suggestions,
         storage_kind,
+        storage_error,
         sync_ledger_tree,
         reload_ledger_tree,
         resolve_tree_conflicts,
@@ -165,6 +165,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
     ])
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = command_builder();
 

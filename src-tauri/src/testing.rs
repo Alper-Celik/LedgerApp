@@ -7,15 +7,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::accounts::account_transaction_views;
 use crate::model::{PostingEdit, TransactionEdit, TransactionView};
 use crate::session::{AppState, load_baselined};
 
-/// A throwaway directory holding a real ledger file and a real repository,
-/// removed when the fixture drops.
+/// A throwaway directory for one test's files — the ledger, its includes, or
+/// whatever a file tool is pointed at — removed when the fixture drops.
 pub(crate) struct TempDir {
     path: PathBuf,
 }
@@ -36,6 +35,22 @@ impl TempDir {
 
     pub(crate) fn file(&self, name: &str) -> PathBuf {
         self.path.join(name)
+    }
+
+    /// Write `text` to `name` under the directory, creating any parent
+    /// directories, and hand back the path.
+    ///
+    /// Every test that exercises a file tool starts the same way — a throwaway
+    /// directory and a file or two in it — and each such module had grown its
+    /// own `scratch`/`seed` pair to do it. The write lives here once so those
+    /// fixtures only say which file holds what.
+    pub(crate) fn seed(&self, name: &str, text: &str) -> PathBuf {
+        let path = self.file(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, text).unwrap();
+        path
     }
 
     /// The directory itself, for the tests that hand a folder to the loader.
@@ -84,11 +99,12 @@ pub(crate) fn committed_fixture(dir: &TempDir, ledger: &str) -> (git2::Repositor
 }
 
 /// The app state around a freshly loaded copy of `path`, baseline included —
-/// the same `load_baselined` the app itself uses.
+/// the same `load_baselined` the app itself uses. Every other field keeps the
+/// state's own default, so a new field on `AppState` does not reach here.
 pub(crate) fn loaded_state(path: &Path) -> AppState {
-    AppState {
-        loaded: RwLock::new(Some(load_baselined(path).unwrap())),
-    }
+    let state = AppState::default();
+    *state.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(load_baselined(path).unwrap());
+    state
 }
 
 /// The `TransactionView.id` the frontend would be holding for `narration`,

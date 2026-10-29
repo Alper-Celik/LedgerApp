@@ -271,40 +271,36 @@ fn clip(line: &str) -> String {
 mod tests {
     use std::fs;
 
+    use crate::testing::TempDir;
+
     use super::{DEFAULT_GLOB_RESULTS, DEFAULT_GREP_RESULTS, glob_paths, grep};
 
     struct Fixture {
-        dir: tempfile::TempDir,
+        dir: TempDir,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let write = |name: &str, text: &str| {
-                let path = dir.path().join(name);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).unwrap();
-                }
-                fs::write(path, text).unwrap();
-            };
-            write(
+            let dir = TempDir::new("tool-search");
+            dir.seed(
                 "main.bean",
                 "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n",
             );
-            write("notes.md", "# Assets\n");
-            write("ignored.bean", "2026-01-03 open Assets:Ignored\n");
-            write(".gitignore", "ignored.bean\n");
-            write(".hidden.bean", "2026-01-04 open Assets:Hidden\n");
-            write("sub/also.bean", "2026-01-05 open Assets:Deeper\n");
-            write("sub/ignored-dir/x.bean", "2026-01-06 open Assets:Dir\n");
-            write("sub/ignored-dir/.gitignore", "*.bean\n");
-            write("binary.bean", "");
-            fs::write(dir.path().join("binary.bean"), [0u8, 1, 2, 3]).unwrap();
+            dir.seed("notes.md", "# Assets\n");
+            dir.seed("ignored.bean", "2026-01-03 open Assets:Ignored\n");
+            dir.seed(".gitignore", "ignored.bean\n");
+            dir.seed(".hidden.bean", "2026-01-04 open Assets:Hidden\n");
+            dir.seed("sub/also.bean", "2026-01-05 open Assets:Deeper\n");
+            dir.seed("sub/ignored-dir/x.bean", "2026-01-06 open Assets:Dir\n");
+            dir.seed("sub/ignored-dir/.gitignore", "*.bean\n");
+            // Not text: `seed` takes a `&str`, and grep must skip the file for
+            // its bytes, so the write stays here.
+            fs::write(dir.file("binary.bean"), [0u8, 1, 2, 3]).unwrap();
             Self { dir }
         }
 
         fn root(&self) -> &std::path::Path {
-            self.dir.path()
+            self.dir.dir()
         }
     }
 
@@ -383,10 +379,10 @@ mod tests {
 
     #[test]
     fn grep_clips_long_lines_and_rejects_bad_input() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new("tool-search-long");
         let long = "x".repeat(super::MAX_LINE_CHARS + 50);
-        fs::write(dir.path().join("long.bean"), format!("{long}\n")).unwrap();
-        let found = grep(dir.path(), dir.path(), "x", None, false, 10).unwrap();
+        dir.seed("long.bean", &format!("{long}\n"));
+        let found = grep(dir.dir(), dir.dir(), "x", None, false, 10).unwrap();
         assert_eq!(
             found.matches[0].text.chars().count(),
             super::MAX_LINE_CHARS + 1
@@ -394,22 +390,22 @@ mod tests {
         assert!(found.matches[0].text.ends_with('…'));
 
         assert!(
-            grep(dir.path(), dir.path(), "(", None, false, 10)
+            grep(dir.dir(), dir.dir(), "(", None, false, 10)
                 .unwrap_err()
                 .contains("invalid regular expression")
         );
         assert!(
-            grep(dir.path(), dir.path(), "", None, false, 10)
+            grep(dir.dir(), dir.dir(), "", None, false, 10)
                 .unwrap_err()
                 .contains("empty")
         );
         assert!(
-            grep(dir.path(), dir.path(), "x", None, false, 0)
+            grep(dir.dir(), dir.dir(), "x", None, false, 0)
                 .unwrap_err()
                 .contains("at least 1")
         );
         assert!(
-            grep(dir.path(), dir.path(), "x", Some("["), false, 10)
+            grep(dir.dir(), dir.dir(), "x", Some("["), false, 10)
                 .unwrap_err()
                 .contains("invalid glob")
         );

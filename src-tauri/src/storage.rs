@@ -323,6 +323,10 @@ pub fn sync_back(source: &dyn TreeSource, target_dir: &Path) -> Result<SyncRepor
 /// device never pushed — before anything knows the picked folder is a ledger at
 /// all; a folder without a journal would leave the app holding a ledger whose
 /// files were just deleted.
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code) // called by the Android pick; the tests exercise it here
+)]
 pub fn adopt_tree(source: &dyn TreeSource, target_dir: &Path) -> Result<(), String> {
     let _serial = serialized();
     let name = target_dir
@@ -345,12 +349,18 @@ pub fn adopt_tree(source: &dyn TreeSource, target_dir: &Path) -> Result<(), Stri
     reset_mirror(target_dir)?;
     fs::rename(&staging, target_dir)
         .map_err(|error| format!("cannot replace {}: {error}", target_dir.display()))?;
-    fs::rename(Manifest::path(&staging), Manifest::path(target_dir)).map_err(|error| {
-        format!(
-            "cannot replace {}: {error}",
-            Manifest::path(target_dir).display()
-        )
-    })
+    if let Err(error) = fs::rename(Manifest::path(&staging), Manifest::path(target_dir)) {
+        // The mirror is already the new folder's copy, so the base can simply be
+        // forgotten: with none, the next pass takes the folder as the record and
+        // pulls. Leaving the previous folder's base there would compare the two
+        // folders' files against each other.
+        let _ = fs::remove_file(Manifest::path(target_dir));
+        return Err(format!(
+            "cannot adopt the manifest of {}: {error}",
+            target_dir.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Reconcile the mirror and the tree, file by file, with the last agreed bytes
@@ -909,7 +919,7 @@ mod tests {
     use std::fs;
 
     use super::{
-        LocalTree, Resolve, StorageKind, TreeEntry, TreeSource, kind, mirror_into,
+        LocalTree, Resolve, StorageKind, TreeEntry, TreeSource, adopt_tree, kind, mirror_into,
         resolve_conflicts, sync_back,
     };
     use crate::testing::TempDir;
@@ -963,6 +973,42 @@ mod tests {
             fs::read_to_string(mirror.join("accounts/2026.bean")).unwrap(),
             ACCOUNTS
         );
+    }
+
+    /// A picked folder that is not a ledger must not cost the mirror that is
+    /// already open: the app would hold a ledger whose files were just replaced
+    /// by another folder's, or by nothing at all.
+    #[test]
+    fn a_picked_folder_without_a_journal_leaves_the_previous_mirror_alone() {
+        let source = tree("tree-adopt-source");
+        let target = TempDir::new("tree-adopt-target");
+        let mirror = target.file("mirror");
+        mirror_into(&LocalTree::new(source.dir()), &mirror).unwrap();
+
+        // A folder that holds files but no journal the loader accepts.
+        let other = TempDir::new("tree-adopt-other");
+        fs::write(other.file("notes.txt"), "not a ledger\n").unwrap();
+
+        let error = adopt_tree(&LocalTree::new(other.dir()), &mirror).unwrap_err();
+
+        assert!(!error.is_empty());
+        // The previous mirror is intact, and so is its base.
+        assert_eq!(fs::read_to_string(mirror.join("main.bean")).unwrap(), MAIN);
+        assert!(!mirror.join("notes.txt").exists());
+        let still_current = sync_back(&LocalTree::new(source.dir()), &mirror).unwrap();
+        assert!(still_current.is_empty(), "{still_current:?}");
+
+        // A folder with a journal is adopted, and the old one's files go.
+        let good = TempDir::new("tree-adopt-good");
+        fs::write(
+            good.file("main.bean"),
+            "option \"operating_currency\" \"USD\"\n\n2026-01-01 open Assets:Wallet\n",
+        )
+        .unwrap();
+        adopt_tree(&LocalTree::new(good.dir()), &mirror).unwrap();
+
+        assert!(mirror.join("main.bean").exists());
+        assert!(!mirror.join("accounts/2026.bean").exists());
     }
 
     #[test]

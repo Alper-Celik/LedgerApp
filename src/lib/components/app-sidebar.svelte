@@ -35,7 +35,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { git, refreshGit } from "$lib/git.svelte.js";
-	import { chooseLedger, ledger, refreshLedger } from "$lib/ledger.svelte.js";
+	import { chooseLedger, ledger, refreshLedger, refreshStorageError } from "$lib/ledger.svelte.js";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { setSidebarWidth, sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import { cn } from "$lib/utils.js";
@@ -160,6 +160,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// Which journal the app opened (the CLI argument, LEDGER_PATH or
 		// main.bean), so Settings can name it before a folder is picked.
 		refreshLedger();
+		// And, when there is none, why the folder it was pointed at could not be
+		// reopened: the restore happened before this window existed.
+		refreshStorageError();
 		// Whether it is under git decides if the Diff/Commit views exist at all.
 		refreshGit();
 	});

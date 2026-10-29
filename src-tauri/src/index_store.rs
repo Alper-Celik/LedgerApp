@@ -92,7 +92,7 @@ pub(crate) fn load_indexes(dir: &Path) -> Result<Vec<IndexSeries>, String> {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
-            return Err(format!("could not read {}: {error}", path.display()));
+            return Err(format!("cannot read {}: {error}", path.display()));
         }
     };
     let stored: Vec<IndexSeries> = serde_json::from_str(&text)

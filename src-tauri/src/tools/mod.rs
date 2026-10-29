@@ -476,18 +476,16 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    use crate::testing::TempDir;
+
     use super::{ToolError, expected_args, invoke, registry};
 
-    fn scratch() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+    fn scratch() -> TempDir {
+        TempDir::new("tools")
     }
 
-    fn seed(dir: &tempfile::TempDir, name: &str, text: &str) {
-        let path = dir.path().join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(path, text).unwrap();
+    fn seed(dir: &TempDir, name: &str, text: &str) {
+        dir.seed(name, text);
     }
 
     #[test]
@@ -499,14 +497,14 @@ mod tests {
             "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n",
         );
 
-        let read = invoke(dir.path(), "read", &json!({"path": "main.bean"})).unwrap();
+        let read = invoke(dir.dir(), "read", &json!({"path": "main.bean"})).unwrap();
         assert_eq!(read["path"], "main.bean");
         assert_eq!(read["total_lines"], 2);
         assert_eq!(read["truncated"], false);
         let first = read["lines"][0]["hash"].as_str().unwrap().to_string();
 
         let edited = invoke(
-            dir.path(),
+            dir.dir(),
             "edit",
             &json!({
                 "path": "main.bean",
@@ -523,14 +521,14 @@ mod tests {
         assert_eq!(edited["first"], 2);
         assert_eq!(edited["lines"][0]["text"], "; a note");
         assert_eq!(
-            fs::read_to_string(dir.path().join("main.bean")).unwrap(),
+            fs::read_to_string(dir.dir().join("main.bean")).unwrap(),
             "2026-01-01 open Assets:Bank\n; a note\n2026-01-02 open Assets:Cash\n"
         );
 
         // Through the dispatcher a stale anchor is a failed call, not bad
         // arguments: the caller sent a well-formed request the file outran.
         let error = invoke(
-            dir.path(),
+            dir.dir(),
             "edit",
             &json!({
                 "path": "main.bean",
@@ -541,7 +539,7 @@ mod tests {
         assert!(matches!(error, ToolError::Failed { .. }), "{error:?}");
         assert!(error.to_string().contains("line changed at 2"), "{error}");
 
-        let missing = invoke(dir.path(), "read", &json!({"path": "gone.bean"})).unwrap_err();
+        let missing = invoke(dir.dir(), "read", &json!({"path": "gone.bean"})).unwrap_err();
         assert!(matches!(missing, ToolError::Failed { .. }), "{missing:?}");
         assert!(missing.to_string().contains("no such file"), "{missing}");
     }
@@ -551,7 +549,7 @@ mod tests {
         let dir = scratch();
         seed(&dir, "main.bean", "x\n");
         let outside = dir
-            .path()
+            .dir()
             .parent()
             .unwrap()
             .join(format!("elsewhere-{}.bean", std::process::id()));
@@ -569,7 +567,7 @@ mod tests {
                 ),
                 ("grep", json!({"pattern": "x", "path": path})),
             ] {
-                let error = invoke(dir.path(), tool, &args).unwrap_err();
+                let error = invoke(dir.dir(), tool, &args).unwrap_err();
                 assert!(
                     matches!(error, ToolError::Failed { .. }),
                     "{tool} {path}: {error:?}"
@@ -637,7 +635,7 @@ mod tests {
         let dir = scratch();
         seed(&dir, "main.bean", "2026-01-01 open Assets:Bank\n");
 
-        let error = invoke(dir.path(), "bash", &json!({})).unwrap_err();
+        let error = invoke(dir.dir(), "bash", &json!({})).unwrap_err();
         assert_eq!(
             error,
             ToolError::UnknownTool {
@@ -648,17 +646,17 @@ mod tests {
         assert!(message.contains("unknown tool `bash`"), "{message}");
         assert!(message.contains("read, edit, grep, glob"), "{message}");
 
-        let error = invoke(dir.path(), "read", &json!({})).unwrap_err();
+        let error = invoke(dir.dir(), "read", &json!({})).unwrap_err();
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("`path`"), "{error}");
         assert!(error.to_string().contains("required"), "{error}");
 
-        let error = invoke(dir.path(), "read", &json!({"path": 7})).unwrap_err();
+        let error = invoke(dir.dir(), "read", &json!({"path": 7})).unwrap_err();
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("invalid type"), "{error}");
 
         let error = invoke(
-            dir.path(),
+            dir.dir(),
             "read",
             &json!({"path": "main.bean", "offest": 2}),
         )
@@ -666,11 +664,11 @@ mod tests {
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("offest"), "{error}");
 
-        let error = invoke(dir.path(), "read", &json!(["main.bean"])).unwrap_err();
+        let error = invoke(dir.dir(), "read", &json!(["main.bean"])).unwrap_err();
         assert!(error.to_string().contains("JSON object"), "{error}");
 
         let error = invoke(
-            dir.path(),
+            dir.dir(),
             "edit",
             &json!({
                 "path": "main.bean",
@@ -682,75 +680,19 @@ mod tests {
         assert!(error.to_string().contains("unknown variant"), "{error}");
 
         let error =
-            invoke(dir.path(), "edit", &json!({"path": "main.bean", "ops": []})).unwrap_err();
+            invoke(dir.dir(), "edit", &json!({"path": "main.bean", "ops": []})).unwrap_err();
         assert!(
             error.to_string().contains("at least one operation"),
             "{error}"
         );
 
-        let error = invoke(dir.path(), "grep", &json!({"pattern": "(", "path": "."})).unwrap_err();
+        let error = invoke(dir.dir(), "grep", &json!({"pattern": "(", "path": "."})).unwrap_err();
         assert!(
             error.to_string().contains("invalid regular expression"),
             "{error}"
         );
     }
 
-    #[test]
-    fn every_schema_property_is_accepted() {
-        for definition in registry() {
-            assert!(!expected_args(&definition.schema).is_empty());
-            let dir = scratch();
-            let args = dummy(&definition.schema);
-            let result = invoke(dir.path(), definition.name, &args);
-            if let Err(ToolError::BadArgs { message, .. }) = &result {
-                panic!(
-                    "{}: the schema and the argument type disagree: {message}",
-                    definition.name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_required_argument_is_named_when_missing() {
-        for definition in registry() {
-            let dir = scratch();
-            let required: Vec<String> = definition
-                .schema
-                .get("required")
-                .and_then(Value::as_array)
-                .map(|names| {
-                    names
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            assert!(
-                !required.is_empty(),
-                "{}: nothing is required",
-                definition.name
-            );
-            for name in required {
-                let mut args = dummy(&definition.schema);
-                args.as_object_mut().unwrap().remove(&name);
-                let error = invoke(dir.path(), definition.name, &args).unwrap_err();
-                assert!(
-                    matches!(error, ToolError::BadArgs { .. }),
-                    "{}: {error:?}",
-                    definition.name
-                );
-                assert!(
-                    error.to_string().contains(&name),
-                    "{}: the message does not name `{name}`: {error}",
-                    definition.name
-                );
-            }
-        }
-    }
-
-    /// The `properties` of a schema, each with a value its type accepts.
     fn dummy(schema: &Value) -> Value {
         let mut object = serde_json::Map::new();
         if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
@@ -797,64 +739,59 @@ mod tests {
         }
     }
 
-    struct Declared {
-        annotation: String,
-        has_default: bool,
-        default: String,
-    }
-
-    /// The parameters and docstring of the stub for `name`.
-    fn parse_stub(
-        python: &str,
-        name: &str,
-    ) -> (std::collections::BTreeMap<String, Declared>, String) {
-        let mut parameters = std::collections::BTreeMap::new();
-        let mut lines = python
-            .lines()
-            .skip_while(|line| !line.starts_with(&format!("def {name}(")));
-        let signature = lines.next().unwrap();
-        let inside = signature
-            .strip_prefix(&format!("def {name}("))
-            .and_then(|rest| rest.strip_suffix(") -> dict[str, Any]:"))
-            .unwrap_or_else(|| panic!("unexpected stub signature: {signature}"));
-        if !inside.is_empty() {
-            for parameter in inside.split(", ") {
-                let (name, rest) = parameter.split_once(": ").unwrap();
-                let (annotation, default) = match rest.split_once(" = ") {
-                    Some((annotation, default)) => (annotation, Some(default)),
-                    None => (rest, None),
-                };
-                parameters.insert(
-                    name.to_string(),
-                    Declared {
-                        annotation: annotation.to_string(),
-                        has_default: default.is_some(),
-                        default: default.unwrap_or_default().to_string(),
-                    },
+    #[test]
+    fn every_schema_property_is_accepted() {
+        for definition in registry() {
+            assert!(!expected_args(&definition.schema).is_empty());
+            let dir = scratch();
+            let args = dummy(&definition.schema);
+            let result = invoke(dir.dir(), definition.name, &args);
+            if let Err(ToolError::BadArgs { message, .. }) = &result {
+                panic!(
+                    "{}: the schema and the argument type disagree: {message}",
+                    definition.name
                 );
             }
         }
+    }
 
-        let mut docstring = Vec::new();
-        let mut opened = false;
-        for line in lines {
-            let trimmed = line.trim();
-            if !opened {
-                if trimmed == "\"\"\"" {
-                    opened = true;
-                    continue;
-                }
-                if trimmed.starts_with("\"\"\"") {
-                    docstring.push(trimmed.trim_matches('"').to_string());
-                    continue;
-                }
+    #[test]
+    fn every_required_argument_is_named_when_missing() {
+        for definition in registry() {
+            let dir = scratch();
+            let required: Vec<String> = definition
+                .schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(
+                !required.is_empty(),
+                "{}: nothing is required",
+                definition.name
+            );
+            for name in required {
+                let mut args = dummy(&definition.schema);
+                args.as_object_mut().unwrap().remove(&name);
+                let error = invoke(dir.dir(), definition.name, &args).unwrap_err();
+                assert!(
+                    matches!(error, ToolError::BadArgs { .. }),
+                    "{}: {error:?}",
+                    definition.name
+                );
+                assert!(
+                    error.to_string().contains(&name),
+                    "{}: the message does not name `{name}`: {error}",
+                    definition.name
+                );
             }
-            if trimmed == "\"\"\"" {
-                break;
-            }
-            docstring.push(trimmed.to_string());
         }
-        (parameters, docstring.join(" "))
     }
 
     /// A draft-07 subset strict enough to catch a typo or a misplaced keyword.

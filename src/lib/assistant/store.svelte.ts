@@ -380,7 +380,7 @@ export class Assistant {
 		const turn = ++this.turn;
 		// The conversation the turn writes to, captured once: `activeId` is reset
 		// by a ledger switch, and appending under an empty id creates a file.
-		const conversation = this.activeId;
+		let conversation = this.activeId;
 		try {
 			const prepared = await this.mediaFor(attachments, settings);
 			if (!this.current(turn)) return false;
@@ -390,7 +390,12 @@ export class Assistant {
 			const body = trimmed || "Please look at the attached file.";
 			this.entries.push({ kind: "user", text: body });
 			this.wire.push(userWire(body));
-			await this.saveMessage({ role: "user", text: body, data: null }, titleFrom(body), turn, conversation);
+			conversation = await this.saveMessage(
+				{ role: "user", text: body, data: null },
+				titleFrom(body),
+				turn,
+				conversation
+			);
 			if (!this.current(turn)) return false;
 			await this.rounds(prepared.media, turn, conversation);
 		} finally {
@@ -513,7 +518,7 @@ export class Assistant {
 			// itself lives on each tool message, so there is nothing worth a
 			// section of its own in the ledger's file — or in a bubble.
 			if (answer.trim()) {
-				await this.saveMessage(
+				conversation = await this.saveMessage(
 					{ role: "assistant", text: answer, data: null },
 					undefined,
 					turn,
@@ -561,7 +566,7 @@ export class Assistant {
 					tool_calls: [],
 					tool_call_id: call.id,
 				});
-				await this.saveMessage(
+				conversation = await this.saveMessage(
 					{
 						role: "tool",
 						text: outcome.text,
@@ -631,8 +636,8 @@ export class Assistant {
 		title?: string,
 		turn = this.turn,
 		conversation = this.activeId
-	): Promise<void> {
-		if (!this.current(turn)) return;
+	): Promise<string> {
+		if (!this.current(turn)) return conversation;
 		const model = this.settings?.model ?? "";
 		const id = conversation;
 		const conversationTitle =
@@ -647,18 +652,24 @@ export class Assistant {
 				message
 			);
 			if (result.status === "error") {
-				this.saveError = result.error;
-				return;
+				if (this.current(turn)) this.saveError = result.error;
+				return conversation;
 			}
 			if (!id && this.current(turn)) {
 				this.activeId = result.data.id;
 				this.activeTitle = result.data.title;
 			}
-			this.mergeSummary(result.data);
-			this.saveError = "";
-			this.sessionsError = "";
+			// A turn that outlived its ledger must not append its summary — or its
+			// error — to the new ledger's list.
+			if (this.current(turn)) {
+				this.mergeSummary(result.data);
+				this.saveError = "";
+				this.sessionsError = "";
+			}
+			return id || result.data.id;
 		} catch (cause) {
-			this.saveError = messageOf(cause);
+			if (this.current(turn)) this.saveError = messageOf(cause);
+			return conversation;
 		}
 	}
 

@@ -6,6 +6,7 @@ import { invalidateAll } from "$app/navigation";
 import { commands, type LoadSummary } from "../bindings";
 import { messageOf } from "./errors.js";
 import { noteSyncReadError, noteTreeReport } from "./sync.svelte.js";
+import { resetLanguageServer } from "./lsp.js";
 import { bumpLedgerEpoch, bumpLedgerRevision } from "./ledger-revision.svelte.js";
 
 /**
@@ -17,6 +18,12 @@ export const ledger = $state({
 	summary: null as LoadSummary | null,
 	/** Why the last open failed, when it did. */
 	error: "",
+	/**
+	 * Why the folder the app was pointed at last launch could not be reopened —
+	 * set before any window existed, so it is read from the backend rather than
+	 * remembered here. Empty when there is nothing to report.
+	 */
+	storageError: "",
 	/** A load is in flight. */
 	opening: false,
 	/** The folder picker is showing. */
@@ -33,6 +40,20 @@ export async function refreshLedger() {
 		ledger.summary = await commands.ledgerSummary();
 	} catch {
 		// No backend — a plain browser during development. Nothing to report.
+	}
+}
+
+/**
+ * Read why the last restore failed, if it did. Called on mount beside
+ * `refreshLedger`: a phone whose storage grant was revoked opens with no ledger
+ * and this is the only account of it.
+ */
+export async function refreshStorageError() {
+	try {
+		ledger.storageError = (await commands.storageError()) ?? "";
+	} catch {
+		// No backend, or a build from before the command existed: a missing
+		// explanation is no worse than a wrong one.
 	}
 }
 
@@ -79,7 +100,7 @@ export async function syncTree(): Promise<void> {
 	try {
 		const result = await commands.syncLedgerTree();
 		if (result.status === "error") {
-			noteTreeReport({ external: [], conflicts: [], error: result.error });
+			noteTreeReport({ error: result.error });
 			return;
 		}
 		const report = result.data;
@@ -88,7 +109,10 @@ export async function syncTree(): Promise<void> {
 		// the private mirror would be lost on the next restore.
 		noteTreeReport({ external: report.external, conflicts: report.conflicts });
 	} catch (cause) {
-		noteTreeReport({ external: [], conflicts: [], error: messageOf(cause) });
+		// A pass that failed says nothing about which files an earlier one found:
+		// only the failure is news, and it must not erase the conflicts whose
+		// buttons settle them.
+		noteTreeReport({ error: messageOf(cause) });
 	}
 }
 
@@ -143,10 +167,21 @@ export async function openLedgerPath(path: string): Promise<boolean> {
 			ledger.error = result.error;
 			return false;
 		}
+		const previous = ledger.summary?.path ?? "";
 		ledger.summary = result.data;
-		// A different journal: drafts, selections and half-typed entries that
-		// remember an id from the previous one are now about nothing.
-		bumpLedgerEpoch();
+		// The backend cleared any restore failure as soon as the folder was
+		// picked; read it so an alert about a folder that is now open goes away.
+		await refreshStorageError();
+		// A *different* journal invalidates the ids, conversations and selections
+		// that remember one; reading the same journal again (the sync bar's
+		// reload, a git operation) renumbers entries too, and `ledgerRevision` is
+		// what every id-bearing surface watches for that. Bumping the epoch on a
+		// plain reload would discard an open draft or transcript that is still
+		// about this very ledger.
+		if (result.data.path !== previous) bumpLedgerEpoch();
+		// The backend stops its language server on every load — even of the same
+		// journal — so the client has to start one again either way.
+		resetLanguageServer();
 		bumpLedgerRevision();
 		await invalidateAll();
 		return true;

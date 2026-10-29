@@ -1185,9 +1185,7 @@ option \"operating_currency\" \"TRY\"
     fn fetch_with_no_ledger_and_no_requests_is_an_empty_answer() {
         // No ledger loaded: the mapping is empty, and an empty batch asks
         // nothing of any provider.
-        let state = AppState {
-            loaded: std::sync::RwLock::new(None),
-        };
+        let state = AppState::default();
         let outcomes = fetch(&state, Vec::new()).expect("an empty batch is not a failure");
         assert!(outcomes.is_empty());
     }

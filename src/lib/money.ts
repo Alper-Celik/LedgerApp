@@ -69,7 +69,7 @@ export function signOf(units: string): number {
  * to an integer — `+`, `-`, `.` and leading zeroes dropped — without ever
  * passing through a float.
  */
-export type Decimal = { negative: boolean; whole: string; fraction: string };
+type Decimal = { negative: boolean; whole: string; fraction: string };
 
 /**
  * `text` as a sign and digit runs, or `null` when it is not a plain decimal.
@@ -190,17 +190,18 @@ function currencyStyle(currency: string): CurrencyStyle {
  * money never passes through a float. `[]` sums to `0`.
  */
 export function sumDecimals(values: string[]): string {
-	let scale = 0;
-	for (const value of values) {
-		const point = value.indexOf(".");
-		if (point !== -1 && value.length - point - 1 > scale) scale = value.length - point - 1;
-	}
+	// Through the one parser: a value this module cannot read is a bug in the
+	// caller, and re-deriving the rule here is how the two spellings drift apart.
+	const parsed = values.map((value) => {
+		const decimal = parseDecimal(value);
+		if (!decimal) throw new Error(`\`${value}\` is not a decimal amount`);
+		return decimal;
+	});
+	const scale = parsed.reduce((widest, value) => Math.max(widest, value.fraction.length), 0);
 	let total = 0n;
-	for (const value of values) {
-		const negative = value.startsWith("-");
-		const [whole, fraction = ""] = (negative ? value.slice(1) : value).split(".");
-		const scaled = BigInt(`${whole}${fraction.padEnd(scale, "0")}`);
-		total += negative ? -scaled : scaled;
+	for (const value of parsed) {
+		const scaled = BigInt(`${value.whole}${value.fraction.padEnd(scale, "0")}`);
+		total += value.negative ? -scaled : scaled;
 	}
 	const digits = (total < 0n ? -total : total).toString().padStart(scale + 1, "0");
 	const text = scale === 0 ? digits : `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;

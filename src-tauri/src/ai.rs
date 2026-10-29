@@ -370,10 +370,10 @@ pub fn load(dir: &Path) -> Result<AiConfig, String> {
 
 /// Write the configuration into `dir`, replacing any previous one in one step.
 ///
-/// The file holds a secret, so it is written through a temporary file created
-/// with mode 0600 (Unix) and renamed over its destination; the rename is atomic
-/// and the mode is applied to the destination too, so an earlier file written
-/// with different permissions ends up private as well.
+/// The file holds a secret, so the shared writer gives the temporary file mode
+/// 0600 (Unix) *before* it is renamed over the destination: the bytes are never
+/// readable by anyone else, and an earlier file written with wider permissions is
+/// replaced by a private one rather than gaining them.
 pub fn save(dir: &Path, config: &AiConfig) -> Result<(), String> {
     fs::create_dir_all(dir)
         .map_err(|error| format!("cannot create `{}`: {error}", dir.display()))?;
@@ -2862,7 +2862,7 @@ mod tests {
             .expect("the directory is read")
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains(".tmp-"))
+            .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }

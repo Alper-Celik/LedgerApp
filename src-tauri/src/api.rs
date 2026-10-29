@@ -150,6 +150,7 @@ pub fn open(path: &Path) -> Result<Opened, String> {
         errors,
         state: AppState {
             loaded: RwLock::new(Some(loaded)),
+            ..AppState::default()
         },
     })
 }

@@ -2950,7 +2950,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-runtime-qt",
  "tauri-specta",
- "tempfile",
  "ureq 2.12.1",
 ]
 

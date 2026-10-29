@@ -17,8 +17,8 @@ the ledger through typed tools.
   validate, query), behind Tauri's [Qt runtime](vendor/TauriQt) (Qt windowing + QtWebEngine)
   on Linux and stock wry elsewhere.
 - **Frontend** — SvelteKit + Svelte 5 runes, Tailwind and shadcn-svelte, Monaco for the source
-  editor. Commands are typed end to end: `src-tauri/src/commands.rs` is exported to
-  `src/bindings.ts` by specta.
+  editor. Commands are typed end to end: the registry in `src-tauri/src/lib.rs`
+  (`command_builder()`) is exported to `src/bindings.ts` by specta.
 
 ## Running it
 

@@ -427,14 +427,13 @@ fn apply_file_edit(
     reported: Vec<String>,
     origin: Origin,
 ) -> Result<(), String> {
-    if rewritten == previous {
-        // The edit describes the file exactly as it already stands.
-        return Ok(());
-    }
-
     // The offsets came from the loaded copy; a file rewritten under us (an
     // editor write, a checkout) would be clobbered by spans that no longer line
-    // up with it.
+    // up with it. This runs before the "nothing changed" short-circuit on
+    // purpose: text equal to the *session's* copy says nothing about the disk,
+    // and a caller that treats `Ok` as "the bytes are there" (a conflict
+    // resolution deleting the copy it merged) would otherwise drop a version
+    // that was never written.
     let previous_bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if std::str::from_utf8(&previous_bytes).ok() != Some(previous) {
         return Err(format!(
@@ -453,6 +452,12 @@ fn apply_file_edit(
             "{} changed since this draft was started; reopen it to edit the current text",
             path.display()
         ));
+    }
+
+    // Now the disk is known to hold what the session holds, so "the text is not
+    // new" means the file already says exactly that.
+    if rewritten == previous {
+        return Ok(());
     }
 
     // Reload the journal this session was opened with, never the file just
@@ -1312,6 +1317,27 @@ option \"operating_currency\" \"USD\"
         assert!(modified_narrations(&state).is_empty());
         assert!(ledger_diff_text(&state).is_err());
         assert!(commit_staged(&state, "no repository").is_err());
+    }
+
+    /// Writing exactly what the session holds still checks the disk: a caller
+    /// that reads success as "those bytes are on disk" (a conflict resolution
+    /// deleting the copy it merged) must not be told so about a stale session.
+    #[test]
+    fn a_no_op_write_still_refuses_a_stale_session() {
+        let dir = TempDir::new("no-op-stale");
+        let (_repo, path, text) = single_file_fixture(&dir);
+        let state = loaded_state(&path);
+        let name = path.display().to_string();
+
+        // The peer's version lands; the session is not told.
+        let theirs = format!("{text}\n; written elsewhere \n");
+        fs::write(&path, &theirs).unwrap();
+
+        // The text the session holds is "already there" only in its own view.
+        let error = edit_named_file_source(&state, &name, &text, None).unwrap_err();
+
+        assert!(error.contains("changed on disk"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
     }
 
     /// A draft written against text the file no longer holds is refused, and the

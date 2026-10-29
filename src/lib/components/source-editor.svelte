@@ -412,6 +412,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				error = result.error;
 				return;
 			}
+			// What the file holds now is what this buffer was built from: without
+			// this, the *next* save would be refused as written against a stale
+			// copy, although the only writer was this editor.
+			base = text;
 		} catch (cause) {
 			// A rejection that is not the command's own error string — a missing
 			// command, a payload the webview's IPC refused — arrives as a thrown

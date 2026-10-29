@@ -119,11 +119,6 @@ mupdf = { version = "0.8", default-features = false, features = [
     "img",
 ] }
 
-[dev-dependencies]
-# Temp directories for the backend's tests: every module's fixture builder needs
-# one, and `tempfile` is what the existing tests already assume exists.
-tempfile = "3"
-
 # Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
 # builds against the checkout so runtime fixes land here first. Qt windowing
 # (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk. The dialog

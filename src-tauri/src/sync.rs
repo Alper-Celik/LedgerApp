@@ -33,8 +33,6 @@ pub struct ExternalChange {
     pub disk: String,
 }
 
-impl ExternalChange {}
-
 /// Every file the log knows about whose bytes moved since this device last saw
 /// them, sorted by path. A file the log does not mention is not reported: the
 /// app never wrote it, so nothing about it changed behind a write of ours.

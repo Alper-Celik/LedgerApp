@@ -12,8 +12,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Rust backend (`src-tauri/src`)
 
-- `lib.rs` — crate root: runtime alias, module list, `run()` (specta registration + bindings export).
+- `lib.rs` — crate root: runtime alias, module list, `command_builder()` (the one specta registry,
+  installed by `run()` and reused by the export test) and `run()`.
 - `commands.rs` — the Tauri/specta command surface; frontend-facing names live here, keep them thin.
+- `fsutil.rs` — the one whole-file writer (temp file, flush, mode, rename, directory flush); every
+  store that replaces a file goes through it instead of hand-rolling a temp name.
 - **Ledger views** — `session.rs` (`AppState`, the loaded `Ledger` + baseline, path resolution), `accounts.rs`
   (tree balances, register rows), `source.rs` (`balance_view` ↔ source spans), `files.rs` (journal files,
   per-file transactions, the new-entry file suggestion), `budget.rs` (one month and a range of envelope
@@ -27,7 +30,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   app-only change is pushed, a both-sides change is reported and settled only on request; `.git` and
   friends never cross, and the mirror is what the loader opens, so git is off in tree mode), `repo.rs`
   (repo state/init/identity), `git.rs` (working-tree detection, diff, commit built from the workdir the
-  screen reviewed), `git_ops.rs` (branches, log, stage, merge, revert; not yet exposed as commands),
+  screen reviewed), `git_ops.rs` (branches, log, stage, merge, revert — the `git_*` commands),
   `history.rs` (the operation log inside the ledger: per-device jsonl + pre-image blobs + one
   `state-<id>.json` per device, which serves undo *and* merge bases without git; paths resolve per
   device, so a phone's operation undoes on the desktop).

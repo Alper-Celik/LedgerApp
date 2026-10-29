@@ -26,11 +26,6 @@ const STORE_FILE: &str = "dashboards.json";
 /// than read as if it were this one.
 const STORE_VERSION: u32 = 1;
 
-/// The stem of the temporary file a write goes through. The process id and a
-/// counter keep two concurrent writes — the app and a test binary, say — off
-/// each other's file.
-const TEMP_STEM: &str = "dashboards.json.tmp";
-
 /// One saved dashboard page.
 ///
 /// The id is the page's route segment and its identity for

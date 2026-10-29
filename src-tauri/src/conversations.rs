@@ -503,7 +503,7 @@ fn names_id(path: &Path, id: &str) -> bool {
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))
+    fs::read_to_string(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
 /// A file's summary, re-read rather than remembered: the count and the
@@ -841,9 +841,9 @@ fn replace_updated(path: &Path, meta: &Meta, now: &str) -> Result<(), String> {
         file.seek(SeekFrom::Start(range.start as u64))
             .map_err(|error| format!("seek {}: {error}", path.display()))?;
         file.write_all(now.as_bytes())
-            .map_err(|error| format!("write {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
         file.sync_all()
-            .map_err(|error| format!("flush {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot flush {}: {error}", path.display()))?;
         return Ok(());
     }
     let text = read_text(path)?;
@@ -865,13 +865,13 @@ fn append_block(path: &Path, block: &str) -> Result<(), String> {
     let bytes = block.as_bytes();
     let written = file
         .write(bytes)
-        .map_err(|error| format!("write {}: {error}", path.display()))?;
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     if written < bytes.len() {
         file.write_all(&bytes[written..])
-            .map_err(|error| format!("write {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     }
     file.sync_all()
-        .map_err(|error| format!("flush {}: {error}", path.display()))
+        .map_err(|error| format!("cannot flush {}: {error}", path.display()))
 }
 
 /// Replace byte ranges in `text`, keeping everything between them.

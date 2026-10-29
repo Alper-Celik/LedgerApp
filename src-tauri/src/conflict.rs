@@ -285,7 +285,7 @@ impl MergePlan {
 /// Errors only when a side cannot be parsed — the message names the side and
 /// the position, because a merge built on a half-understood file would quietly
 /// drop the directives the parser did not recognise.
-pub fn plan(base: &str, ours: &str, theirs: &str) -> Result<MergePlan, String> {
+pub fn plan(base: &str, ours: &str, theirs: &str, base_found: bool) -> Result<MergePlan, String> {
     let base = parse_side("base", base)?;
     let ours = parse_side("ours", ours)?;
     let theirs = parse_side("theirs", theirs)?;
@@ -342,6 +342,7 @@ pub fn plan(base: &str, ours: &str, theirs: &str) -> Result<MergePlan, String> {
             &base,
             &ours,
             &theirs,
+            base_found,
             &mut directives,
             &mut pieces,
             &mut blank_before,
@@ -355,6 +356,7 @@ pub fn plan(base: &str, ours: &str, theirs: &str) -> Result<MergePlan, String> {
                 &base,
                 &ours,
                 &theirs,
+                base_found,
                 &mut directives,
                 &mut pieces,
                 &mut blank_before,
@@ -367,6 +369,7 @@ pub fn plan(base: &str, ours: &str, theirs: &str) -> Result<MergePlan, String> {
                 &base,
                 &ours,
                 &theirs,
+                base_found,
                 &mut directives,
                 &mut pieces,
                 &mut blank_before,
@@ -485,6 +488,7 @@ fn push_decision(
     base: &Side,
     ours: &Side,
     theirs: &Side,
+    base_found: bool,
     directives: &mut Vec<DirectiveDecision>,
     pieces: &mut Vec<Piece>,
     blank_before: &mut HashMap<Key, bool>,
@@ -492,13 +496,19 @@ fn push_decision(
     let group = &groups[index];
     let blank = group.ours.is_some_and(|i| ours.blocks[i].blank_before)
         || group.theirs.is_some_and(|i| theirs.blocks[i].blank_before);
-    let decision = decision_of(group, base, ours, theirs);
+    let decision = decision_of(group, base, ours, theirs, base_found);
     blank_before.insert(decision.key.clone(), blank);
     pieces.push(Piece::Decision(directives.len()));
     directives.push(decision);
 }
 
-fn decision_of(group: &Group, base: &Side, ours: &Side, theirs: &Side) -> DirectiveDecision {
+fn decision_of(
+    group: &Group,
+    base: &Side,
+    ours: &Side,
+    theirs: &Side,
+    base_found: bool,
+) -> DirectiveDecision {
     let base_block = group.base.map(|index| &base.blocks[index]);
     let ours_block = group.ours.map(|index| &ours.blocks[index]);
     let theirs_block = group.theirs.map(|index| &theirs.blocks[index]);
@@ -514,6 +524,24 @@ fn decision_of(group: &Group, base: &Side, ours: &Side, theirs: &Side) -> Direct
     let ambiguous = base.identity_counts.get(identity).copied().unwrap_or(0) > 1
         || ours.identity_counts.get(identity).copied().unwrap_or(0) > 1
         || theirs.identity_counts.get(identity).copied().unwrap_or(0) > 1;
+
+    // An addition that may be a directive the matcher failed to pair would
+    // duplicate the entry if it were auto-kept: ask instead.
+    if group.uncertain {
+        resolution = Resolution::NeedsUser;
+    }
+
+    // With no logged base there is nothing to compare against, so every
+    // difference is a whole directive: taking `theirs` automatically could
+    // duplicate an entry the log does not know was edited here.
+    if !base_found
+        && matches!(
+            class,
+            Classification::OnlyTheirs | Classification::AddedTheirs
+        )
+    {
+        resolution = Resolution::NeedsUser;
+    }
 
     // Every classification that could lose or duplicate data already needs a
     // human. The two that would silently pull text out of an ambiguous
@@ -653,6 +681,11 @@ struct Group {
     base: Option<usize>,
     ours: Option<usize>,
     theirs: Option<usize>,
+    /// An addition whose pairing could not be established: it sits beside a
+    /// same-kind directive one side dropped, so it may be that directive after an
+    /// edit the matcher could not follow. Auto-keeping or auto-taking it could
+    /// duplicate the entry, so it asks.
+    uncertain: bool,
 }
 
 fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
@@ -661,9 +694,12 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
     let mut theirs_taken = vec![false; theirs.blocks.len()];
 
     // 1. Each base directive opens a group and pulls in both exact-keyed sides.
+    //    A key with several copies is matched by content first: pairing `#0` with
+    //    `#0` purely by position mis-pairs the moment one side inserts a copy that
+    //    differs in a field the key does not carry (a cost, a tag).
     for (index, block) in base.blocks.iter().enumerate() {
-        let ours_index = ours.by_key.get(&block.key).copied();
-        let theirs_index = theirs.by_key.get(&block.key).copied();
+        let ours_index = same_key(&ours.blocks, &ours_taken, block);
+        let theirs_index = same_key(&theirs.blocks, &theirs_taken, block);
         if let Some(ours_index) = ours_index {
             ours_taken[ours_index] = true;
         }
@@ -678,6 +714,7 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
             base: Some(index),
             ours: ours_index,
             theirs: theirs_index,
+            uncertain: false,
         });
     }
 
@@ -710,6 +747,7 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
             base: None,
             ours: Some(*index),
             theirs: Some(theirs_index),
+            uncertain: false,
         });
     }
     free_ours.retain(|index| !taken_ours.contains(index));
@@ -737,6 +775,7 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
             base: None,
             ours: Some(ours_index),
             theirs: Some(theirs_index),
+            uncertain: false,
         });
         taken_ours.insert(ours_index);
         taken_theirs.insert(theirs_index);
@@ -753,6 +792,7 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
             base: None,
             ours: Some(index),
             theirs: None,
+            uncertain: false,
         });
     }
     for index in free_theirs {
@@ -764,10 +804,70 @@ fn group(base: &Side, ours: &Side, theirs: &Side) -> Vec<Group> {
             base: None,
             ours: None,
             theirs: Some(index),
+            uncertain: false,
         });
     }
 
+    escalate_failed_pairings(&mut groups);
     groups
+}
+
+/// The side block that is the same directive as `base`: the untaken block with
+/// the same key and the same folded text first, then the first untaken one with
+/// that key — a copy whose text moved is still that directive, and only the
+/// *order* of equally-spelled duplicates is a guess.
+fn same_key(blocks: &[Block], taken: &[bool], base: &Block) -> Option<usize> {
+    let mut by_content = None;
+    let mut by_key = None;
+    for (index, block) in blocks.iter().enumerate() {
+        if taken[index] || block.key != base.key {
+            continue;
+        }
+        by_key.get_or_insert(index);
+        if block.canonical == base.canonical {
+            by_content = Some(index);
+            break;
+        }
+    }
+    by_content.or(by_key)
+}
+
+/// Escalate the additions that could duplicate a directive.
+///
+/// The matcher pairs by identity, then by a loose key. Each side editing a
+/// different field of one transaction defeats both: the base directive loses
+/// both sides, and the two edits arrive as independent additions. Auto-keeping
+/// them would count the entry twice with nothing on screen saying so, so an
+/// addition that sits beside a same-kind directive one side dropped asks
+/// instead.
+fn escalate_failed_pairings(groups: &mut [Group]) {
+    let kinds_in_base: HashSet<&'static str> = groups
+        .iter()
+        .filter(|group| group.base.is_some())
+        .map(|group| group.kind)
+        .collect();
+    // Which kinds this side kept at all: a side that kept a same-kind base
+    // directive and *also* added one is adding a new entry, not losing one.
+    let kept_by_ours: HashSet<&'static str> = groups
+        .iter()
+        .filter(|group| group.base.is_some() && group.ours.is_some())
+        .map(|group| group.kind)
+        .collect();
+    let kept_by_theirs: HashSet<&'static str> = groups
+        .iter()
+        .filter(|group| group.base.is_some() && group.theirs.is_some())
+        .map(|group| group.kind)
+        .collect();
+
+    for group in groups.iter_mut().filter(|group| group.base.is_none()) {
+        let known_kind = kinds_in_base.contains(group.kind);
+        let suspect_ours = known_kind && group.ours.is_some() && !kept_by_ours.contains(group.kind);
+        let suspect_theirs =
+            known_kind && group.theirs.is_some() && !kept_by_theirs.contains(group.kind);
+        if suspect_ours || suspect_theirs {
+            group.uncertain = true;
+        }
+    }
 }
 
 /// Attach loose-keyed leftovers to the base groups that lost their exact match.
@@ -976,7 +1076,10 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
         while start_line + 1 < end_line && is_trivia_line(line_text(&starts, text, start_line)) {
             start_line += 1;
         }
-        while end_line > start_line + 1 && is_blank_line(line_text(&starts, text, end_line - 1)) {
+        // Comments belong to the page as much as blank lines do: leaving them in
+        // the block makes a comment-only edit look like an edit to the entry, and
+        // a `Both` merge emit the same comment twice.
+        while end_line > start_line + 1 && is_trivia_line(line_text(&starts, text, end_line - 1)) {
             end_line -= 1;
         }
 
@@ -985,7 +1088,15 @@ fn parse_side(name: &'static str, text: &str) -> Result<Side, String> {
             continue;
         }
         let end_line = end_line.max(start_line + 1).min(starts.len());
-        let start = starts[start_line];
+        let mut start = starts[start_line];
+        // A byte-order mark belongs to the file, not to its first directive:
+        // keeping it in the block would duplicate it when a block from another
+        // side is emitted at the head, and the parser rejects one mid-file.
+        if start == 0 {
+            if let Some(rest) = text.strip_prefix('\u{feff}') {
+                start = text.len() - rest.len();
+            }
+        }
         let end = line_offset(&starts, text, end_line);
         if end <= start {
             continue;
@@ -1264,10 +1375,6 @@ fn line_text<'a>(starts: &[usize], text: &'a str, line: usize) -> &'a str {
     text.get(start..end).unwrap_or_default()
 }
 
-fn is_blank_line(line: &str) -> bool {
-    line.trim().is_empty()
-}
-
 /// Comment lines, blank lines and the org-mode/emacs incantations: the kinds of
 /// line a directive's CST node swallows but that carry no directive content.
 fn is_trivia_line(line: &str) -> bool {
@@ -1432,14 +1539,14 @@ mod tests {
 
     #[test]
     fn one_side_untouched_renders_byte_identical() {
-        let plan = plan(BASE, BASE, BASE).expect("plans");
+        let plan = plan(BASE, BASE, BASE, true).expect("plans");
         assert_eq!(summary(&plan).unchanged, plan.directives.len());
         assert_eq!(render(&plan, &HashMap::new()).expect("renders"), BASE);
     }
 
     #[test]
     fn different_transactions_edited_on_each_side_merge_automatically() {
-        let plan = plan(BASE, &ours(), &theirs()).expect("plans");
+        let plan = plan(BASE, &ours(), &theirs(), true).expect("plans");
         let summary = summary(&plan);
 
         assert_eq!(summary.needs_user, 0, "decisions: {:?}", plan.directives);
@@ -1456,7 +1563,7 @@ mod tests {
     fn same_transaction_changed_differently_asks_and_honours_the_pick() {
         let their_groceries = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -60.00 USD\n  Expenses:Food      60.00 USD\n";
         let theirs = BASE.replacen(BASE_GROCERIES, their_groceries, 1);
-        let plan = plan(BASE, &ours(), &theirs).expect("plans");
+        let plan = plan(BASE, &ours(), &theirs, true).expect("plans");
 
         let groceries = decision(&plan, GROCERIES);
         assert_eq!(groceries.class, Classification::BothChanged);
@@ -1484,12 +1591,102 @@ mod tests {
     fn identical_addition_on_both_sides_is_emitted_once() {
         let coffee = "2026-02-01 * \"Coffee\"\n  Assets:Bank       -3.00 USD\n  Expenses:Food      3.00 USD\n";
         let with_coffee = format!("{BASE}\n{coffee}");
-        let plan = plan(BASE, &with_coffee, &with_coffee).expect("plans");
+        let plan = plan(BASE, &with_coffee, &with_coffee, true).expect("plans");
 
         assert_eq!(decision(&plan, COFFEE).class, Classification::SameChange);
         let merged = render(&plan, &HashMap::new()).expect("renders");
         assert_eq!(merged, with_coffee);
         assert_eq!(merged.matches("Coffee").count(), 1);
+    }
+
+    /// Each side edited a *different* field of one transaction, so neither the
+    /// identity nor the loose key pairs them. Auto-keeping both additions would
+    /// count the entry twice with nothing on screen saying so.
+    #[test]
+    fn two_edits_of_one_entry_that_cannot_pair_ask_instead_of_duplicating() {
+        let base = "\
+option \"operating_currency\" \"USD\"
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank:Checking  -50.00 USD
+  Expenses:Food          50.00 USD
+";
+        // Ours moves the date; theirs renames the narration.
+        let ours = base.replace("2026-01-10", "2026-01-11");
+        let theirs = base.replace("\"Groceries\"", "\"Groceries weekly\"");
+
+        let plan = plan(base, &ours, &theirs, true).expect("plans");
+
+        let groceries: Vec<_> = plan
+            .directives
+            .iter()
+            .filter(|directive| directive.kind == "transaction")
+            .collect();
+        // The base entry, plus each side's unpaired edit.
+        assert_eq!(
+            groceries.len(),
+            3,
+            "the unmatched edits are their own decisions: {:?}",
+            plan.directives
+                .iter()
+                .map(|directive| (directive.kind.clone(), directive.class))
+                .collect::<Vec<_>>()
+        );
+        // No addition may be auto-kept: that is the double count.
+        for directive in groceries
+            .iter()
+            .filter(|directive| directive.base.is_none())
+        {
+            assert!(
+                matches!(directive.resolution, Resolution::NeedsUser),
+                "{} would have been added without asking",
+                directive.label
+            );
+        }
+        // The render refuses an unanswered question instead of guessing.
+        assert!(render(&plan, &HashMap::new()).is_err());
+    }
+
+    /// A ledger with no logged operation to compare against has no base: every
+    /// difference is a whole directive, so taking theirs is a guess.
+    #[test]
+    fn without_a_logged_base_a_copy_side_addition_asks() {
+        let ours = "\
+option \"operating_currency\" \"USD\"
+
+2026-01-10 * \"Coffee\"
+  Assets:Bank:Checking  -3.00 USD
+  Expenses:Food          3.00 USD
+";
+        let theirs = ours.replace("\"Coffee\"", "\"Cofee\"");
+
+        let plan = plan("", ours, &theirs, false).expect("plans");
+
+        let coffee: Vec<_> = plan
+            .directives
+            .iter()
+            .filter(|directive| {
+                directive.label.contains("Cofee") || directive.label.contains("Coffee")
+            })
+            .collect();
+        assert_eq!(coffee.len(), 2, "two whole directives");
+        // Taking the folder's version is the guess; keeping our own text is not.
+        let copy_side = coffee
+            .iter()
+            .find(|directive| directive.label.contains("Cofee"))
+            .expect("theirs' directive is in the plan");
+        assert!(
+            matches!(copy_side.resolution, Resolution::NeedsUser),
+            "the copy's version was taken without asking"
+        );
+        let our_side = coffee
+            .iter()
+            .find(|directive| directive.label.contains("Coffee"))
+            .expect("ours' directive is in the plan");
+        assert!(
+            matches!(our_side.resolution, Resolution::Auto(Choice::Ours)),
+            "our own text should be kept without asking"
+        );
     }
 
     #[test]
@@ -1498,7 +1695,7 @@ mod tests {
         let our_coffee = "2026-02-01 * \"Coffee\" #ours\n  Assets:Bank       -3.00 USD\n  Expenses:Food      3.00 USD\n";
         let ours = format!("{BASE}\n{our_coffee}");
         let theirs = format!("{BASE}\n{their_coffee}");
-        let plan = plan(BASE, &ours, &theirs).expect("plans");
+        let plan = plan(BASE, &ours, &theirs, true).expect("plans");
 
         let coffee = decision(&plan, COFFEE);
         assert_eq!(coffee.class, Classification::BothAdded);
@@ -1525,7 +1722,7 @@ mod tests {
     fn delete_against_modify_asks_for_that_key_only() {
         let ours = BASE.replacen(&format!("{BASE_GROCERIES}\n"), "", 1);
         let theirs = BASE.replacen(BASE_GROCERIES, OURS_GROCERIES, 1);
-        let plan = plan(BASE, &ours, &theirs).expect("plans");
+        let plan = plan(BASE, &ours, &theirs, true).expect("plans");
 
         let groceries = decision(&plan, GROCERIES);
         assert_eq!(groceries.class, Classification::DeletedOurs);
@@ -1569,7 +1766,7 @@ mod tests {
             &format!("{BASE_SALARY}\n2026-01-05 price USD 1.10 EUR\n"),
             1,
         );
-        let plan = plan(BASE, &ours, &theirs).expect("plans");
+        let plan = plan(BASE, &ours, &theirs, true).expect("plans");
 
         let summary = summary(&plan);
         assert_eq!(summary.needs_user, 0, "decisions: {:?}", plan.directives);
@@ -1604,7 +1801,7 @@ option \"operating_currency\" \"USD\"   \n\
         let groceries = "2026-01-10 * \"Groceries\"   \n  Assets:Bank       -50.00 USD\n\tExpenses:Food      50.00 USD\n";
         let their_groceries = "2026-01-10 * \"Groceries\"   \n  Assets:Bank       -45.00 USD\n\tExpenses:Food      45.00 USD\n";
         let theirs = base.replacen(groceries, their_groceries, 1);
-        let plan = plan(base, base, &theirs).expect("plans");
+        let plan = plan(base, base, &theirs, true).expect("plans");
 
         assert_eq!(decision(&plan, GROCERIES).class, Classification::OnlyTheirs);
         let merged = render(&plan, &HashMap::new()).expect("renders");
@@ -1628,7 +1825,7 @@ option \"operating_currency\" \"USD\"   \n\
 2026-01-10 * \"Groceries\"
   Assets:Bank       -50.00 USD
   Expenses:Food      50.00 USD";
-        let plan = plan(base, base, base).expect("plans");
+        let plan = plan(base, base, base, true).expect("plans");
         assert_eq!(render(&plan, &HashMap::new()).expect("renders"), base);
     }
 
@@ -1638,7 +1835,7 @@ option \"operating_currency\" \"USD\"   \n\
         let ours =
             base.replacen("-50.00 USD", "-55.00 USD", 1)
                 .replacen(" 50.00 USD", " 55.00 USD", 1);
-        let plan = plan(base, &ours, base).expect("plans");
+        let plan = plan(base, &ours, base, true).expect("plans");
 
         assert_eq!(decision(&plan, GROCERIES).class, Classification::OnlyOurs);
         let merged = render(&plan, &HashMap::new()).expect("renders");
@@ -1648,11 +1845,11 @@ option \"operating_currency\" \"USD\"   \n\
 
     #[test]
     fn a_side_that_does_not_parse_is_named() {
-        let error = plan(BASE, BASE, "2026-13-45 * \"broken\"\n").expect_err("refuses");
+        let error = plan(BASE, BASE, "2026-13-45 * \"broken\"\n", true).expect_err("refuses");
         assert!(error.contains("theirs"), "error: {error}");
         assert!(error.contains("does not parse"), "error: {error}");
 
-        let error = plan("nonsense (", BASE, BASE).expect_err("refuses");
+        let error = plan("nonsense (", BASE, BASE, true).expect_err("refuses");
         assert!(error.contains("base"), "error: {error}");
     }
 
@@ -1660,7 +1857,7 @@ option \"operating_currency\" \"USD\"   \n\
     fn duplicate_identical_directives_still_merge_when_untouched() {
         let coffee = "2026-02-01 * \"Coffee\"\n  Assets:Bank       -3.00 USD\n  Expenses:Food      3.00 USD\n";
         let base = format!("{BASE}\n{coffee}\n{coffee}");
-        let plan = plan(&base, &base, &base).expect("plans");
+        let plan = plan(&base, &base, &base, true).expect("plans");
 
         assert_eq!(summary(&plan).needs_user, 0);
         assert!(plan.directives.iter().any(|decision| decision.ambiguous));
@@ -1669,7 +1866,7 @@ option \"operating_currency\" \"USD\"   \n\
 
     #[test]
     fn a_pick_overrides_an_auto_decision_and_stale_picks_are_ignored() {
-        let plan = plan(BASE, &ours(), &theirs()).expect("plans");
+        let plan = plan(BASE, &ours(), &theirs(), true).expect("plans");
 
         // A UI may send a selection for a key this plan does not have any more.
         let mut picks = HashMap::new();
@@ -1688,7 +1885,7 @@ option \"operating_currency\" \"USD\"   \n\
     fn deletion_on_both_sides_is_reported_and_dropped() {
         let coffee = "2026-02-01 * \"Coffee\"\n  Assets:Bank       -3.00 USD\n  Expenses:Food      3.00 USD\n";
         let base = format!("{BASE}\n{coffee}");
-        let plan = plan(&base, BASE, BASE).expect("plans");
+        let plan = plan(&base, BASE, BASE, true).expect("plans");
 
         let coffee = decision(&plan, COFFEE);
         assert_eq!(coffee.class, Classification::BothDeleted);
@@ -1702,7 +1899,7 @@ option \"operating_currency\" \"USD\"   \n\
 
     #[test]
     fn summary_counts_and_kinds_describe_the_plan() {
-        let plan = plan(BASE, &ours(), &theirs()).expect("plans");
+        let plan = plan(BASE, &ours(), &theirs(), true).expect("plans");
         let summary = summary(&plan);
         assert_eq!(summary.total, plan.directives.len());
         assert_eq!(

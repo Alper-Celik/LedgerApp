@@ -244,12 +244,11 @@ fn preview(body: &str) -> String {
 /// A TEFAS fund code: a short uppercase alphanumeric, which is also the
 /// commodity the ledger holds it under.
 fn checked_fund_code(ticker: &str) -> Result<String, String> {
-    let code = ticker.trim().to_uppercase();
-    let shaped = (2..=10).contains(&code.len())
-        && code
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric());
-    if !shaped {
+    // A fund code becomes a ledger commodity, so it is held to the commodity rule
+    // first and only then to the platform's own length bound — one place decides
+    // what a commodity may look like, and this adds the narrower constraint.
+    let code = crate::prices::checked_commodity("fund code", ticker)?;
+    if !(2..=10).contains(&code.len()) {
         return Err(format!(
             "`{ticker}` is not a TEFAS fund code (the short alphanumeric code the platform \
              lists a fund under, e.g. `AFA`)"

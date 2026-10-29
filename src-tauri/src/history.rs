@@ -20,8 +20,10 @@
 //!   device                 this device's stable random id, created on first use
 //!   <device>.jsonl         one JSON line per operation, appended, never rewritten
 //!   blobs/<hash>           pre- and post-images by BLAKE3 hash (dedupe is free)
-//!   state.json             what each device last saw per path (a sync detector's
-//!                          comparison map; conflict bases read the blobs instead)
+//!   state-<device>.json    what that device last saw per path (a sync detector's
+//!                          comparison map; conflict bases read the blobs instead).
+//!                          One file per device, so a peer's copy cannot be lost
+//!                          to this device's whole-file rewrite.
 //!   .lock-<device>         held while one line is appended, or the log prunes
 //! ```
 //!
@@ -122,15 +124,6 @@ impl Change {
             after: after.map(|bytes| bytes.to_vec()),
             hunks: None,
         }
-    }
-
-    /// The same change with the line hunks the writer worked out. Nothing calls
-    /// this yet: the line tools attach hunks once they edit through the pipeline,
-    /// and the log already carries the field for them.
-    #[cfg(test)]
-    pub fn with_hunks(mut self, hunks: Vec<Hunk>) -> Self {
-        self.hunks = Some(hunks);
-        self
     }
 }
 
@@ -240,7 +233,7 @@ pub struct RevertEntry {
 /// Record one write from this device.
 ///
 /// Under `.lock`: the images go to `blobs/`, one line is appended to
-/// `<device>.jsonl`, then `state.json` is updated — in that order, so a reader
+/// `<device>.jsonl`, then this device's `state-<device>.json` is updated — in that order, so a reader
 /// that sees the line finds everything it names, and a prune cannot delete an
 /// image this write is about to name. The lock is per log directory, so only
 /// two processes on this device contend; the append is one write of a whole
@@ -470,20 +463,14 @@ pub fn pre_image_for(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String
     let (operations, _issues) = list_with_issues(root, Filter::default())?;
     // Newest first, and an operation lists a path at most once (`record`
     // refuses a duplicate), so the first match is the newest operation's own.
+    // One pass, newest first: a peer's spelling must not make an *older* local
+    // operation win, which is what a second pass over the rest would do.
     let Some(file) = operations
         .iter()
         .flat_map(|operation| &operation.ops)
-        .find(|file| same_path(&file.path, path))
-        .or_else(|| {
-            // A peer recorded its own spelling; both name one file when their
-            // ledger-relative tails match.
-            operations
-                .iter()
-                .flat_map(|operation| &operation.ops)
-                .find(|file| match local_path_exact(root, &file.path) {
-                    Some(local) => same_path(&local, path),
-                    None => false,
-                })
+        .find(|file| {
+            same_path(&file.path, path)
+                || local_path_exact(root, &file.path).is_some_and(|local| same_path(&local, path))
         })
     else {
         return Ok(None);
@@ -513,7 +500,7 @@ pub fn pre_image_for(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String
 /// the writer named them, so an absolute path and a relative one — or a
 /// symlinked folder and its target — have to compare equal, or a merge base
 /// would silently go missing.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -1172,7 +1159,8 @@ fn read_state(root: &Path, device: &str) -> State {
         .unwrap_or_default()
 }
 
-/// Record in `state.json` what this operation left each path at.
+/// Record in this device's `state-<device>.json` what the operation left each
+/// path at.
 fn remember(root: &Path, operation: &Operation) -> Result<(), String> {
     let mut state = read_state(root, &operation.device);
     let device = state.devices.entry(operation.device.clone()).or_default();
@@ -1219,8 +1207,9 @@ pub fn note_seen(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
     write_state(root, &device, &state)
 }
 
-/// Swap `state.json` in whole: a temp file and a rename, so a peer syncing
-/// mid-write never copies half a state file.
+/// Swap this device's state file in whole, through
+/// [`crate::fsutil::write_atomic`], so a peer syncing mid-write never copies half
+/// a state file.
 fn write_state(root: &Path, device: &str, state: &State) -> Result<(), String> {
     let mut json = serde_json::to_vec_pretty(state).map_err(|error| format!("state: {error}"))?;
     json.push(b'\n');
@@ -1401,6 +1390,23 @@ fn date_of(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use super::Hunk;
+
+    /// A change carrying the line hunks the writer worked out — the shape the
+    /// line tools will attach once they edit through the pipeline.
+    trait WithHunks {
+        fn with_hunks(self, hunks: Vec<Hunk>) -> Self;
+    }
+
+    impl WithHunks for super::Change {
+        fn with_hunks(self, hunks: Vec<Hunk>) -> Self {
+            super::Change {
+                hunks: Some(hunks),
+                ..self
+            }
+        }
+    }
+
     use super::*;
     use crate::testing::TempDir;
 
@@ -2534,6 +2540,49 @@ mod tests {
     /// A write that leaves the log past the default retention's margin pays for
     /// the prune itself, since no caller ever asks for one: the crossing write
     /// trims the store back to the versions the retention's operations name.
+    /// The grace is a sync round trip: an image the log cannot account for *yet*
+    /// is left alone until a line could have arrived naming it, and only a future
+    /// stamp (a peer whose clock runs ahead) counts as fresh too.
+    #[test]
+    fn an_unreferenced_image_survives_the_grace_window() {
+        let dir = TempDir::new("history-grace");
+        let file = ledger_file(&dir, "main.bean", "a0\n");
+        let root = log_of(&dir);
+        let blobs = root.join(BLOB_DIR);
+        fs::create_dir_all(&blobs).unwrap();
+
+        let young = blobs.join("y");
+        let future = blobs.join("f");
+        fs::write(&young, b"young\n").unwrap();
+        fs::write(&future, b"future\n").unwrap();
+        // A peer whose clock is a day ahead stamps its image in the future.
+        let ahead = SystemTime::now() + Duration::from_secs(24 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&future)
+            .unwrap()
+            .set_modified(ahead)
+            .unwrap();
+        // And one that is old enough to reap.
+        let old = blobs.join("o");
+        fs::write(&old, b"old\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - SYNC_GRACE - Duration::from_secs(1))
+            .unwrap();
+
+        let freed = prune_after(&root, Retention::default(), SYNC_GRACE).unwrap();
+
+        assert!(young.exists(), "an image inside the window was deleted");
+        assert!(future.exists(), "a future stamp was read as stale");
+        assert!(!old.exists(), "an image past the window survived");
+        assert!(freed > 0, "nothing was reclaimed: {freed}");
+        // The log itself is untouched by this: the ledger file still exists.
+        assert!(file.exists());
+    }
+
     #[test]
     fn a_write_past_the_retention_margin_prunes() {
         let dir = TempDir::new("history-auto-prune");

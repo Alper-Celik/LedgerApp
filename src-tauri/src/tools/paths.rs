@@ -143,16 +143,18 @@ pub(crate) fn display_relative(root: &Path, path: &Path) -> String {
 mod tests {
     use std::fs;
 
+    use crate::testing::TempDir;
+
     use super::{Root, display_relative};
 
-    fn scratch() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+    fn scratch() -> TempDir {
+        TempDir::new("tool-paths")
     }
 
     #[test]
     fn refuses_parent_components() {
         let dir = scratch();
-        let root = Root::new(dir.path()).unwrap();
+        let root = Root::new(dir.dir()).unwrap();
         let error = root.resolve("../secret.bean").unwrap_err();
         assert!(error.contains("outside the ledger directory"), "{error}");
         let error = root.resolve("sub/../../secret.bean").unwrap_err();
@@ -162,7 +164,7 @@ mod tests {
     #[test]
     fn refuses_absolute_paths_outside() {
         let dir = scratch();
-        let root = Root::new(dir.path()).unwrap();
+        let root = Root::new(dir.dir()).unwrap();
         let outside = std::env::temp_dir().join("ledger-app-outside.bean");
         let error = root.resolve(outside.to_str().unwrap()).unwrap_err();
         assert!(error.contains("outside the ledger directory"), "{error}");
@@ -171,9 +173,9 @@ mod tests {
     #[test]
     fn accepts_paths_inside() {
         let dir = scratch();
-        fs::write(dir.path().join("main.bean"), "").unwrap();
-        fs::create_dir(dir.path().join("sub")).unwrap();
-        let root = Root::new(dir.path()).unwrap();
+        dir.seed("main.bean", "");
+        fs::create_dir(dir.dir().join("sub")).unwrap();
+        let root = Root::new(dir.dir()).unwrap();
         let inside = root.resolve("main.bean").unwrap();
         assert!(inside.starts_with(&root.path()));
         // A path that does not exist yet resolves through its parent.
@@ -187,7 +189,7 @@ mod tests {
     #[test]
     fn refuses_a_missing_parent() {
         let dir = scratch();
-        let root = Root::new(dir.path()).unwrap();
+        let root = Root::new(dir.dir()).unwrap();
         let error = root.resolve("nope/new.bean").unwrap_err();
         assert!(error.contains("no such directory"), "{error}");
     }
@@ -197,19 +199,19 @@ mod tests {
     fn refuses_a_symlink_out_of_the_root() {
         let inside = scratch();
         let outside = scratch();
-        fs::write(outside.path().join("secret.bean"), "secret\n").unwrap();
+        outside.seed("secret.bean", "secret\n");
         std::os::unix::fs::symlink(
-            outside.path().join("secret.bean"),
-            inside.path().join("link.bean"),
+            outside.dir().join("secret.bean"),
+            inside.dir().join("link.bean"),
         )
         .unwrap();
         std::os::unix::fs::symlink(
-            &outside.path().join("missing.bean"),
-            inside.path().join("dangling.bean"),
+            &outside.dir().join("missing.bean"),
+            inside.dir().join("dangling.bean"),
         )
         .unwrap();
 
-        let root = Root::new(inside.path()).unwrap();
+        let root = Root::new(inside.dir()).unwrap();
         let error = root.resolve("link.bean").unwrap_err();
         assert!(error.contains("outside the ledger directory"), "{error}");
         // A dangling link has no physical target to check, so it is refused
@@ -221,7 +223,7 @@ mod tests {
     #[test]
     fn displays_relative_paths() {
         let dir = scratch();
-        let root = Root::new(dir.path()).unwrap();
+        let root = Root::new(dir.dir()).unwrap();
         assert_eq!(
             display_relative(root.path(), &root.path().join("a/b.bean")),
             "a/b.bean"
