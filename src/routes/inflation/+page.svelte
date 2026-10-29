@@ -15,6 +15,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	which series and how many months, and shows the refusal it gets back.
 -->
 <script lang="ts">
+	import { untrack } from "svelte";
 	import ImportIndexSheet from "$lib/components/inflation/import-index-sheet.svelte";
 	import IndexCard from "$lib/components/inflation/index-card.svelte";
 	import LifestylePanel from "$lib/components/inflation/lifestyle-panel.svelte";
@@ -39,6 +40,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		months: number;
 		loadError: string;
 	} | null>(null);
+
+	/** The load the answer above was computed against. */
+	let loaded = $state(untrack(() => data));
+
+	$effect(() => {
+		// A report, a series list and a chosen index all describe one ledger.
+		// Another ledger's load (or any re-run of this route's) is the truth
+		// again: keeping this visit's answer would show the previous books'
+		// spending under the new ledger's name.
+		if (data === loaded) return;
+		loaded = data;
+		session = null;
+	});
 
 	const view = $derived(
 		session ?? {

@@ -76,7 +76,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use rustledger_core::{Directive, IncompleteAmount, Transaction};
-use rustledger_parser::{parse, ParseErrorKind};
+use rustledger_parser::{ParseErrorKind, parse};
 use serde::{Deserialize, Serialize};
 
 /// Fragment separator inside a [`Key`]. Escaped in the fragments themselves,
@@ -1392,8 +1392,7 @@ mod tests {
 ";
 
     const OURS_GROCERIES: &str = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -55.00 USD\n  Expenses:Food      55.00 USD\n";
-    const BASE_GROCERIES: &str =
-        "2026-01-10 * \"Groceries\"\n  Assets:Bank       -50.00 USD\n  Expenses:Food      50.00 USD\n";
+    const BASE_GROCERIES: &str = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -50.00 USD\n  Expenses:Food      50.00 USD\n";
     const BASE_SALARY: &str =
         "2026-01-11 * \"Salary\"\n  Assets:Bank       200.00 USD\n  Income:Salary    -200.00 USD\n";
     const THEIRS_SALARY: &str =
@@ -1616,7 +1615,9 @@ option \"operating_currency\" \"USD\"   \n\
         assert!(merged.contains("2026-01-01 open  Assets:Bank     \n"));
         assert!(merged.contains("; a comment that belongs to the transaction below\n"));
         assert!(merged.contains("\tExpenses:Food"));
-        assert!(merged.ends_with("2026-01-11 balance Assets:Bank 100.00 USD  ; trailing comment\n"));
+        assert!(
+            merged.ends_with("2026-01-11 balance Assets:Bank 100.00 USD  ; trailing comment\n")
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 import { commands, type ExternalChange } from "../bindings";
 import { messageOf } from "./errors.js";
+import { ledger } from "./ledger.svelte.js";
 
 /**
  * Files the ledger's folder changed behind the app — another device, a cloud
@@ -23,21 +24,40 @@ export const syncWatch = $state({
 	external: [] as string[],
 	/** Files changed on both sides, which a reload cannot settle. */
 	conflicts: [] as string[],
-	/** Why the last check failed, when it did. */
+	/** Why the last read of the change list failed, when it did. */
 	error: "",
+	/**
+	 * Why the last push into a SAF folder failed, when it did. Kept apart from
+	 * `error`: one is "the app cannot tell whether the folder moved", the other is
+	 * "a write did not reach the folder", and only the second must survive a
+	 * successful read.
+	 */
+	treeError: "",
 	/** A reload is in flight. */
 	reloading: false,
 });
 
-/** Take what a tree reconciliation reported, replacing the previous report. */
+/**
+ * Take what a tree reconciliation reported.
+ *
+ * An error and a report are different things: a failed pass says nothing about
+ * which files a successful one found, so it must not erase the conflicts whose
+ * buttons the reader needs — and a pass that succeeded is what clears the error,
+ * since nothing else can.
+ */
 export function noteTreeReport(report: {
-	external: string[];
-	conflicts: { path: string }[];
+	external?: string[];
+	conflicts?: { path: string }[];
 	error?: string;
 }) {
-	syncWatch.external = report.external;
-	syncWatch.conflicts = report.conflicts.map((conflict) => conflict.path);
-	if (report.error !== undefined) syncWatch.error = report.error;
+	if (report.external) syncWatch.external = report.external;
+	if (report.conflicts) syncWatch.conflicts = report.conflicts.map((conflict) => conflict.path);
+	if (report.error !== undefined) {
+		syncWatch.treeError = report.error;
+	} else if (report.external && report.conflicts) {
+		// A pass that completed is what clears its own failure.
+		syncWatch.treeError = "";
+	}
 }
 
 /** Re-read the watch list. Cheap: one command call, no ledger walk. */
@@ -45,7 +65,9 @@ export async function refreshSyncWatch() {
 	try {
 		const result = await commands.syncChanges();
 		if (result.status === "error") {
-			syncWatch.error = result.error;
+			// No ledger open is the app's normal first state, not a failure to
+			// report: there is no folder to have changed.
+			syncWatch.error = ledger.summary === null ? "" : result.error;
 			return;
 		}
 		syncWatch.changes = result.data;
@@ -53,7 +75,7 @@ export async function refreshSyncWatch() {
 	} catch (cause) {
 		// A ledger in a plain local folder never reports anything; a failure here
 		// must not disturb the screen.
-		syncWatch.error = messageOf(cause);
+		syncWatch.error = ledger.summary === null ? "" : messageOf(cause);
 	}
 }
 
@@ -62,4 +84,8 @@ export function dismissSyncWatch() {
 	syncWatch.changes = [];
 	syncWatch.external = [];
 	syncWatch.conflicts = [];
+	// A dismissed failure is one the reader has seen; the next pass reports a new
+	// one. Neither field is cleared blindly: the tree push is a different problem
+	// from the change list, and its own pass is what retires it.
+	syncWatch.error = "";
 }

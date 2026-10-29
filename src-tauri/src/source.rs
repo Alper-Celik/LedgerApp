@@ -97,7 +97,21 @@ pub(crate) fn touches_changes(
         .entry(source.file_id)
         .or_insert_with(|| line_starts_of(text));
     let body = text.get(source.span.start..source.span.end).unwrap_or("");
-    let last_byte = source.span.start + body.trim_end().len();
+    // The parser ends a directive's span at the *next* directive's first token,
+    // so trailing blank lines and `;` comments — the next entry's leading ones,
+    // or the file's own tail — sit inside this span. Ending at the last line
+    // that is neither keeps a comment-only edit from marking the entry before it
+    // modified, which is what the register and the sidebar draw.
+    let mut own = 0;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let rest = line.trim_start();
+        if !rest.trim().is_empty() && !rest.starts_with(';') {
+            own = offset + line.len();
+        }
+        offset += line.len();
+    }
+    let last_byte = source.span.start + own;
     let first = line_of(starts, source.span.start);
     let last = line_of(starts, last_byte.saturating_sub(1).max(source.span.start));
     ranges.iter().any(|&(from, to)| from <= last && first <= to)
@@ -113,4 +127,70 @@ fn line_starts_of(text: &str) -> Vec<usize> {
 /// The 1-based line `offset` falls on, given the file's line starts.
 fn line_of(starts: &[usize], offset: usize) -> u32 {
     u32::try_from(starts.partition_point(|&start| start <= offset)).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::session::load_baselined;
+    use crate::testing::TempDir;
+
+    use super::{line_of, touches_changes};
+
+    /// A comment between two entries belongs to neither: the parser's span ends
+    /// at the next directive's first token, so the line after an entry is inside
+    /// that entry's span unless the trailing trivia is cut off.
+    #[test]
+    fn a_trailing_comment_does_not_mark_the_entry_before_it_modified() {
+        let dir = TempDir::new("source-comment");
+        let path = dir.file("main.bean");
+        std::fs::write(
+            &path,
+            "option \"operating_currency\" \"USD\"\n\n\
+             2026-01-10 * \"Groceries\"\n  Assets:Bank:Checking  -20.00 USD\n  Expenses:Food         20.00 USD\n\n\
+             2026-01-11 * \"Tea\"\n  Assets:Bank:Checking  -2.00 USD\n  Expenses:Food          2.00 USD\n",
+        )
+        .unwrap();
+        let loaded = load_baselined(&path).unwrap();
+
+        // The change is the comment line plus the second entry's posting.
+        let text = loaded.ledger.source_map.files()[0].source.clone();
+        let comment = text.find("2026-01-11").unwrap();
+        let last = text.rfind("Expenses:Food").unwrap();
+        let from = comment + "2026-01-11 * \"Tea\"".len();
+        let mut changed: HashMap<u16, Vec<(u32, u32)>> = HashMap::new();
+        changed.insert(
+            0,
+            vec![
+                ({ line_of(&line_starts(&text), from) }, {
+                    line_of(&line_starts(&text), from)
+                }),
+                (
+                    line_of(&line_starts(&text), last),
+                    line_of(&line_starts(&text), last),
+                ),
+            ],
+        );
+
+        let mut starts = HashMap::new();
+        let touched: Vec<&str> = loaded
+            .ledger
+            .directives
+            .iter()
+            .filter(|directive| touches_changes(&loaded.ledger, &changed, &mut starts, directive))
+            .filter_map(|directive| match &directive.value {
+                rustledger_core::Directive::Transaction(txn) => Some(txn.narration.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(touched, ["Tea"], "{touched:?}");
+    }
+
+    fn line_starts(text: &str) -> Vec<usize> {
+        let mut starts = vec![0];
+        starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+        starts
+    }
 }

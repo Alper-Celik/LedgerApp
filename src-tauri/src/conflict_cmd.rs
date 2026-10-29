@@ -226,7 +226,7 @@ pub fn resolve(
     }
 
     let merged = conflict::render(&plan, &choices)?;
-    edit_named_file_source(state, &file.display().to_string(), &merged)?;
+    edit_named_file_source(state, &file.display().to_string(), &merged, None)?;
     drop_copy(&compared)?;
     Ok(file.display().to_string())
 }
@@ -444,7 +444,7 @@ fn choice_of(value: &str) -> Option<Choice> {
 mod tests {
     use super::*;
     use crate::history::{self, Change, Origin};
-    use crate::testing::{loaded_state, TempDir};
+    use crate::testing::{TempDir, loaded_state};
 
     const BASE: &str = "\
 option \"operating_currency\" \"USD\"
@@ -462,12 +462,9 @@ option \"operating_currency\" \"USD\"
   Income:Salary    -200.00 USD
 ";
 
-    const BASE_GROCERIES: &str =
-        "2026-01-10 * \"Groceries\"\n  Assets:Bank       -50.00 USD\n  Expenses:Food      50.00 USD\n";
-    const OUR_GROCERIES: &str =
-        "2026-01-10 * \"Groceries\"\n  Assets:Bank       -55.00 USD\n  Expenses:Food      55.00 USD\n";
-    const THEIR_GROCERIES: &str =
-        "2026-01-10 * \"Groceries\"\n  Assets:Bank       -60.00 USD\n  Expenses:Food      60.00 USD\n";
+    const BASE_GROCERIES: &str = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -50.00 USD\n  Expenses:Food      50.00 USD\n";
+    const OUR_GROCERIES: &str = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -55.00 USD\n  Expenses:Food      55.00 USD\n";
+    const THEIR_GROCERIES: &str = "2026-01-10 * \"Groceries\"\n  Assets:Bank       -60.00 USD\n  Expenses:Food      60.00 USD\n";
     const COFFEE: &str =
         "2026-02-01 * \"Coffee\"\n  Assets:Bank       -3.00 USD\n  Expenses:Food      3.00 USD\n";
     const BROKEN: &str =
@@ -635,9 +632,11 @@ option \"operating_currency\" \"USD\"
                 "errors: {:?}",
                 loaded.ledger.errors
             );
-            assert!(loaded.ledger.source_map.files()[0]
-                .source
-                .contains("Coffee"));
+            assert!(
+                loaded.ledger.source_map.files()[0]
+                    .source
+                    .contains("Coffee")
+            );
         }
     }
 
@@ -721,7 +720,9 @@ option \"operating_currency\" \"USD\"
 
         // The sync client replaces the copy between the comparison and the
         // answer: those bytes were never merged, so they must stay.
-        let replaced = format!("{theirs}\n2026-03-01 * \"Tea\"\n  Assets:Bank       -1.00 USD\n  Expenses:Food      1.00 USD\n");
+        let replaced = format!(
+            "{theirs}\n2026-03-01 * \"Tea\"\n  Assets:Bank       -1.00 USD\n  Expenses:Food      1.00 USD\n"
+        );
         fs::write(&case.copy, &replaced).unwrap();
 
         let written =

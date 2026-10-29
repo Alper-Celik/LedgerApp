@@ -41,7 +41,15 @@ pub(crate) fn edit_transaction(state: &AppState, edit: TransactionEdit) -> Resul
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
+    apply_file_edit(
+        state,
+        &path,
+        &previous,
+        None,
+        rewritten,
+        reported,
+        Origin::User,
+    )
 }
 
 /// The body of [`transaction_source`](crate::commands::transaction_source), split
@@ -87,7 +95,15 @@ pub(crate) fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> 
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
+    apply_file_edit(
+        state,
+        &path,
+        &previous,
+        None,
+        rewritten,
+        reported,
+        Origin::User,
+    )
 }
 
 /// The body of
@@ -130,7 +146,15 @@ pub(crate) fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<
         )
     };
 
-    apply_file_edit(state, &path, &previous, text.to_string(), reported, Origin::User)
+    apply_file_edit(
+        state,
+        &path,
+        &previous,
+        None,
+        text.to_string(),
+        reported,
+        Origin::User,
+    )
 }
 
 /// The body of [`update_file_text`](crate::commands::update_file_text): a journal
@@ -144,6 +168,7 @@ pub(crate) fn edit_named_file_source(
     state: &AppState,
     file: &str,
     text: &str,
+    base: Option<&str>,
 ) -> Result<(), String> {
     let (path, previous, reported) = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
@@ -156,7 +181,15 @@ pub(crate) fn edit_named_file_source(
         )
     };
 
-    apply_file_edit(state, &path, &previous, text.to_string(), reported, Origin::User)
+    apply_file_edit(
+        state,
+        &path,
+        &previous,
+        base,
+        text.to_string(),
+        reported,
+        Origin::User,
+    )
 }
 
 /// The body of [`add_transaction`](crate::commands::add_transaction), split out
@@ -186,7 +219,15 @@ pub(crate) fn create_transaction(state: &AppState, entry: NewTransaction) -> Res
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
+    apply_file_edit(
+        state,
+        &path,
+        &previous,
+        None,
+        rewritten,
+        reported,
+        Origin::User,
+    )
 }
 
 /// `text` with `entry` appended to the end of the file as a new transaction.
@@ -288,7 +329,13 @@ fn render_transaction(
             .as_deref()
             .map(str::trim)
             .filter(|currency| !currency.is_empty())
-            .or_else(|| ledger.options.operating_currency.first().map(String::as_str))
+            .or_else(|| {
+                ledger
+                    .options
+                    .operating_currency
+                    .first()
+                    .map(String::as_str)
+            })
             .ok_or("the ledger declares no `operating_currency` to write amounts in")?;
         // Pad out to the file's own amount column, never below one space, so an
         // account longer than the file's widest cannot touch its figure.
@@ -361,9 +408,7 @@ fn posting_amount_column(line: &str) -> Option<usize> {
     let gap = value.len() - value.trim_start().len();
     value
         .trim_start()
-        .starts_with(|character: char| {
-            character.is_ascii_digit() || matches!(character, '-' | '+')
-        })
+        .starts_with(|character: char| character.is_ascii_digit() || matches!(character, '-' | '+'))
         .then_some(indent + account_end + gap)
 }
 
@@ -377,6 +422,7 @@ fn apply_file_edit(
     state: &AppState,
     path: &Path,
     previous: &str,
+    base: Option<&str>,
     rewritten: String,
     reported: Vec<String>,
     origin: Origin,
@@ -396,6 +442,18 @@ fn apply_file_edit(
             path.display()
         ));
     }
+    // The caller's own base is the stronger check: an editor's buffer can be
+    // older than the *session's* copy — a reload replaced what the ledger holds
+    // while the buffer kept the text it opened with — and the two would agree
+    // with disk, so the comparison above cannot see it.
+    if let Some(base) = base
+        && base.as_bytes() != previous_bytes
+    {
+        return Err(format!(
+            "{} changed since this draft was started; reopen it to edit the current text",
+            path.display()
+        ));
+    }
 
     // Reload the journal this session was opened with, never the file just
     // written: `Loaded::root` explains why.
@@ -407,12 +465,15 @@ fn apply_file_edit(
             .unwrap_or_else(|| path.to_path_buf())
     };
 
-    write_atomic(path, rewritten.as_bytes())
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::fsutil::write_atomic(path, rewritten.as_bytes(), None)?;
     let reloaded = match load_journal(&root) {
         Ok(ledger) => ledger,
         Err(e) => {
-            return Err(rollback(path, &previous_bytes, format!("{}: {e}", root.display())));
+            return Err(rollback(
+                path,
+                &previous_bytes,
+                format!("{}: {e}", root.display()),
+            ));
         }
     };
     let raised = new_errors(&reported, error_signatures(&reloaded.errors));
@@ -443,37 +504,13 @@ fn apply_file_edit(
 /// one case where the caller must know the ledger on disk is now wrong: the
 /// loader's message alone would read as "nothing was written".
 fn rollback(path: &Path, previous_bytes: &[u8], refusal: String) -> String {
-    match write_atomic(path, previous_bytes) {
+    match crate::fsutil::write_atomic(path, previous_bytes, None) {
         Ok(()) => refusal,
         Err(error) => format!(
             "{refusal}\n{} could not be restored ({error}); it holds the refused edit",
             path.display()
         ),
     }
-}
-
-/// Replace a file's bytes so a crash leaves either the old text or the new one:
-/// write a temp beside it, flush it, rename over the target, then flush the
-/// directory. Truncating the journal in place would lose it on ENOSPC or power
-/// loss, which is the one failure a ledger app must not have.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "ledger".to_owned());
-    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
-    {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&temporary, path)?;
-    if let Ok(handle) = fs::File::open(directory) {
-        let _ = handle.sync_all();
-    }
-    Ok(())
 }
 
 /// Append one operation to the ledger's log (`<ledger>/.ledger/log`).
@@ -1277,6 +1314,37 @@ option \"operating_currency\" \"USD\"
         assert!(commit_staged(&state, "no repository").is_err());
     }
 
+    /// A draft written against text the file no longer holds is refused, and the
+    /// file keeps the bytes that arrived in between.
+    ///
+    /// The session copy already matches disk after a reload, so the check that
+    /// compares them cannot see an editor whose buffer was not reloaded; the base
+    /// the editor sends is what does.
+    #[test]
+    fn a_draft_written_against_a_stale_copy_is_refused() {
+        let dir = TempDir::new("stale-base");
+        let (_repo, path, text) = single_file_fixture(&dir);
+        let state = loaded_state(&path);
+        let name = path.display().to_string();
+
+        // Someone else's version lands and the ledger reloads around it.
+        let theirs = format!("{text}\n; written elsewhere \n");
+        fs::write(&path, &theirs).unwrap();
+        {
+            let mut guard = state.loaded.write().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(crate::session::load_baselined(&path).unwrap());
+        }
+
+        let mine = format!("{text}\n; my draft \n");
+        let error = edit_named_file_source(&state, &name, &mine, Some(&text)).unwrap_err();
+
+        assert!(error.contains("changed since this draft"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
+        // The base the file actually holds goes through.
+        edit_named_file_source(&state, &name, &mine, Some(&theirs)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), mine);
+    }
+
     /// A file's whole text is what the text editor saves: the same text is no
     /// edit at all, a changed one goes through the loader and is staged, and a
     /// text the loader refuses leaves the file byte-for-byte as it stood.
@@ -1300,7 +1368,7 @@ option \"operating_currency\" \"USD\"
 
         // The same text back is no edit at all: no bytes written, nothing staged.
         let before = fs::read(&path).unwrap();
-        edit_named_file_source(&state, &name, &handed).unwrap();
+        edit_named_file_source(&state, &name, &handed, None).unwrap();
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(repo.index().unwrap().write_tree().unwrap(), head.id());
 
@@ -1311,7 +1379,7 @@ option \"operating_currency\" \"USD\"
             aligned("Assets:Bank:Checking", "-3.00"),
             aligned("Expenses:Food", "3.00"),
         );
-        edit_named_file_source(&state, &name, &rewritten).unwrap();
+        edit_named_file_source(&state, &name, &rewritten, None).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), rewritten);
         assert_eq!(
             views(&state)
@@ -1330,10 +1398,10 @@ option \"operating_currency\" \"USD\"
         let refused = format!(
             "{rewritten}2026-01-21 * \"Broken\"\n  Assets:Bank:Checking  -3.00 USD\n  Expenses:Food          2.00 USD\n"
         );
-        assert!(edit_named_file_source(&state, &name, &refused).is_err());
+        assert!(edit_named_file_source(&state, &name, &refused, None).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(
-            edit_named_file_source(&state, "/tmp/elsewhere.bean", "whatever\n")
+            edit_named_file_source(&state, "/tmp/elsewhere.bean", "whatever\n", None)
                 .unwrap_err()
                 .contains("not a file of this journal")
         );

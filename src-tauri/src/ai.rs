@@ -95,12 +95,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::fs;
+use std::io::{self, BufRead, BufReader, Read};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -389,71 +388,10 @@ pub fn save(dir: &Path, config: &AiConfig) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(&stored)
         .map_err(|error| format!("cannot render the assistant config: {error}"))?;
     text.push('\n');
-    let path = config_path(dir);
-    let temp = dir.join(format!(
-        "{CONFIG_FILE}.tmp-{}-{}",
-        std::process::id(),
-        temp_counter()
-    ));
-    let written = create_private(&temp).and_then(|mut file| {
-        file.write_all(text.as_bytes())?;
-        // On the device before the rename, so the rename never points at a
-        // file whose bytes are still in a cache.
-        file.sync_all()
-    });
-    if let Err(error) = written {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot write `{}`: {error}", temp.display()));
-    }
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot replace `{}`: {error}", path.display()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-            return Err(format!(
-                "cannot make `{}` private: {error}",
-                path.display()
-            ));
-        }
-    }
+    // A secret: the shared writer creates the file private (0600) *before* the
+    // rename, so it is never readable by anyone else, not even briefly.
+    crate::fsutil::write_atomic(&config_path(dir), text.as_bytes(), Some(0o600))?;
     Ok(())
-}
-
-/// Create the temporary file, private from its first byte.
-///
-/// `create_new` refuses an existing path, so a symlink planted at the temporary
-/// name is never followed. A leftover file from a process that had this pid
-/// before is the one thing that refuses a legitimate write, so it is cleared
-/// once and the create retried.
-fn create_private(path: &Path) -> io::Result<File> {
-    fn options() -> OpenOptions {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            // The mode only applies when the file is created, which is exactly
-            // the window the key sits in before the rename.
-            options.mode(0o600);
-        }
-        options
-    }
-    match options().open(path) {
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            options().open(path)
-        }
-        other => other,
-    }
-}
-
-/// A number no other write in this process is using.
-fn temp_counter() -> u32 {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Whether a file is private, for the test that pins the mode down.
@@ -754,7 +692,10 @@ impl Failure {
             Self::Config(detail) => format!("the assistant is not configured: {detail}"),
             Self::Request(detail) => format!("the request cannot be sent: {detail}"),
             Self::Unauthorized { status, detail } => {
-                format!("the endpoint rejected the API key ({status}){}", suffix(detail))
+                format!(
+                    "the endpoint rejected the API key ({status}){}",
+                    suffix(detail)
+                )
             }
             Self::RateLimited {
                 retry_after,
@@ -771,7 +712,10 @@ impl Failure {
                 suffix(detail)
             ),
             Self::Rejected { status, detail } => {
-                format!("the endpoint rejected the request ({status}){}", suffix(detail))
+                format!(
+                    "the endpoint rejected the request ({status}){}",
+                    suffix(detail)
+                )
             }
             Self::Provider(detail) => format!("the endpoint reported an error: {detail}"),
             Self::Malformed(detail) => {
@@ -1007,7 +951,9 @@ fn complete_with(
     config: &AiConfig,
     request: ChatRequest,
 ) -> Result<ChatResponse, Failure> {
-    run(transport, config, request, false, &mut |_| ControlFlow::Continue(()))
+    run(transport, config, request, false, &mut |_| {
+        ControlFlow::Continue(())
+    })
 }
 
 fn stream_with(
@@ -1080,7 +1026,9 @@ fn request_body(
         ));
     }
     if request.messages.is_empty() {
-        return Err(Failure::Request("the conversation has no messages".to_string()));
+        return Err(Failure::Request(
+            "the conversation has no messages".to_string(),
+        ));
     }
     let messages = wire_messages(request)?;
     let tools: Vec<WireTool> = request
@@ -1102,7 +1050,9 @@ fn request_body(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         stream,
-        stream_options: stream.then_some(WireStreamOptions { include_usage: true }),
+        stream_options: stream.then_some(WireStreamOptions {
+            include_usage: true,
+        }),
     };
     serde_json::to_vec(&body)
         .map_err(|error| Failure::Request(format!("cannot render the request: {error}")))
@@ -1130,7 +1080,8 @@ fn wire_messages(request: &ChatRequest) -> Result<Vec<WireMessage<'_>>, Failure>
     };
     let mut messages = Vec::with_capacity(request.messages.len());
     for (index, message) in request.messages.iter().enumerate() {
-        if message.role == ChatRole::Tool && message.tool_call_id.as_deref().unwrap_or("").is_empty()
+        if message.role == ChatRole::Tool
+            && message.tool_call_id.as_deref().unwrap_or("").is_empty()
         {
             return Err(Failure::Request(
                 "a tool result needs the id of the call it answers".to_string(),
@@ -1140,7 +1091,9 @@ fn wire_messages(request: &ChatRequest) -> Result<Vec<WireMessage<'_>>, Failure>
             Some(at) if at == index => {
                 let mut parts = Vec::with_capacity(request.media.len() + 1);
                 if !message.text.is_empty() {
-                    parts.push(WirePart::Text { text: &message.text });
+                    parts.push(WirePart::Text {
+                        text: &message.text,
+                    });
                 }
                 for media in &request.media {
                     parts.push(WirePart::ImageUrl {
@@ -1227,12 +1180,8 @@ enum WireContent<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WirePart<'a> {
-    Text {
-        text: &'a str,
-    },
-    ImageUrl {
-        image_url: WireImageUrl<'a>,
-    },
+    Text { text: &'a str },
+    ImageUrl { image_url: WireImageUrl<'a> },
 }
 
 #[derive(Serialize)]
@@ -1450,7 +1399,10 @@ fn parse_response(body: &str) -> Result<ChatResponse, Failure> {
             ToolCall {
                 id: call.id.unwrap_or_default(),
                 name: function.name.unwrap_or_default(),
-                arguments: function.arguments.map(|arguments| arguments.text()).unwrap_or_default(),
+                arguments: function
+                    .arguments
+                    .map(|arguments| arguments.text())
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -1654,8 +1606,7 @@ fn apply(
             && !text.is_empty()
         {
             assembled.text.push_str(&text);
-            if on_event(StreamEvent::TextDelta { text: text.clone() }) == ControlFlow::Break(())
-            {
+            if on_event(StreamEvent::TextDelta { text: text.clone() }) == ControlFlow::Break(()) {
                 assembled.cancelled = true;
                 return Ok(Flow::Cancel);
             }
@@ -1906,7 +1857,9 @@ mod tests {
     #[test]
     fn request_carries_model_messages_and_sampling() {
         let transport = FakeTransport::new([reply(200, ANSWER)]);
-        let config = config().with_max_tokens(Some(256)).with_temperature(Some(0.25));
+        let config = config()
+            .with_max_tokens(Some(256))
+            .with_temperature(Some(0.25));
         let request = ChatRequest {
             messages: vec![
                 ChatMessage::text(ChatRole::System, "You keep books."),
@@ -1991,9 +1944,7 @@ mod tests {
                 user("What is this receipt?"),
             ],
             tools: Vec::new(),
-            media: vec![
-                MediaPart::inline("image/png", b"\x89PNG").with_detail(ImageDetail::High),
-            ],
+            media: vec![MediaPart::inline("image/png", b"\x89PNG").with_detail(ImageDetail::High)],
         };
         complete_with(&transport, &config(), request).expect("the turn completes");
         let body = transport.calls()[0].json();
@@ -2029,7 +1980,10 @@ mod tests {
         // An image-only turn is just the image: no empty text part is invented.
         assert_eq!(content.as_array().map(Vec::len), Some(1), "{content}");
         assert_eq!(content[0]["type"], "image_url");
-        assert_eq!(content[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
         assert!(content[0]["image_url"].get("detail").is_none());
     }
 
@@ -2103,7 +2057,10 @@ mod tests {
             config.chat_url().expect("a url"),
             "https://example.test/v1/chat/completions"
         );
-        assert_eq!(config.models_url().expect("a url"), "https://example.test/v1/models");
+        assert_eq!(
+            config.models_url().expect("a url"),
+            "https://example.test/v1/models"
+        );
     }
 
     #[test]
@@ -2607,8 +2564,13 @@ mod tests {
             tools: Vec::new(),
             media: Vec::new(),
         };
-        let error = stream_with(&transport, &config(), request, |_| ControlFlow::Continue(()))
-            .unwrap_err();
+        let error = stream_with(
+            &transport,
+            &config(),
+            request,
+            |_| ControlFlow::Continue(()),
+        )
+        .unwrap_err();
         assert!(matches!(error, Failure::Provider(_)), "{error:?}");
         assert!(error.message().contains("overloaded"), "{error}");
     }
@@ -2638,7 +2600,8 @@ mod tests {
                 }
             }
         }
-        let script = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n".to_vec();
+        let script =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n".to_vec();
         let transport = FakeTransport::new([HttpReply {
             status: 200,
             retry_after: None,
@@ -2651,9 +2614,13 @@ mod tests {
             tools: Vec::new(),
             media: Vec::new(),
         };
-        let response =
-            stream_with(&transport, &config(), request, |_| ControlFlow::Continue(()))
-                .expect("the stream ends at [DONE]");
+        let response = stream_with(
+            &transport,
+            &config(),
+            request,
+            |_| ControlFlow::Continue(()),
+        )
+        .expect("the stream ends at [DONE]");
         assert_eq!(response.text, "hi");
         assert!(!response.cancelled);
     }
@@ -2667,9 +2634,13 @@ mod tests {
             tools: Vec::new(),
             media: Vec::new(),
         };
-        let response =
-            stream_with(&transport, &config(), request, |_| ControlFlow::Continue(()))
-                .expect("the stream completes");
+        let response = stream_with(
+            &transport,
+            &config(),
+            request,
+            |_| ControlFlow::Continue(()),
+        )
+        .expect("the stream completes");
         assert_eq!(response.text, "hi");
     }
 
@@ -2682,25 +2653,32 @@ mod tests {
             tools: Vec::new(),
             media: Vec::new(),
         };
-        let error = stream_with(&transport, &config(), request, |_| ControlFlow::Continue(()))
-            .unwrap_err();
+        let error = stream_with(
+            &transport,
+            &config(),
+            request,
+            |_| ControlFlow::Continue(()),
+        )
+        .unwrap_err();
         assert!(matches!(error, Failure::Malformed(_)), "{error:?}");
     }
 
     #[test]
     fn a_stream_error_status_is_classified_before_reading() {
-        let transport = FakeTransport::new([reply_after(
-            429,
-            r#"{"error":{"message":"slow down"}}"#,
-            5,
-        )]);
+        let transport =
+            FakeTransport::new([reply_after(429, r#"{"error":{"message":"slow down"}}"#, 5)]);
         let request = ChatRequest {
             messages: vec![user("hi")],
             tools: Vec::new(),
             media: Vec::new(),
         };
-        let error = stream_with(&transport, &config(), request, |_| ControlFlow::Continue(()))
-            .unwrap_err();
+        let error = stream_with(
+            &transport,
+            &config(),
+            request,
+            |_| ControlFlow::Continue(()),
+        )
+        .unwrap_err();
         match error {
             Failure::RateLimited { retry_after, .. } => assert_eq!(retry_after, Some(5)),
             other => panic!("expected RateLimited, got {other:?}"),
@@ -2862,7 +2840,10 @@ mod tests {
         }
         // The key is on disk — that is the point of the file — but only there.
         let text = fs::read_to_string(config_path(dir.dir())).expect("the file is read");
-        assert!(text.contains("sk-secret"), "the key is stored for the request");
+        assert!(
+            text.contains("sk-secret"),
+            "the key is stored for the request"
+        );
     }
 
     #[test]
@@ -2921,7 +2902,10 @@ mod tests {
             text: "hi".to_string(),
         })
         .expect("the event serializes");
-        assert_eq!(text, serde_json::json!({"kind": "text_delta", "text": "hi"}));
+        assert_eq!(
+            text,
+            serde_json::json!({"kind": "text_delta", "text": "hi"})
+        );
         let done = serde_json::to_value(StreamEvent::Done {
             finish_reason: Some("stop".to_string()),
         })

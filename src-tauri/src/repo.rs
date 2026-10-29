@@ -248,7 +248,13 @@ mod tests {
         init(&dir.file("beancount")).unwrap();
 
         assert!(dir.file("beancount/.git").exists());
-        assert_eq!(state(&dir.file("beancount")).root, state(dir.dir()).root.as_deref().map(|_| dir.file("beancount").display().to_string()));
+        assert_eq!(
+            state(&dir.file("beancount")).root,
+            state(dir.dir())
+                .root
+                .as_deref()
+                .map(|_| dir.file("beancount").display().to_string())
+        );
     }
 
     #[test]

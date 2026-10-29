@@ -53,12 +53,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let notice = $state("");
 	let refreshing = $state(false);
 
+	let shownRoot = $state(first.root);
+
 	$effect(() => {
 		// `invalidateAll` re-runs the route's load — after another ledger is
 		// opened, or after this screen reloads the ledger — and the state above
 		// was taken from an earlier read. Following the prop is what keeps a
 		// "Switch" on a stale row from driving the previous repository.
 		if (data === loaded) return;
+		// The write's own sentence is cleared only when the repository changed:
+		// this screen's reload is what announces "Switched to …", and clearing it
+		// would erase the confirmation of the click that caused the reload.
+		const switched = data.root !== shownRoot;
+		shownRoot = data.root;
 		loaded = data;
 		branches = data.branches;
 		commits = data.commits;
@@ -69,7 +76,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		logError = data.logError;
 		treeError = data.treeError;
 		failure = data.error;
-		notice = "";
+		if (switched) notice = "";
 	});
 
 	const current = $derived(branches.find((branch) => branch.is_current)?.name ?? "");

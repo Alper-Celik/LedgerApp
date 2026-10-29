@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { invalidateAll } from "$app/navigation";
+	import { untrack } from "svelte";
 	import PriceTable from "$lib/components/prices/price-table.svelte";
 	import WritePricesSheet from "$lib/components/prices/write-prices-sheet.svelte";
 	import {
@@ -17,7 +18,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { commands, type PriceQuote, type PriceTarget } from "../../bindings";
 	import { messageOf } from "$lib/errors.js";
-	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { bumpLedgerRevision, ledgerEpoch } from "$lib/ledger-revision.svelte.js";
 	import type { PageProps } from "./$types";
 
 	/**
@@ -39,6 +40,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** Quotes fetched this visit that the ledger does not hold yet, by pair. */
 	let fetched = $state<Record<string, PriceQuote>>({});
 	let writeOpen = $state(false);
+
+	$effect(() => {
+		// Quotes fetched for one ledger's holdings, and a sheet opened to write
+		// them, describe that ledger: keeping them into another would offer to
+		// write a price fetched under different holdings into the new journal's
+		// files, whose list the sheet would silently fall back to.
+		void ledgerEpoch.value;
+		untrack(() => {
+			states = {};
+			picked = {};
+			fetched = {};
+			writeOpen = false;
+		});
+	});
 
 	const busy = $derived(Object.values(states).some((state) => state.status === "busy"));
 	const quotes = $derived(Object.values(fetched));

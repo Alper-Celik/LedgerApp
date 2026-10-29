@@ -81,12 +81,11 @@
 //! file would make a rename on one device and an append on another collide in
 //! git, where the id-based path lets both land.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -344,7 +343,7 @@ pub fn append(ledger_dir: &Path, id: &str, message: &Message) -> Result<Summary,
             fs::create_dir_all(&dir)
                 .map_err(|error| format!("create {}: {error}", dir.display()))?;
             let text = render(&meta, std::slice::from_ref(message));
-            write_atomic(&path, text.as_bytes())?;
+            crate::fsutil::write_atomic(&path, text.as_bytes(), None)?;
             read_summary(&path)
         }
     }
@@ -380,7 +379,7 @@ pub fn create(
     };
     let path = dir.join(file_name(&meta.created, &meta.title, id));
     fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    write_atomic(&path, render(&meta, &[]).as_bytes())?;
+    crate::fsutil::write_atomic(&path, render(&meta, &[]).as_bytes(), None)?;
     read_summary(&path)
 }
 
@@ -403,7 +402,7 @@ pub fn rename(ledger_dir: &Path, id: &str, title: &str) -> Result<Summary, Strin
             (meta.updated_range.clone(), now.as_str()),
         ],
     )?;
-    write_atomic(&path, next.as_bytes())?;
+    crate::fsutil::write_atomic(&path, next.as_bytes(), None)?;
     read_summary(&path)
 }
 
@@ -491,11 +490,7 @@ fn locate(dir: &Path, id: &str) -> Result<Option<(PathBuf, Meta)>, String> {
     }
     // Two files with one id should not happen; the newer one is the answer so
     // the store behaves like the listing that hides the older one.
-    found.sort_by(|a, b| {
-        b.1.updated
-            .cmp(&a.1.updated)
-            .then_with(|| a.0.cmp(&b.0))
-    });
+    found.sort_by(|a, b| b.1.updated.cmp(&a.1.updated).then_with(|| a.0.cmp(&b.0)));
     Ok(found.into_iter().next())
 }
 
@@ -576,12 +571,16 @@ fn parse(text: &str) -> Result<(Meta, Vec<Message>), String> {
             continue;
         }
         let Some((key, range, value)) = split_pair(start, line) else {
-            return Err(format!("`{line}` in the frontmatter is not a `key: value` pair"));
+            return Err(format!(
+                "`{line}` in the frontmatter is not a `key: value` pair"
+            ));
         };
         match key {
             "id" => {
                 if !is_valid_id(value) {
-                    return Err(format!("`{value}` in the frontmatter is not a conversation id"));
+                    return Err(format!(
+                        "`{value}` in the frontmatter is not a conversation id"
+                    ));
                 }
                 id = Some(value.to_string());
             }
@@ -677,9 +676,7 @@ fn parse_messages(body: &str) -> Result<Vec<Message>, String> {
             Some((_, body)) => body.push(line),
             None => {
                 if !line.trim().is_empty() {
-                    return Err(format!(
-                        "`{line}` sits before the first message heading"
-                    ));
+                    return Err(format!("`{line}` sits before the first message heading"));
                 }
             }
         }
@@ -747,10 +744,7 @@ fn trailing_json<'a>(
     let value = serde_json::from_str(&payload)
         .map_err(|error| format!("a tool message's payload is not JSON: {error}"))?;
     let mut remaining = &rest[..opener];
-    while remaining
-        .last()
-        .is_some_and(|line| line.trim().is_empty())
-    {
+    while remaining.last().is_some_and(|line| line.trim().is_empty()) {
         remaining = &remaining[..remaining.len() - 1];
     }
     Ok(Some((value, remaining)))
@@ -854,7 +848,7 @@ fn replace_updated(path: &Path, meta: &Meta, now: &str) -> Result<(), String> {
     }
     let text = read_text(path)?;
     let next = splice(&text, &[(range.clone(), now)])?;
-    write_atomic(path, next.as_bytes())
+    crate::fsutil::write_atomic(path, next.as_bytes(), None)
 }
 
 /// Add `block` to the end of the file with one append write.
@@ -896,45 +890,6 @@ fn splice(text: &str, edits: &[(Range<usize>, &str)]) -> Result<String, String> 
     }
     next.push_str(&text[cursor..]);
     Ok(next)
-}
-
-/// Write `bytes` to `path` whole or not at all: a temp file beside it, flushed
-/// to the disk, renamed over it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("{} has no directory", path.display()))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("conversation");
-    // A dotted name that does not end in `.md`: a listing or a git status that
-    // ran mid-write must not take the temp file for a conversation.
-    let temp = dir.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let write = || -> std::io::Result<()> {
-        let mut file = File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)?;
-        // The rename is durable only once the directory itself is flushed.
-        if let Ok(dir) = File::open(dir) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    };
-    match write() {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temp);
-            Err(format!("write {}: {error}", path.display()))
-        }
-    }
 }
 
 /// The name a conversation is created under: the creation date, the title as a
@@ -1298,7 +1253,10 @@ mod tests {
         // Nothing was created anywhere for any of them.
         assert!(
             !sessions_dir(dir.dir()).exists()
-                || fs::read_dir(sessions_dir(dir.dir())).unwrap().next().is_none()
+                || fs::read_dir(sessions_dir(dir.dir()))
+                    .unwrap()
+                    .next()
+                    .is_none()
         );
         // The ledger directory itself is untouched.
         assert_eq!(fs::read_dir(dir.dir()).unwrap().count(), 0);
@@ -1346,7 +1304,8 @@ mod tests {
     fn a_tool_payload_and_a_body_that_looks_like_a_heading_round_trip() {
         let dir = TempDir::new("conversations-tool");
         let id = new_id();
-        let body = "Here is the query:\n\n## user\n\nnot a message\n\\## assistant\n\nand an escaped one";
+        let body =
+            "Here is the query:\n\n## user\n\nnot a message\n\\## assistant\n\nand an escaped one";
         append(dir.dir(), &id, &message(Role::Assistant, body)).unwrap();
         let mut tool = message(Role::Tool, "register flows");
         tool.data = Some(serde_json::json!({ "rows": 3, "accounts": ["Expenses:Food"] }));
@@ -1383,9 +1342,11 @@ mod tests {
         assert_eq!(loaded.model, "gpt-5");
         assert_eq!(loaded.tags, ["taxes", "2026"]);
         assert!(loaded.messages.is_empty());
-        assert!(fs::read_to_string(&loaded.path)
-            .unwrap()
-            .contains("tags: [taxes, 2026]\n"));
+        assert!(
+            fs::read_to_string(&loaded.path)
+                .unwrap()
+                .contains("tags: [taxes, 2026]\n")
+        );
         assert!(create(dir.dir(), &id, "Again", "", &[]).is_err());
 
         append(dir.dir(), &id, &message(Role::User, "Hello")).unwrap();
@@ -1424,11 +1385,7 @@ mod tests {
 
         // A duplicate id — two copies of one conversation after a merge — is
         // listed once, and the copy that lost is reported.
-        fs::write(
-            sessions.join("c.md"),
-            file("older", "2026-05-02T00:00:00Z"),
-        )
-        .unwrap();
+        fs::write(sessions.join("c.md"), file("older", "2026-05-02T00:00:00Z")).unwrap();
         let listing = list(dir.dir()).unwrap();
         assert_eq!(listing.sessions.len(), 2);
         assert_eq!(listing.errors.len(), 1);
@@ -1506,7 +1463,9 @@ mod tests {
         let stem = name.strip_suffix(".md").unwrap();
         let (head, tail) = stem.rsplit_once('-').unwrap();
         assert_eq!(tail, id);
-        let slug = head.strip_prefix(&format!("{}-", &summary.created[..10])).unwrap();
+        let slug = head
+            .strip_prefix(&format!("{}-", &summary.created[..10]))
+            .unwrap();
         assert!(slug.len() <= SLUG_LIMIT, "{slug}");
         assert!(slug.is_ascii(), "{slug}");
     }
@@ -1523,6 +1482,9 @@ mod tests {
             "Notes"
         );
         assert_eq!(title_from(&message(Role::User, "   ")), "");
-        assert_eq!(title_from(&message(Role::User, "One line\nsecond")), "One line");
+        assert_eq!(
+            title_from(&message(Role::User, "One line\nsecond")),
+            "One line"
+        );
     }
 }

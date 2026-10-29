@@ -33,12 +33,7 @@ pub struct ExternalChange {
     pub disk: String,
 }
 
-impl ExternalChange {
-    /// Whether the file is new to this device (no recorded hash).
-    pub fn is_new(&self) -> bool {
-        self.seen.is_empty()
-    }
-}
+impl ExternalChange {}
 
 /// Every file the log knows about whose bytes moved since this device last saw
 /// them, sorted by path. A file the log does not mention is not reported: the
@@ -52,6 +47,11 @@ pub fn changed(log_dir: &Path) -> Result<Vec<ExternalChange>, String> {
             // no longer has; nothing to compare.
             continue;
         };
+        // A recorded path is the writer's spelling — another device's private
+        // mirror, or this device before the folder moved. Resolving it against
+        // this ledger first is what keeps a moved folder from reading as "every
+        // file was deleted by a peer".
+        let path = history::local_path(log_dir, &path).unwrap_or(path);
         let disk = match fs::read(&path) {
             Ok(bytes) => hash(&bytes),
             // Gone since we wrote it: a peer deleted it. That is a change too,
@@ -101,7 +101,11 @@ mod tests {
             &log,
             Origin::User,
             "write",
-            &[history::Change::new(&ledger, None, Some(&fs::read(&ledger).unwrap()))],
+            &[history::Change::new(
+                &ledger,
+                None,
+                Some(&fs::read(&ledger).unwrap()),
+            )],
         )
         .unwrap();
 
@@ -111,7 +115,6 @@ mod tests {
         let changes = changed(&log).unwrap();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, ledger.display().to_string());
-        assert!(!changes[0].is_new());
         assert_eq!(changes[0].disk, hash(&fs::read(&ledger).unwrap()));
     }
 
@@ -136,7 +139,10 @@ mod tests {
         fs::remove_file(&ledger).unwrap();
         let changes = changed(&log).unwrap();
         assert_eq!(changes.len(), 1);
-        assert!(changes[0].disk.is_empty(), "a deleted file compares as empty");
+        assert!(
+            changes[0].disk.is_empty(),
+            "a deleted file compares as empty"
+        );
     }
 
     #[test]

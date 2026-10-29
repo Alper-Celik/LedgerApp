@@ -957,7 +957,10 @@ mod tests {
         assert_eq!(image.kind, AttachmentKind::Image);
         assert_eq!(image.pages, None);
         assert!(image.sheets.is_empty());
-        assert_eq!(u64::from(image.bytes), fs::metadata(&png_named).unwrap().len());
+        assert_eq!(
+            u64::from(image.bytes),
+            fs::metadata(&png_named).unwrap().len()
+        );
     }
 
     #[test]

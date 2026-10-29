@@ -15,6 +15,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { refreshSyncWatch } from "$lib/sync.svelte.js";
 	import { ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { resetLanguageServer } from "$lib/lsp.js";
+	import { refreshGit } from "$lib/git.svelte.js";
 	import { load as loadTheme } from "$lib/theme/store.svelte.js";
 	import "../app.css";
 	import { ModeWatcher } from "mode-watcher";
@@ -37,9 +38,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	$effect(() => {
 		// A different journal is open: the language server the backend stopped is
-		// not the one the next editor should attach to.
+		// not the one the next editor should attach to, and the repository the
+		// sidebar gates Diff/Commit on is the new ledger's, not the old one's.
 		void ledgerEpoch.value;
 		resetLanguageServer();
+		void refreshGit();
 	});
 </script>
 

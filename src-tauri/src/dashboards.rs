@@ -13,10 +13,8 @@
 //! only *names* widget kinds and carries their settings, and the kinds are the
 //! frontend registry's keys.
 
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +115,10 @@ pub fn load(dir: &Path) -> Result<Vec<Dashboard>, String> {
 /// this one dashboard. The write itself is atomic (see [`write_store`]).
 pub fn save(dir: &Path, dashboard: Dashboard) -> Result<(), String> {
     validate(&dashboard)?;
+    // One read-modify-write of the whole store, serialised across the app's
+    // processes the way the index store is: a second instance saving a different
+    // dashboard must not publish a snapshot that never saw this one.
+    let _lock = crate::history::Lock::for_named_store(dir, "dashboards")?;
     let mut dashboards = load(dir)?;
     match dashboards
         .iter_mut()
@@ -134,6 +136,7 @@ pub fn save(dir: &Path, dashboard: Dashboard) -> Result<(), String> {
 /// come back on the next load. An unknown id is not an error — a caller that
 /// deletes twice gets `false` the second time.
 pub fn delete(dir: &Path, id: &str) -> Result<bool, String> {
+    let _lock = crate::history::Lock::for_named_store(dir, "dashboards")?;
     let mut dashboards = load(dir)?;
     let before = dashboards.len();
     dashboards.retain(|dashboard| dashboard.id != id);
@@ -253,33 +256,8 @@ fn write_store(dir: &Path, dashboards: &[Dashboard]) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(&store)
         .map_err(|error| format!("cannot render the dashboards: {error}"))?;
     text.push('\n');
-    let path = store_path(dir);
-    let temp = dir.join(format!(
-        "{TEMP_STEM}-{}-{}",
-        std::process::id(),
-        temp_counter()
-    ));
-    let written = File::create(&temp).and_then(|mut file| {
-        file.write_all(text.as_bytes())?;
-        // Flushed to the device before the rename, so the rename never points
-        // the store at a file whose bytes are still in a cache.
-        file.sync_all()
-    });
-    if let Err(error) = written {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot write `{}`: {error}", temp.display()));
-    }
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("cannot replace `{}`: {error}", path.display()));
-    }
-    Ok(())
-}
-
-/// A number no other write in this process is using.
-fn temp_counter() -> u32 {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    let bytes = text.as_bytes();
+    crate::fsutil::write_atomic(&store_path(dir), bytes, None)
 }
 
 #[cfg(test)]

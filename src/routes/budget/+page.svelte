@@ -50,7 +50,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	} from "$lib/budget.js";
 	import { messageOf } from "$lib/errors.js";
 	import { IsMobile } from "$lib/hooks/is-mobile.svelte.js";
-	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { cn } from "$lib/utils.js";
 	import type { PageProps } from "./$types";
 
@@ -158,6 +158,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The revision already reflected on screen, so the effect below runs on a bump. */
 	let revision = ledgerRevision.value;
+	/** The ledger the window on screen was read from. */
+	let epoch = ledgerEpoch.value;
 
 	async function refetch() {
 		const current = untrack(() => range);
@@ -184,6 +186,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// the grid back in step rather than leaving the figures stale.
 		if (ledgerRevision.value === revision) return;
 		revision = ledgerRevision.value;
+		// Another journal's budget windows have nothing to do with the previous
+		// one's: the route load already carries the new ledger's, so this visit's
+		// own read is dropped rather than refetched against the old window.
+		if (ledgerEpoch.value !== epoch) {
+			epoch = ledgerEpoch.value;
+			fetched = null;
+			return;
+		}
 		void refetch();
 	});
 </script>

@@ -248,7 +248,16 @@ fn config_dir(cli: &Cli) -> PathBuf {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
     };
-    base.unwrap_or_else(|| PathBuf::from(".")).join(IDENTIFIER)
+    // No usable config root (a service environment with none of the three set):
+    // refuse loudly instead of writing a private store into whatever directory
+    // the process started in, where the app would never look for it.
+    let Some(base) = base else {
+        eprintln!(
+            "ledger: no config directory: set HOME, XDG_CONFIG_HOME or APPDATA, or pass --config-dir"
+        );
+        return PathBuf::from(IDENTIFIER);
+    };
+    base.join(IDENTIFIER)
 }
 
 // ------------------------------------------------------------------ output ---
@@ -691,12 +700,10 @@ fn prices(cli: &Cli, fetch: bool, write: Option<&Path>) -> Result<u8, CliError> 
                     api::PriceFetch::Failed(_) => None,
                 })
                 .collect();
-            api::write_prices(&opened, &file.display().to_string(), &quotes)?;
-            eprintln!(
-                "ledger: appended {} quote(s) to {}",
-                quotes.len(),
-                file.display()
-            );
+            let appended = api::write_prices(&opened, &file.display().to_string(), &quotes)?;
+            // What was written, not what was fetched: a quote the ledger already
+            // holds is skipped, so a repeat run appends nothing and says so.
+            eprintln!("ledger: appended {appended} quote(s) to {}", file.display());
         }
         fetched = Some(outcomes);
     }

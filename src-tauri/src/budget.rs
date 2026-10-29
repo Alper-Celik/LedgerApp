@@ -185,7 +185,10 @@ fn collect_envelope_flows(ledger: &Ledger) -> Result<EnvelopeFlows, String> {
             continue;
         }
         months.insert(entry_month.clone());
-        accounts.entry(account).or_default().insert(entry_month, flow);
+        accounts
+            .entry(account)
+            .or_default()
+            .insert(entry_month, flow);
     }
     // The currency came from a commodity total, and a commodity total only
     // exists because a posting wrote a flow: the narrowed set has a month.
@@ -233,13 +236,9 @@ impl EnvelopeFlows {
         // `collect_envelope_flows` answers nothing when the namespace is empty,
         // so a collected set always names its newest month; the fallback keeps
         // the renderer total instead of panicking on a broken invariant.
-        let requested = month.map(str::to_owned).unwrap_or_else(|| {
-            self.months
-                .iter()
-                .next_back()
-                .cloned()
-                .unwrap_or_default()
-        });
+        let requested = month
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.months.iter().next_back().cloned().unwrap_or_default());
 
         let mut groups: BTreeMap<String, BudgetGroupTotals> = BTreeMap::new();
         let mut to_budget = Decimal::ZERO;

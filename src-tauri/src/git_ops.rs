@@ -238,9 +238,7 @@ pub fn log(repo: &Path, limit: usize, path: Option<&Path>) -> Result<Vec<CommitI
             break;
         }
         let id = id.map_err(|e| format!("git log: {e}"))?;
-        let commit = repo
-            .find_commit(id)
-            .map_err(|e| format!("git log: {e}"))?;
+        let commit = repo.find_commit(id).map_err(|e| format!("git log: {e}"))?;
         if let Some(filter) = &filter {
             // The filter is a predicate over the commit's own diff. The count
             // below stays the commit's whole change set, so the row's badge
@@ -533,8 +531,15 @@ pub fn merge_continue(repo: &Path) -> Result<(), String> {
         .signature()
         .map_err(|e| format!("git identity: {e} (set user.name and user.email)"))?;
     let parents: Vec<&git2::Commit> = parents.iter().collect();
-    repo.commit(Some("HEAD"), &signature, &signature, &message, &tree, &parents)
-        .map_err(|e| format!("git commit: {e}"))?;
+    repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        &message,
+        &tree,
+        &parents,
+    )
+    .map_err(|e| format!("git commit: {e}"))?;
     repo.cleanup_state()
         .map_err(|e| format!("git merge: {e}"))?;
     Ok(())
@@ -572,7 +577,9 @@ pub fn merge_abort(repo: &Path) -> Result<(), String> {
 pub fn revert_commit(repo: &Path, id: &str) -> Result<String, String> {
     let repo = open(repo)?;
     if repo.state() != RepositoryState::Clean {
-        return Err("another git operation is in progress: finish it or abort it first".to_string());
+        return Err(
+            "another git operation is in progress: finish it or abort it first".to_string(),
+        );
     }
     let target = find_commit(&repo, id)?;
     let target_short = short(target.id());
@@ -607,7 +614,9 @@ pub fn revert_commit(repo: &Path, id: &str) -> Result<String, String> {
         .write_tree_to(&repo)
         .map_err(|e| format!("git index: {e}"))?;
     if tree_id == head.tree_id() {
-        return Err(format!("nothing to revert: {target_short} is already undone"));
+        return Err(format!(
+            "nothing to revert: {target_short} is already undone"
+        ));
     }
     let tree = repo
         .find_tree(tree_id)
@@ -620,13 +629,23 @@ pub fn revert_commit(repo: &Path, id: &str) -> Result<String, String> {
     let message = if summary.is_empty() {
         format!("Revert commit {}", target.id())
     } else {
-        format!("Revert \"{summary}\"\n\nThis reverts commit {}.", target.id())
+        format!(
+            "Revert \"{summary}\"\n\nThis reverts commit {}.",
+            target.id()
+        )
     };
     let signature = repo
         .signature()
         .map_err(|e| format!("git identity: {e} (set user.name and user.email)"))?;
     let reverted = repo
-        .commit(Some("HEAD"), &signature, &signature, &message, &tree, &[&head])
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &message,
+            &tree,
+            &[&head],
+        )
         .map_err(|e| format!("git commit: {e}"))?;
     // The revert commit exists now; bring the working tree and index onto it.
     // The tree was guarded clean and no untracked file sits on a changed path,
@@ -692,12 +711,8 @@ fn parent_tree<'r>(commit: &git2::Commit<'r>) -> Result<Option<git2::Tree<'r>>, 
     if commit.parent_count() == 0 {
         return Ok(None);
     }
-    let parent = commit
-        .parent(0)
-        .map_err(|e| format!("git commit: {e}"))?;
-    Ok(Some(
-        parent.tree().map_err(|e| format!("git tree: {e}"))?,
-    ))
+    let parent = commit.parent(0).map_err(|e| format!("git commit: {e}"))?;
+    Ok(Some(parent.tree().map_err(|e| format!("git tree: {e}"))?))
 }
 
 /// How many files the commit changed — all of them, or only those under `path`.
@@ -788,13 +803,16 @@ fn relative(repo: &Repository, path: &Path) -> Result<PathBuf, String> {
         Some(name) => parent.join(name),
         None => parent,
     };
-    absolute.strip_prefix(&workdir).map(Path::to_path_buf).map_err(|_| {
-        format!(
-            "{} is outside the repository at {}",
-            path.display(),
-            workdir.display()
-        )
-    })
+    absolute
+        .strip_prefix(&workdir)
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                workdir.display()
+            )
+        })
 }
 
 /// The tracked paths git reports as changed — staged or not, deleted included.
@@ -821,10 +839,7 @@ fn dirty_paths(repo: &Repository) -> Result<Vec<PathBuf>, String> {
 
 /// The untracked files in the working tree that `tree` also has, and would
 /// therefore write over.
-fn untracked_collisions(
-    repo: &Repository,
-    tree: &git2::Tree<'_>,
-) -> Result<Vec<PathBuf>, String> {
+fn untracked_collisions(repo: &Repository, tree: &git2::Tree<'_>) -> Result<Vec<PathBuf>, String> {
     let mut options = git2::StatusOptions::new();
     options.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo
@@ -891,10 +906,7 @@ fn conflict_paths(index: &git2::Index) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     for conflict in index.conflicts().map_err(|e| format!("git index: {e}"))? {
         let conflict = conflict.map_err(|e| format!("git index: {e}"))?;
-        let entry = conflict
-            .our
-            .or(conflict.their)
-            .or(conflict.ancestor);
+        let entry = conflict.our.or(conflict.their).or(conflict.ancestor);
         if let Some(entry) = entry {
             paths.push(String::from_utf8_lossy(&entry.path).into_owned());
         }
@@ -1068,9 +1080,12 @@ mod tests {
         index.write().unwrap();
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        let signature =
-            git2::Signature::new("Test Ledger", "ledger@example.com", &git2::Time::new(time, 0))
-                .unwrap();
+        let signature = git2::Signature::new(
+            "Test Ledger",
+            "ledger@example.com",
+            &git2::Time::new(time, 0),
+        )
+        .unwrap();
         let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
         let parents: Vec<&git2::Commit> = parent.iter().collect();
         repo.commit(
@@ -1085,12 +1100,7 @@ mod tests {
     }
 
     fn head(repo: &Repository) -> git2::Oid {
-        fresh(repo)
-            .head()
-            .unwrap()
-            .peel_to_commit()
-            .unwrap()
-            .id()
+        fresh(repo).head().unwrap().peel_to_commit().unwrap().id()
     }
 
     fn index_text(repo: &Repository, name: &str) -> Option<String> {
@@ -1290,11 +1300,19 @@ mod tests {
 
         checkout(dir.path(), "main").unwrap();
         let outcome = merge(dir.path(), "feature").unwrap();
-        assert_eq!(outcome, MergeOutcome::FastForward { new_head: feature.to_string() });
+        assert_eq!(
+            outcome,
+            MergeOutcome::FastForward {
+                new_head: feature.to_string()
+            }
+        );
         assert_eq!(head(&repo), feature);
         assert_eq!(dir.read("books/2026.bean"), "opening balances\n");
 
-        assert_eq!(merge(dir.path(), "feature").unwrap(), MergeOutcome::UpToDate);
+        assert_eq!(
+            merge(dir.path(), "feature").unwrap(),
+            MergeOutcome::UpToDate
+        );
     }
 
     #[test]
@@ -1334,10 +1352,7 @@ mod tests {
         commit_all(&repo, "initial", 1000);
 
         create_branch(dir.path(), "feature", true).unwrap();
-        dir.write(
-            "main.bean",
-            &JOURNAL.replace("-20.00 USD", "-21.00 USD"),
-        );
+        dir.write("main.bean", &JOURNAL.replace("-20.00 USD", "-21.00 USD"));
         commit_all(&repo, "feature re-prices", 2000);
 
         checkout(dir.path(), "main").unwrap();
@@ -1384,10 +1399,7 @@ mod tests {
         commit_all(&repo, "initial", 1000);
 
         create_branch(dir.path(), "feature", true).unwrap();
-        dir.write(
-            "main.bean",
-            &JOURNAL.replace("-20.00 USD", "-21.00 USD"),
-        );
+        dir.write("main.bean", &JOURNAL.replace("-20.00 USD", "-21.00 USD"));
         commit_all(&repo, "feature re-prices", 2000);
 
         checkout(dir.path(), "main").unwrap();
@@ -1424,7 +1436,10 @@ mod tests {
         assert_eq!(commit.id().to_string(), reverted);
         assert_eq!(commit.parent_count(), 1);
         assert!(
-            commit.message().unwrap().contains("Revert \"rename the payee\""),
+            commit
+                .message()
+                .unwrap()
+                .contains("Revert \"rename the payee\""),
             "{:?}",
             commit.message()
         );

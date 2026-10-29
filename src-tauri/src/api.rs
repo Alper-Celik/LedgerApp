@@ -393,11 +393,6 @@ pub fn lifestyle(
 
 // ------------------------------------------------------------------- prices ---
 
-/// The quote sources this build can ask (`ecb`, `yahoo`, `tefas`, …).
-pub fn price_sources() -> Vec<PriceSourceInfo> {
-    crate::prices::sources()
-}
-
 /// Every commodity the ledger holds or quotes, with the newest `price`
 /// directive already in it. Nothing is fetched.
 pub fn price_targets(opened: &Opened) -> Vec<PriceTarget> {
@@ -423,7 +418,7 @@ pub fn fetch_prices(
 /// `file` may name a journal file by the path the loader holds or by a path the
 /// shell resolved; the two are matched here so a caller need not know which
 /// form the loader recorded.
-pub fn write_prices(opened: &Opened, file: &str, quotes: &[PriceQuote]) -> Result<(), String> {
+pub fn write_prices(opened: &Opened, file: &str, quotes: &[PriceQuote]) -> Result<usize, String> {
     let resolved = opened.with_ledger(|ledger| journal_file(ledger, file));
     let file = resolved.as_deref().unwrap_or(file);
     crate::prices::write_to_file(&opened.state, file, quotes)
@@ -617,7 +612,11 @@ fn ask_with(
                 let answer = run_read_tool(ledger, config_dir, &call.name, &call.arguments);
                 messages.push(ChatMessage::tool_result(&call.id, answer));
                 ran += 1;
-            } else {
+            } else if matches!(call.name.as_str(), "add_transaction" | "write_file") {
+                // A write is a proposal, never an answer to the model: running
+                // it would be the app applying an edit the user never saw. The
+                // call still gets a tool message — an unanswered call would make
+                // the next round an invalid conversation — saying it is pending.
                 // A write is a proposal, never an answer to the model: running
                 // it would be the app applying an edit the user never saw. The
                 // call still gets a tool message — an unanswered call would make
@@ -640,6 +639,21 @@ fn ask_with(
                         arguments: call.arguments,
                     });
                 }
+            } else {
+                // Not a name this build answers: telling the model is what lets
+                // it correct itself, while proposing an unknown call to the
+                // reader sent them to a button that cannot run it.
+                messages.push(ChatMessage::tool_result(
+                    &call.id,
+                    serde_json::json!({
+                        "error": format!(
+                            "`{}` is not a tool this build can run; the tools are the ones in the request",
+                            call.name
+                        ),
+                    })
+                    .to_string(),
+                ));
+                ran += 1;
             }
         }
         if ran == 0 {

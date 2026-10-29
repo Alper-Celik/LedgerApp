@@ -323,15 +323,17 @@ fn targets_of(ledger: &Ledger) -> Vec<PriceTarget> {
     commodities
         .into_iter()
         .map(|commodity| {
-            let latest = newest.get(&commodity).map(|(date, currency, price)| PriceQuote {
-                commodity: commodity.clone(),
-                currency: currency.clone(),
-                date: date.to_string(),
-                price: price.clone(),
-                // A quote read back from the ledger was written by someone or
-                // something else; naming a source here would be a guess.
-                source: "ledger".to_string(),
-            });
+            let latest = newest
+                .get(&commodity)
+                .map(|(date, currency, price)| PriceQuote {
+                    commodity: commodity.clone(),
+                    currency: currency.clone(),
+                    date: date.to_string(),
+                    price: price.clone(),
+                    // A quote read back from the ledger was written by someone or
+                    // something else; naming a source here would be a guess.
+                    source: "ledger".to_string(),
+                });
             let info = discovered.get(&commodity);
             let currency = latest
                 .as_ref()
@@ -375,10 +377,12 @@ struct Discovered {
 impl Discovered {
     /// The quote currency the ledger declares for it, if it declares one.
     fn quote_currency(&self) -> Option<String> {
-        self.info
-            .quote_currency
-            .clone()
-            .or_else(|| self.info.quote_specs.first().map(|spec| spec.quote_currency.clone()))
+        self.info.quote_currency.clone().or_else(|| {
+            self.info
+                .quote_specs
+                .first()
+                .map(|spec| spec.quote_currency.clone())
+        })
     }
 }
 
@@ -424,7 +428,13 @@ impl Discovered {
 /// the ones ledgers in the wild use; `FUND` may arrive as a bare word (which the
 /// parser classifies as a currency, not a string) or as a quoted string.
 fn meta_marks_fund(meta: &rustledger_core::Metadata) -> bool {
-    const KEYS: [&str; 5] = ["asset-class", "asset_class", "type", "category", "instrument"];
+    const KEYS: [&str; 5] = [
+        "asset-class",
+        "asset_class",
+        "type",
+        "category",
+        "instrument",
+    ];
     meta.iter().any(|(key, value)| {
         let key = key.to_ascii_lowercase();
         if !KEYS.contains(&key.as_str()) {
@@ -483,12 +493,7 @@ pub fn fetch(state: &AppState, requests: Vec<QuoteRequest>) -> Result<Vec<PriceF
 fn ledger_mapping(ledger: &Ledger) -> HashMap<String, CommodityMapping> {
     discover(ledger)
         .into_iter()
-        .filter_map(|(commodity, found)| {
-            found
-                .info
-                .mapping
-                .map(|mapping| (commodity, mapping))
-        })
+        .filter_map(|(commodity, found)| found.info.mapping.map(|mapping| (commodity, mapping)))
         .collect()
 }
 
@@ -515,7 +520,9 @@ fn fetch_with_mapping(
     }
     cache.save();
 
-    if outcomes.iter().all(|outcome| matches!(outcome, PriceFetch::Failed(_)))
+    if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, PriceFetch::Failed(_)))
         && !outcomes.is_empty()
     {
         return Err(failures.join("\n"));
@@ -695,7 +702,7 @@ fn ticker_for(
 /// does not hold is refused rather than written to. Quotes the file already
 /// states verbatim, and repeats inside `quotes` itself, are skipped, so writing
 /// the same fetch twice is a no-op.
-pub fn write_to_file(state: &AppState, file: &str, quotes: &[PriceQuote]) -> Result<(), String> {
+pub fn write_to_file(state: &AppState, file: &str, quotes: &[PriceQuote]) -> Result<usize, String> {
     let (previous, priced) = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("no ledger loaded")?;
@@ -705,10 +712,12 @@ pub fn write_to_file(state: &AppState, file: &str, quotes: &[PriceQuote]) -> Res
     let lines = price_lines(quotes, &priced)?;
     if lines.is_empty() {
         // Every quote is already a directive in the ledger; a second fetch of
-        // the same day changes nothing.
-        return Ok(());
+        // the same day changes nothing — and says so, rather than reporting a
+        // count nothing verified.
+        return Ok(0);
     }
-    edit_named_file_source(state, file, &with_appended(&previous, &lines))
+    edit_named_file_source(state, file, &with_appended(&previous, &lines), None)?;
+    Ok(lines.lines().count())
 }
 
 /// The `price` directives the ledger already carries, as
@@ -773,10 +782,7 @@ fn checked_commodity(kind: &str, value: &str) -> Result<String, String> {
     let code = value.trim().to_uppercase();
     let shaped = !code.is_empty()
         && code.len() <= 24
-        && code
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic())
+        && code.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && code
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '\'' | '.' | '_' | '-'))
@@ -981,7 +987,9 @@ option \"operating_currency\" \"TRY\"
             quote("AAPL", "USD", "2026-01-05", "190.00"),
             quote("AAPL", "USD", "2026-10-28", "191.10"),
         ];
-        write_to_file(&state, &file, &quotes).expect("the quotes are writable");
+        let appended = write_to_file(&state, &file, &quotes).expect("the quotes are writable");
+        // Two of the three are new: the one the ledger already prices is skipped.
+        assert_eq!(appended, 2);
 
         let text = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1084,7 +1092,10 @@ option \"operating_currency\" \"TRY\"
             ticker: Some("BRK-B".to_string()),
             quote_currency: None,
         });
-        assert_eq!(ticker_for(Some(&detailed), "yahoo", "yahoo", "BRK_B"), "BRK-B");
+        assert_eq!(
+            ticker_for(Some(&detailed), "yahoo", "yahoo", "BRK_B"),
+            "BRK-B"
+        );
         assert_eq!(
             ticker_for(Some(&detailed), "ecb", "yahoo", "BRK_B"),
             "BRK_B",
@@ -1103,7 +1114,10 @@ option \"operating_currency\" \"TRY\"
             ticker: Some("EUR".to_string()),
             quote_currency: Some("TRY".to_string()),
         });
-        assert_eq!(ticker_for(Some(&chained), "yahoo", "yahoo", "EUR"), "EURUSD=X");
+        assert_eq!(
+            ticker_for(Some(&chained), "yahoo", "yahoo", "EUR"),
+            "EURUSD=X"
+        );
         assert_eq!(
             ticker_for(Some(&chained), "ecb", "yahoo", "EUR"),
             "EUR",
@@ -1112,7 +1126,10 @@ option \"operating_currency\" \"TRY\"
 
         // `Simple` is a ticker for the default source only.
         let simple = CommodityMapping::Simple("BTC-USD".to_string());
-        assert_eq!(ticker_for(Some(&simple), "yahoo", "yahoo", "BTC"), "BTC-USD");
+        assert_eq!(
+            ticker_for(Some(&simple), "yahoo", "yahoo", "BTC"),
+            "BTC-USD"
+        );
         assert_eq!(ticker_for(Some(&simple), "coinbase", "yahoo", "BTC"), "BTC");
         assert_eq!(ticker_for(None, "yahoo", "yahoo", "BTC"), "BTC");
     }
@@ -1157,7 +1174,10 @@ option \"operating_currency\" \"TRY\"
                 .unwrap_or_else(|| panic!("{official} is listed"));
             assert!(source.official, "{official} serves a documented API");
         }
-        let yahoo = list.iter().find(|source| source.name == "yahoo").expect("yahoo");
+        let yahoo = list
+            .iter()
+            .find(|source| source.name == "yahoo")
+            .expect("yahoo");
         assert!(!yahoo.official, "yahoo is an endpoint read off the site");
     }
 
@@ -1208,7 +1228,10 @@ option \"operating_currency\" \"TRY\"
         )
         .expect_err("every request failed, so the batch is an error");
         assert!(error.contains("no price source named `nowhere`"), "{error}");
-        assert!(error.contains("cannot decide the quote currency"), "{error}");
+        assert!(
+            error.contains("cannot decide the quote currency"),
+            "{error}"
+        );
         assert!(error.contains("is not a YYYY-MM-DD date"), "{error}");
     }
 }

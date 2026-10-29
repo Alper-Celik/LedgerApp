@@ -493,7 +493,11 @@ mod tests {
     #[test]
     fn invoke_reads_and_edits() {
         let dir = scratch();
-        seed(&dir, "main.bean", "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n");
+        seed(
+            &dir,
+            "main.bean",
+            "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n",
+        );
 
         let read = invoke(dir.path(), "read", &json!({"path": "main.bean"})).unwrap();
         assert_eq!(read["path"], "main.bean");
@@ -552,7 +556,11 @@ mod tests {
             .unwrap()
             .join(format!("elsewhere-{}.bean", std::process::id()));
 
-        for path in ["../elsewhere.bean", outside.to_str().unwrap(), "sub/../../elsewhere.bean"] {
+        for path in [
+            "../elsewhere.bean",
+            outside.to_str().unwrap(),
+            "sub/../../elsewhere.bean",
+        ] {
             for (tool, args) in [
                 ("read", json!({"path": path})),
                 (
@@ -579,7 +587,10 @@ mod tests {
     fn registry_is_well_formed() {
         let tools = registry();
         assert_eq!(
-            tools.iter().map(|definition| definition.name).collect::<Vec<_>>(),
+            tools
+                .iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>(),
             ["read", "edit", "grep", "glob"]
         );
         let names: BTreeSet<&str> = tools.iter().map(|definition| definition.name).collect();
@@ -597,7 +608,10 @@ mod tests {
                 definition.name
             );
             assert_eq!(
-                definition.schema.get("additionalProperties").and_then(Value::as_bool),
+                definition
+                    .schema
+                    .get("additionalProperties")
+                    .and_then(Value::as_bool),
                 Some(false),
                 "{}: unknown arguments are refused",
                 definition.name
@@ -609,7 +623,12 @@ mod tests {
             .collect();
         assert_eq!(
             read_only,
-            [("read", true), ("edit", false), ("grep", true), ("glob", true)]
+            [
+                ("read", true),
+                ("edit", false),
+                ("grep", true),
+                ("glob", true)
+            ]
         );
     }
 
@@ -638,27 +657,42 @@ mod tests {
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("invalid type"), "{error}");
 
-        let error = invoke(dir.path(), "read", &json!({"path": "main.bean", "offest": 2})).unwrap_err();
+        let error = invoke(
+            dir.path(),
+            "read",
+            &json!({"path": "main.bean", "offest": 2}),
+        )
+        .unwrap_err();
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("offest"), "{error}");
 
         let error = invoke(dir.path(), "read", &json!(["main.bean"])).unwrap_err();
         assert!(error.to_string().contains("JSON object"), "{error}");
 
-        let error = invoke(dir.path(), "edit", &json!({
-            "path": "main.bean",
-            "ops": [{"op": "modify", "at": "0000"}]
-        }))
+        let error = invoke(
+            dir.path(),
+            "edit",
+            &json!({
+                "path": "main.bean",
+                "ops": [{"op": "modify", "at": "0000"}]
+            }),
+        )
         .unwrap_err();
         assert!(matches!(error, ToolError::BadArgs { .. }), "{error:?}");
         assert!(error.to_string().contains("unknown variant"), "{error}");
 
-        let error = invoke(dir.path(), "edit", &json!({"path": "main.bean", "ops": []}))
-            .unwrap_err();
-        assert!(error.to_string().contains("at least one operation"), "{error}");
+        let error =
+            invoke(dir.path(), "edit", &json!({"path": "main.bean", "ops": []})).unwrap_err();
+        assert!(
+            error.to_string().contains("at least one operation"),
+            "{error}"
+        );
 
         let error = invoke(dir.path(), "grep", &json!({"pattern": "(", "path": "."})).unwrap_err();
-        assert!(error.to_string().contains("invalid regular expression"), "{error}");
+        assert!(
+            error.to_string().contains("invalid regular expression"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -693,7 +727,11 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or_default();
-            assert!(!required.is_empty(), "{}: nothing is required", definition.name);
+            assert!(
+                !required.is_empty(),
+                "{}: nothing is required",
+                definition.name
+            );
             for name in required {
                 let mut args = dummy(&definition.schema);
                 args.as_object_mut().unwrap().remove(&name);
@@ -749,7 +787,9 @@ mod tests {
                     .unwrap_or(0)
                     .max(1);
                 Some(Value::Array(
-                    (0..count).map(|_| dummy_value(items).unwrap_or(Value::Null)).collect(),
+                    (0..count)
+                        .map(|_| dummy_value(items).unwrap_or(Value::Null))
+                        .collect(),
                 ))
             }
             "object" => Some(dummy(schema)),
@@ -764,9 +804,14 @@ mod tests {
     }
 
     /// The parameters and docstring of the stub for `name`.
-    fn parse_stub(python: &str, name: &str) -> (std::collections::BTreeMap<String, Declared>, String) {
+    fn parse_stub(
+        python: &str,
+        name: &str,
+    ) -> (std::collections::BTreeMap<String, Declared>, String) {
         let mut parameters = std::collections::BTreeMap::new();
-        let mut lines = python.lines().skip_while(|line| !line.starts_with(&format!("def {name}(")));
+        let mut lines = python
+            .lines()
+            .skip_while(|line| !line.starts_with(&format!("def {name}(")));
         let signature = lines.next().unwrap();
         let inside = signature
             .strip_prefix(&format!("def {name}("))
@@ -915,6 +960,4 @@ mod tests {
         }
         Ok(())
     }
-
-
 }

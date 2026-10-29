@@ -44,14 +44,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	}
 </script>
 
-{#if syncWatch.changes.length > 0 || syncWatch.external.length > 0 || syncWatch.conflicts.length > 0 || syncWatch.error !== ""}
+{#if syncWatch.changes.length > 0 || syncWatch.external.length > 0 || syncWatch.conflicts.length > 0 || syncWatch.treeError !== "" || syncWatch.error !== ""}
 	<div
 		class="bg-secondary text-secondary-foreground flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-xs"
 		role="status"
 	>
 		<span class="min-w-0 flex-1 truncate">
-			{#if syncWatch.error !== ""}
-				Writing this ledger's folder failed — {syncWatch.error}
+			{#if syncWatch.treeError !== ""}
+				Writing this ledger's folder failed — {syncWatch.treeError}
 			{:else if syncWatch.conflicts.length > 0}
 				{syncWatch.conflicts.length}
 				{syncWatch.conflicts.length === 1 ? "file was" : "files were"} changed here and in the folder; neither
@@ -67,6 +67,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					{syncWatch.external[0].split("/").pop()}
 					{syncWatch.external.length > 1 ? ` and ${syncWatch.external.length - 1} more` : ""}
 				</span>
+			{:else if syncWatch.error !== ""}
+				This folder cannot be read — {syncWatch.error}
 			{:else}
 				{syncWatch.changes.length}
 				{syncWatch.changes.length === 1 ? "file" : "files"} changed in this folder outside the app —
@@ -84,7 +86,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Button
 				size="sm"
 				onclick={reload}
-				disabled={syncWatch.reloading || (syncWatch.error !== "" && syncWatch.changes.length === 0)}
+				disabled={
+					syncWatch.reloading ||
+					(syncWatch.treeError !== "" && syncWatch.changes.length === 0)
+				}
 			>
 				{syncWatch.reloading ? "Reloading…" : "Reload ledger"}
 			</Button>

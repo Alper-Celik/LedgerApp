@@ -316,6 +316,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			const loaded = await load();
 			if (disposed || !loaded) return;
 			const { text, entry } = loaded;
+			// What this buffer was built from. The backend refuses a save whose
+			// base is no longer what the file holds, so a reload under an open
+			// draft (another device, the register, a git operation) cannot be
+			// silently reverted by pressing Save.
+			base = text;
 
 			// The app's theme is the `dark` class on `<html>`; Monaco takes an
 			// explicit theme id, so read the class and follow it as it changes.
@@ -388,6 +393,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		};
 	});
 
+	/** The file's text when this buffer was opened. */
+	let base = "";
+
 	async function save() {
 		if (!editor || saving) return;
 		saving = true;
@@ -396,7 +404,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			const text = editor.getValue();
 			const result =
 				target.kind === "file"
-					? await commands.updateFileText(target.path, text)
+					? await commands.updateFileText(target.path, text, base)
 					: target.scope === "file"
 						? await commands.updateFileSource(target.id, text)
 						: await commands.updateTransactionSource(target.id, text);

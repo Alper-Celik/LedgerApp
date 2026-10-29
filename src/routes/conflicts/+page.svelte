@@ -27,16 +27,30 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 */
 	let { data }: PageProps = $props();
 
-	/** The route's own load, read once; the screen's state takes over from here. */
-	const loaded = untrack(() => data);
+	/** The route's own load, taken once to seed the screen. */
+	const first = untrack(() => data);
+	/** The load the screen's state was last taken from. */
+	let loaded = $state(first);
 
-	let report = $state<Report | null>(loaded.report);
-	let error = $state(loaded.error);
+	let report = $state<Report | null>(first.report);
+	let error = $state(first.error);
 	/** The backend's sentence after a successful resolve. */
 	let notice = $state("");
 	let refreshing = $state(false);
 	/** The copy whose resolver is open, by path. */
 	let reviewing = $state<string | null>(null);
+
+	$effect(() => {
+		// A scan belongs to one folder: after another ledger is opened (which
+		// re-runs this route's load) the previous folder's conflict copies — and a
+		// resolver opened on one of them — are not this ledger's.
+		if (data === loaded) return;
+		loaded = data;
+		report = data.report;
+		error = data.error;
+		notice = "";
+		reviewing = null;
+	});
 
 	const groups = $derived(byClient(report?.candidates ?? []));
 	const orphans = $derived(report?.orphans ?? []);

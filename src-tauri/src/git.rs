@@ -82,8 +82,12 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
     // what an earlier app edit staged — a sync client's newer bytes would then
     // be reviewed but not committed.
     let mut tracked = 0;
+    let mut committed: Vec<PathBuf> = Vec::new();
     for relative in ledger_files_in(&repo, ledger) {
-        if index.get_path(&relative, 1).is_some() {
+        // Any stage above 0 is an unresolved conflict: an add/add conflict has
+        // no common ancestor, so checking stage 1 alone would let it through and
+        // the commit would silently omit the merged file.
+        if (1..=3).any(|stage| index.get_path(&relative, stage).is_some()) {
             return Err(format!(
                 "{} has an unresolved merge; resolve it before committing",
                 relative.display()
@@ -125,6 +129,7 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
                     .map_err(|e| format!("git index: {e}"))?;
             }
         }
+        committed.push(relative);
         tracked += 1;
     }
     // With no ledger file in it the tree is HEAD's own, message and all.
@@ -155,6 +160,16 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
             &parents,
         )
         .map_err(|e| format!("git commit: {e}"))?;
+    // The commit took the working tree; the repository index still holds what an
+    // earlier stage put there, so every path whose staged bytes differed is left
+    // modified-in-index against the new HEAD — which the branch and merge guards
+    // read as uncommitted work and refuse over. Only the committed paths are
+    // reset, so a conflicted path's stages are untouched.
+    let written = repo
+        .find_commit(commit)
+        .map_err(|e| format!("git commit: {e}"))?;
+    repo.reset_default(Some(written.as_object()), committed.iter())
+        .map_err(|e| format!("git index: {e}"))?;
     Ok(commit.to_string().chars().take(7).collect())
 }
 
@@ -365,6 +380,76 @@ mod tests {
     use crate::editing::edit_transaction;
     use crate::model::TransactionEdit;
     use crate::testing::*;
+
+    /// The commit takes the working tree even when the repository index still
+    /// holds an older staged version, and it leaves the index agreeing with the
+    /// new HEAD — otherwise every such path reads as uncommitted work and the
+    /// branch and merge guards refuse over it.
+    #[test]
+    fn a_commit_built_from_the_worktree_leaves_the_index_clean() {
+        let dir = TempDir::new("commit-workdir");
+        let (repo, path) = committed_fixture(
+            &dir,
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Groceries\"
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+",
+        );
+        let state = loaded_state(&path);
+        let head = repo.head().unwrap().target().unwrap();
+
+        // Stage one version through the app, then let a sync client put another
+        // on disk: the screen's diff showed the disk version.
+        let staged = fs::read_to_string(&path)
+            .unwrap()
+            .replace("-20.00", "-21.00");
+        fs::write(&path, &staged).unwrap();
+        crate::editing::edit_transaction(
+            &state,
+            crate::model::TransactionEdit {
+                id: view_id(&state, "Groceries"),
+                date: "2026-01-10".to_string(),
+                flag: "*".to_string(),
+                payee: None,
+                narration: "Groceries".to_string(),
+                postings: Vec::new(),
+            },
+        )
+        .ok();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        let newer = on_disk.replace("-21.00", "-22.00");
+        fs::write(&path, &newer).unwrap();
+
+        let commit = commit_staged(&state, "from the worktree").unwrap();
+
+        assert_eq!(commit.len(), 7);
+        let head_after = repo.head().unwrap().target().unwrap();
+        assert_ne!(head_after, head);
+        // The file is clean: index and HEAD agree, and the working tree matches.
+        let statuses = repo.statuses(None).unwrap();
+        let dirty: Vec<String> = statuses
+            .iter()
+            .map(|entry| entry.path().unwrap_or("?").to_string())
+            .collect();
+        assert!(dirty.is_empty(), "{}", dirty.join(", "));
+        // And the commit holds what the screen reviewed.
+        let commit = repo.find_commit(head_after).unwrap();
+        let tree = commit.tree().unwrap();
+        let blob = tree
+            .get_path(Path::new(path.file_name().unwrap()))
+            .unwrap()
+            .to_object(&repo)
+            .unwrap()
+            .peel_to_blob()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(blob.content()), newer);
+    }
 
     #[test]
     fn reports_the_diff_and_commits_what_was_staged() {

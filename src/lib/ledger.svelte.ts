@@ -122,6 +122,12 @@ export async function openLedgerPath(path: string): Promise<boolean> {
 			const pulled = await commands.reloadLedgerTree();
 			if (pulled.status === "ok") {
 				noteTreeReport({ external: pulled.data.external, conflicts: pulled.data.conflicts });
+			} else {
+				// The mirror was not refreshed, so loading now would present the
+				// bytes the reader already had as the folder's: refuse, and say why.
+				ledger.error = pulled.error;
+				noteTreeReport({ error: pulled.error });
+				return false;
 			}
 		}
 		const result = await commands.loadLedger(path);

@@ -96,7 +96,10 @@ pub fn grep(
     'files: for file in files {
         let relative = display_relative(root, &file);
         let name = file_name(&file);
-        if !filter.as_ref().is_none_or(|filter| filter.accepts(&relative, &name)) {
+        if !filter
+            .as_ref()
+            .is_none_or(|filter| filter.accepts(&relative, &name))
+        {
             continue;
         }
         // Held line by line: a ledger is text, anything else is skipped.
@@ -120,9 +123,7 @@ pub fn grep(
         }
     }
 
-    matches.sort_by(|left, right| {
-        (&left.path, left.line).cmp(&(&right.path, right.line))
-    });
+    matches.sort_by(|left, right| (&left.path, left.line).cmp(&(&right.path, right.line)));
     Ok(GrepOutcome {
         matches,
         truncated,
@@ -147,7 +148,9 @@ pub fn glob_paths(
     }
     let max_results = max_results.min(MAX_GLOB_RESULTS);
     let matcher = compile(pattern)?;
-    let by_name = (!pattern.contains('/')).then(|| compile(pattern)).transpose()?;
+    let by_name = (!pattern.contains('/'))
+        .then(|| compile(pattern))
+        .transpose()?;
 
     let mut paths = Vec::new();
     let mut truncated = false;
@@ -181,7 +184,9 @@ impl PathFilter {
     fn new(pattern: &str) -> Result<Self, String> {
         Ok(Self {
             matcher: compile(pattern)?,
-            by_name: (!pattern.contains('/')).then(|| compile(pattern)).transpose()?,
+            by_name: (!pattern.contains('/'))
+                .then(|| compile(pattern))
+                .transpose()?,
         })
     }
 
@@ -282,7 +287,10 @@ mod tests {
                 }
                 fs::write(path, text).unwrap();
             };
-            write("main.bean", "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n");
+            write(
+                "main.bean",
+                "2026-01-01 open Assets:Bank\n2026-01-02 open Assets:Cash\n",
+            );
             write("notes.md", "# Assets\n");
             write("ignored.bean", "2026-01-03 open Assets:Ignored\n");
             write(".gitignore", "ignored.bean\n");
@@ -305,7 +313,10 @@ mod tests {
         let fixture = Fixture::new();
         let found = grep(fixture.root(), fixture.root(), "Assets", None, false, 100).unwrap();
         let paths: Vec<&str> = found.matches.iter().map(|hit| hit.path.as_str()).collect();
-        assert_eq!(paths, ["main.bean", "main.bean", "notes.md", "sub/also.bean"]);
+        assert_eq!(
+            paths,
+            ["main.bean", "main.bean", "notes.md", "sub/also.bean"]
+        );
         assert_eq!(found.matches[0].line, 1);
         assert!(found.matches[0].text.contains("open Assets:Bank"));
         assert!(!found.truncated);
@@ -327,13 +338,26 @@ mod tests {
     #[test]
     fn grep_filters_by_glob_and_path() {
         let fixture = Fixture::new();
-        let beans = grep(fixture.root(), fixture.root(), "Assets", Some("*.bean"), false, 100).unwrap();
+        let beans = grep(
+            fixture.root(),
+            fixture.root(),
+            "Assets",
+            Some("*.bean"),
+            false,
+            100,
+        )
+        .unwrap();
         let paths: Vec<&str> = beans.matches.iter().map(|hit| hit.path.as_str()).collect();
         assert_eq!(paths, ["main.bean", "main.bean", "sub/also.bean"]);
 
         let sub = fixture.root().join("sub");
         let only_sub = grep(fixture.root(), &sub, "Assets", None, false, 100).unwrap();
-        assert!(only_sub.matches.iter().all(|hit| hit.path.starts_with("sub/")));
+        assert!(
+            only_sub
+                .matches
+                .iter()
+                .all(|hit| hit.path.starts_with("sub/"))
+        );
         assert_eq!(only_sub.matches.len(), 1);
     }
 
@@ -344,7 +368,15 @@ mod tests {
         assert_eq!(capped.matches.len(), 2);
         assert!(capped.truncated);
 
-        let all = grep(fixture.root(), fixture.root(), "Assets", None, false, DEFAULT_GREP_RESULTS).unwrap();
+        let all = grep(
+            fixture.root(),
+            fixture.root(),
+            "Assets",
+            None,
+            false,
+            DEFAULT_GREP_RESULTS,
+        )
+        .unwrap();
         assert!(!all.truncated);
         assert_eq!(all.matches.len(), 4);
     }
@@ -355,13 +387,32 @@ mod tests {
         let long = "x".repeat(super::MAX_LINE_CHARS + 50);
         fs::write(dir.path().join("long.bean"), format!("{long}\n")).unwrap();
         let found = grep(dir.path(), dir.path(), "x", None, false, 10).unwrap();
-        assert_eq!(found.matches[0].text.chars().count(), super::MAX_LINE_CHARS + 1);
+        assert_eq!(
+            found.matches[0].text.chars().count(),
+            super::MAX_LINE_CHARS + 1
+        );
         assert!(found.matches[0].text.ends_with('…'));
 
-        assert!(grep(dir.path(), dir.path(), "(", None, false, 10).unwrap_err().contains("invalid regular expression"));
-        assert!(grep(dir.path(), dir.path(), "", None, false, 10).unwrap_err().contains("empty"));
-        assert!(grep(dir.path(), dir.path(), "x", None, false, 0).unwrap_err().contains("at least 1"));
-        assert!(grep(dir.path(), dir.path(), "x", Some("["), false, 10).unwrap_err().contains("invalid glob"));
+        assert!(
+            grep(dir.path(), dir.path(), "(", None, false, 10)
+                .unwrap_err()
+                .contains("invalid regular expression")
+        );
+        assert!(
+            grep(dir.path(), dir.path(), "", None, false, 10)
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            grep(dir.path(), dir.path(), "x", None, false, 0)
+                .unwrap_err()
+                .contains("at least 1")
+        );
+        assert!(
+            grep(dir.path(), dir.path(), "x", Some("["), false, 10)
+                .unwrap_err()
+                .contains("invalid glob")
+        );
     }
 
     #[test]
@@ -393,8 +444,18 @@ mod tests {
         let capped = glob_paths(fixture.root(), fixture.root(), "**/*.bean", 1).unwrap();
         assert_eq!(capped.paths.len(), 1);
         assert!(capped.truncated);
-        let wide = glob_paths(fixture.root(), fixture.root(), "**/*.bean", DEFAULT_GLOB_RESULTS).unwrap();
+        let wide = glob_paths(
+            fixture.root(),
+            fixture.root(),
+            "**/*.bean",
+            DEFAULT_GLOB_RESULTS,
+        )
+        .unwrap();
         assert!(!wide.truncated);
-        assert!(glob_paths(fixture.root(), fixture.root(), "[", 10).unwrap_err().contains("invalid glob"));
+        assert!(
+            glob_paths(fixture.root(), fixture.root(), "[", 10)
+                .unwrap_err()
+                .contains("invalid glob")
+        );
     }
 }

@@ -261,16 +261,34 @@ export class Assistant {
 	epoch = 0;
 
 	/**
+	 * Bumped for every turn. A turn captures it when it starts and stops at its
+	 * next await once it moves: its tool calls would otherwise be read against,
+	 * and its answer saved into, a ledger that is no longer the one it asked
+	 * about.
+	 */
+	turn = 0;
+
+	/**
 	 * Start over for a ledger that was just opened: forget the conversation, its
 	 * messages and the listing, then read the new ledger's sessions.
 	 */
 	adoptLedger(epoch: number): void {
 		if (epoch === this.epoch) return;
 		this.epoch = epoch;
+		// The turn still running belongs to the ledger that was open when it
+		// started; abandoning it here is what keeps its answer out of this one.
+		this.turn += 1;
+		this.busy = false;
+		this.busyNote = "";
 		this.newConversation();
 		this.sessions = [];
 		this.malformed = [];
 		void this.refreshSessions();
+	}
+
+	/** Whether the turn that started as `turn` is still the current one. */
+	private current(turn: number): boolean {
+		return turn === this.turn;
 	}
 
 	/** A blank conversation; the file is created by the first message. */
@@ -357,19 +375,27 @@ export class Assistant {
 		this.notice = "";
 
 		this.busy = true;
+		const turn = ++this.turn;
+		// The conversation the turn writes to, captured once: `activeId` is reset
+		// by a ledger switch, and appending under an empty id creates a file.
+		const conversation = this.activeId;
 		try {
 			const prepared = await this.mediaFor(attachments, settings);
+			if (!this.current(turn)) return false;
 			this.notice = prepared.notice;
 			if (!trimmed && prepared.media.length === 0) return false;
 
 			const body = trimmed || "Please look at the attached file.";
 			this.entries.push({ kind: "user", text: body });
 			this.wire.push(userWire(body));
-			await this.saveMessage({ role: "user", text: body, data: null }, titleFrom(body));
-			await this.rounds(prepared.media);
+			await this.saveMessage({ role: "user", text: body, data: null }, titleFrom(body), turn, conversation);
+			if (!this.current(turn)) return false;
+			await this.rounds(prepared.media, turn, conversation);
 		} finally {
-			this.busy = false;
-			this.busyNote = "";
+			if (this.current(turn)) {
+				this.busy = false;
+				this.busyNote = "";
+			}
 		}
 		return true;
 	}
@@ -416,7 +442,11 @@ export class Assistant {
 	}
 
 	/** One model round, streamed, plus the tool rounds it asks for. */
-	private async rounds(media: MediaPart[]): Promise<void> {
+	private async rounds(
+		media: MediaPart[],
+		turn: number,
+		conversation: string
+	): Promise<void> {
 		let pendingMedia = media;
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -449,12 +479,14 @@ export class Assistant {
 					}
 				);
 			} catch (cause) {
+				if (!this.current(turn)) return;
 				// What streamed stays on screen and the refusal is shown in the
 				// backend's own words; the wire history never learned of the turn.
 				if (!entry.text.trim()) this.dropEntry(entry);
 				this.chatError = messageOf(cause);
 				return;
 			}
+			if (!this.current(turn)) return;
 			pendingMedia = [];
 
 			const answer = response.text ?? "";
@@ -479,7 +511,13 @@ export class Assistant {
 			// itself lives on each tool message, so there is nothing worth a
 			// section of its own in the ledger's file — or in a bubble.
 			if (answer.trim()) {
-				await this.saveMessage({ role: "assistant", text: answer, data: null });
+				await this.saveMessage(
+					{ role: "assistant", text: answer, data: null },
+					undefined,
+					turn,
+					conversation
+				);
+				if (!this.current(turn)) return;
 			} else {
 				this.dropEntry(entry);
 			}
@@ -494,6 +532,9 @@ export class Assistant {
 			for (const call of calls) {
 				this.busyNote = `Calling \`${call.name}\`…`;
 				const outcome = await dispatchTool(call);
+				// A tool that read, or staged a write for, the ledger that was open
+				// when the turn started is not an answer for this one.
+				if (!this.current(turn)) return;
 				// A write is drawn as a proposal, never as a finished tool result:
 				// the card is the only place it becomes a write, and only on a click.
 				if (outcome.proposal) {
@@ -518,16 +559,22 @@ export class Assistant {
 					tool_calls: [],
 					tool_call_id: call.id,
 				});
-				await this.saveMessage({
-					role: "tool",
-					text: outcome.text,
-					data: {
-						tool_call_id: call.id,
-						name: call.name,
-						arguments: call.arguments,
-						result: outcome.result,
+				await this.saveMessage(
+					{
+						role: "tool",
+						text: outcome.text,
+						data: {
+							tool_call_id: call.id,
+							name: call.name,
+							arguments: call.arguments,
+							result: outcome.result,
+						},
 					},
-				});
+					undefined,
+					turn,
+					conversation
+				);
+				if (!this.current(turn)) return;
 			}
 		}
 
@@ -577,9 +624,15 @@ export class Assistant {
 	}
 
 	/** Append one message to the open conversation, creating it when this is the first. */
-	private async saveMessage(message: StoredMessage, title?: string): Promise<void> {
+	private async saveMessage(
+		message: StoredMessage,
+		title?: string,
+		turn = this.turn,
+		conversation = this.activeId
+	): Promise<void> {
+		if (!this.current(turn)) return;
 		const model = this.settings?.model ?? "";
-		const id = this.activeId;
+		const id = conversation;
 		const conversationTitle =
 			title ||
 			this.activeTitle ||
@@ -595,7 +648,7 @@ export class Assistant {
 				this.saveError = result.error;
 				return;
 			}
-			if (!id) {
+			if (!id && this.current(turn)) {
 				this.activeId = result.data.id;
 				this.activeTitle = result.data.title;
 			}

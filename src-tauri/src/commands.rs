@@ -244,12 +244,20 @@ pub async fn pick_ledger_folder(
         if let Ok(previous) = std::fs::read_to_string(config.join("storage.json"))
             .map_err(|error| error.to_string())
             .and_then(|json| crate::storage::AndroidTree::from_json(&app, json.trim()))
-            && let Err(error) = crate::storage::sync_back(&previous, &mirror)
         {
-            eprintln!("previous tree not fully written: {error}");
+            // The mirror is about to be replaced, so anything the folder does not
+            // have yet would be lost with it: a file both sides changed exists
+            // only here, and opening another folder is not consent to drop it.
+            let report = crate::storage::sync_back(&previous, &mirror)
+                .map_err(|error| format!("the previous folder was not written: {error}"))?;
+            if !report.conflicts.is_empty() {
+                return Err(format!(
+                    "{} file(s) in the previous folder changed on both sides; settle them before opening another folder",
+                    report.conflicts.len()
+                ));
+            }
         }
-        crate::storage::reset_mirror(&mirror)?;
-        crate::storage::mirror_into(&tree, &mirror)?;
+        crate::storage::adopt_tree(&tree, &mirror)?;
         let settings = config.join("storage.json");
         // The URI lands before the mode flips: a crash between the two leaves a
         // tree that the next launch can restore, not a mirror nothing owns.
@@ -411,9 +419,10 @@ pub fn file_text(file: String, state: State<'_, AppState>) -> Result<String, Str
 pub fn update_file_text(
     file: String,
     text: String,
+    base: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    edit_named_file_source(&state, &file, &text)
+    edit_named_file_source(&state, &file, &text, base.as_deref())
 }
 
 /// The journal file a new transaction should go into, given the accounts it
@@ -604,8 +613,9 @@ pub fn write_prices(
     file: String,
     quotes: Vec<crate::prices::PriceQuote>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     crate::prices::write_to_file(&state, &file, &quotes)
+        .map(|appended| u32::try_from(appended).unwrap_or(u32::MAX))
 }
 
 // --------------------------------------------------------------- assistant ---
@@ -698,9 +708,28 @@ fn tree_mirror(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
     Ok(app_config_dir(app)?.join("tree"))
 }
 
+/// The open SAF tree and its private mirror, for a closure.
+///
+/// Every tree command needs the same three things — the persisted grant, the tree
+/// it names, and the mirror beside it — and each of them can fail. Resolving them
+/// once here keeps the three commands (and the conversation flush) from drifting
+/// apart on what "tree mode" and "which mirror" mean.
+#[cfg(target_os = "android")]
+fn with_tree<T>(
+    app: &tauri::AppHandle<AppRuntime>,
+    work: impl FnOnce(&crate::storage::AndroidTree, &Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let config = app_config_dir(app)?;
+    let settings = config.join("storage.json");
+    let json = std::fs::read_to_string(&settings)
+        .map_err(|error| format!("{}: {error}", settings.display()))?;
+    let tree = crate::storage::AndroidTree::from_json(app, json.trim())?;
+    work(&tree, &config.join("tree"))
+}
+
 /// Android: write the mirror's changed files back into the SAF tree. Called after
-/// a successful edit (and by the UI's explicit sync action); returns the paths
-/// that were written.
+/// a successful edit (and by the UI's explicit sync action); reports what moved
+/// and what could not.
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_ledger_tree(
@@ -716,12 +745,9 @@ pub async fn sync_ledger_tree(
         }
         let handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let settings = app_config_dir(&handle)?.join("storage.json");
-            let json = std::fs::read_to_string(&settings)
-                .map_err(|error| format!("{}: {error}", settings.display()))?;
-            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
-            let mirror = tree_mirror(&handle)?;
-            crate::storage::sync_back(&tree, &mirror)
+            with_tree(&handle, |tree, mirror| {
+                crate::storage::sync_back(tree, mirror)
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -748,11 +774,9 @@ pub async fn reload_ledger_tree(
         }
         let handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let settings = app_config_dir(&handle)?.join("storage.json");
-            let json = std::fs::read_to_string(&settings)
-                .map_err(|error| format!("{}: {error}", settings.display()))?;
-            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
-            crate::storage::mirror_into(&tree, &tree_mirror(&handle)?)
+            with_tree(&handle, |tree, mirror| {
+                crate::storage::mirror_into(tree, mirror)
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -779,11 +803,9 @@ pub async fn resolve_tree_conflicts(
         }
         let handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let settings = app_config_dir(&handle)?.join("storage.json");
-            let json = std::fs::read_to_string(&settings)
-                .map_err(|error| format!("{}: {error}", settings.display()))?;
-            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
-            crate::storage::resolve_conflicts(&tree, &tree_mirror(&handle)?, take)
+            with_tree(&handle, |tree, mirror| {
+                crate::storage::resolve_conflicts(tree, mirror, take)
+            })
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1051,7 +1073,7 @@ pub fn conversation(
 /// Append one message to a conversation, creating it when `id` is empty.
 #[tauri::command]
 #[specta::specta]
-pub fn conversation_append(
+pub async fn conversation_append(
     id: String,
     title: String,
     model: String,
@@ -1068,34 +1090,60 @@ pub fn conversation_append(
         id
     };
     let summary = crate::conversations::append(&dir, &id, &message)?;
-    sync_tree_now(&app)?;
+    // The message is written. A folder this device cannot reach is reported, not
+    // turned into a failed append — the panel would answer that by appending to
+    // a conversation it thinks does not exist yet. The flush walks the tree
+    // through the SAF provider's blocking calls, so it runs off this thread.
+    let handle = app.clone();
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || sync_tree_now(&handle))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|flushed| flushed)
+    {
+        eprintln!("conversation not copied to the folder: {error}");
+    }
     Ok(summary)
 }
 
 /// Rename a conversation (the file name stays: it is a creation record).
 #[tauri::command]
 #[specta::specta]
-pub fn conversation_rename(
+pub async fn conversation_rename(
     id: String,
     title: String,
     app: tauri::AppHandle<AppRuntime>,
     state: State<'_, AppState>,
 ) -> Result<crate::conversations::Summary, String> {
     let summary = crate::conversations::rename(&ledger_dir(&state)?, &id, &title)?;
-    sync_tree_now(&app)?;
+    let handle = app.clone();
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || sync_tree_now(&handle))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|flushed| flushed)
+    {
+        eprintln!("conversation rename not copied to the folder: {error}");
+    }
     Ok(summary)
 }
 
 /// Delete a conversation's file; its history is the repository's.
 #[tauri::command]
 #[specta::specta]
-pub fn conversation_delete(
+pub async fn conversation_delete(
     id: String,
     app: tauri::AppHandle<AppRuntime>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     crate::conversations::delete(&ledger_dir(&state)?, &id)?;
-    sync_tree_now(&app)
+    let handle = app.clone();
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || sync_tree_now(&handle))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|flushed| flushed)
+    {
+        eprintln!("conversation deletion not copied to the folder: {error}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- history ---
@@ -1113,13 +1161,9 @@ fn sync_tree_now(app: &tauri::AppHandle<AppRuntime>) -> Result<(), String> {
         if crate::storage::kind() != crate::storage::StorageKind::Tree {
             return Ok(());
         }
-        let settings = app_config_dir(app)?.join("storage.json");
-        let json = std::fs::read_to_string(&settings)
-            .map_err(|error| format!("{}: {error}", settings.display()))?;
-        let tree = crate::storage::AndroidTree::from_json(app, json.trim())?;
-        let mirror = tree_mirror(app)?;
-        crate::storage::sync_back(&tree, &mirror)?;
-        Ok(())
+        with_tree(app, |tree, mirror| {
+            crate::storage::sync_back(tree, mirror).map(|_| ())
+        })
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1187,7 +1231,7 @@ pub fn history_undo(id: String, state: State<'_, AppState>) -> Result<Vec<String
     }
     let mut restored = Vec::with_capacity(writes.len());
     for (path, text) in writes {
-        edit_named_file_source(&state, &path, &text)?;
+        edit_named_file_source(&state, &path, &text, None)?;
         restored.push(path);
     }
     Ok(restored)
@@ -1291,11 +1335,16 @@ fn ledger_path(state: &AppState, path: &str) -> Result<PathBuf, String> {
 /// many pages or sheets it has.
 #[tauri::command]
 #[specta::specta]
-pub fn attachment_describe(
+pub async fn attachment_describe(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::attachments::AttachmentInfo, String> {
-    crate::attachments::describe(&ledger_path(&state, &path)?)
+    // `describe` opens the PDF or workbook to count pages and sheets — the same
+    // blocking parse the page and table readers run off the GUI thread.
+    let file = ledger_path(&state, &path)?;
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::describe(&file))
+        .await
+        .map_err(|error| format!("describing the attachment: {error}"))?
 }
 
 /// Rasterise a PDF's pages — what a vision model is shown, instead of extracted
@@ -1345,12 +1394,18 @@ pub async fn attachment_table(
 /// Text files an attachment may be (markdown, JSON, CSV), size-capped.
 #[tauri::command]
 #[specta::specta]
-pub fn attachment_text(
+pub async fn attachment_text(
     path: String,
     max_bytes: u32,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    crate::attachments::read_text(&ledger_path(&state, &path)?, u64::from(max_bytes))
+    // Up to `max_bytes` of text read and decoded: a file, not a field.
+    let file = ledger_path(&state, &path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::attachments::read_text(&file, u64::from(max_bytes))
+    })
+    .await
+    .map_err(|error| format!("reading the attachment: {error}"))?
 }
 
 // ------------------------------------------------------------- file tools ---
@@ -1420,7 +1475,8 @@ pub fn git_create_branch(
 #[specta::specta]
 pub fn git_checkout(name: String, state: State<'_, AppState>) -> Result<(), String> {
     crate::git_ops::checkout(&ledger_dir(&state)?, &name)?;
-    note_rewritten_files(&state)
+    note_best_effort(&state);
+    Ok(())
 }
 
 /// The commit log, newest first.
@@ -1463,6 +1519,17 @@ pub fn git_unstage(paths: Vec<String>, state: State<'_, AppState>) -> Result<(),
     crate::git_ops::unstage(&root, &paths)
 }
 
+/// Note what a repository operation rewrote, and never fail it over the note.
+///
+/// The repository has already moved when this runs: a log lock held elsewhere or
+/// an unwritable log directory must not report a completed checkout, merge or
+/// revert as failed — the caller would retry something that already happened.
+fn note_best_effort(state: &State<'_, AppState>) {
+    if let Err(error) = note_rewritten_files(state) {
+        eprintln!("history: rewritten files not noted: {error}");
+    }
+}
+
 /// Tell the operation log what the working tree holds after a repository
 /// operation, so its own rewrites are not reported as changes made outside the
 /// app. The journal files are hashed again; git and the log stay separate
@@ -1476,13 +1543,16 @@ fn note_rewritten_files(state: &State<'_, AppState>) -> Result<(), String> {
         .ok_or_else(|| format!("{} has no directory", loaded.root.display()))?;
     // Every file the loader read, not just the root: a branch switch or a merge
     // rewrites whichever ones the two branches disagree on.
+    // Every file the loader read, including ones the operation just deleted: a
+    // branch switch can remove an include, and a path left out here keeps its old
+    // hash in the state file, so `sync::changed` would report the app's own
+    // deletion as one made outside it, for ever.
     let paths: Vec<PathBuf> = loaded
         .ledger
         .source_map
         .files()
         .iter()
         .map(|file| file.path.clone())
-        .filter(|path| path.is_file())
         .collect();
     crate::history::note_seen(&crate::sync::log_dir(root), &paths)
 }
@@ -1494,7 +1564,8 @@ pub fn git_discard(paths: Vec<String>, state: State<'_, AppState>) -> Result<(),
     let root = ledger_dir(&state)?;
     let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     crate::git_ops::discard(&root, &paths)?;
-    note_rewritten_files(&state)
+    note_best_effort(&state);
+    Ok(())
 }
 
 /// Merge a branch into the current one: fast-forward, up to date, or a list of
@@ -1506,7 +1577,7 @@ pub fn git_merge(
     state: State<'_, AppState>,
 ) -> Result<crate::git_ops::MergeOutcome, String> {
     let outcome = crate::git_ops::merge(&ledger_dir(&state)?, &theirs)?;
-    note_rewritten_files(&state)?;
+    note_best_effort(&state);
     Ok(outcome)
 }
 
@@ -1528,7 +1599,7 @@ pub fn git_resolve(path: String, text: String, state: State<'_, AppState>) -> Re
     // (and a refusal must put the bytes back), and only then does git stage it.
     let file = ledger_path(&state, &path)?;
     let file = file.display().to_string();
-    edit_named_file_source(&state, &file, &text)?;
+    edit_named_file_source(&state, &file, &text, None)?;
     let root = ledger_dir(&state)?;
     crate::git_ops::stage(&root, &[PathBuf::from(&file)])
 }
@@ -1538,7 +1609,8 @@ pub fn git_resolve(path: String, text: String, state: State<'_, AppState>) -> Re
 #[specta::specta]
 pub fn git_merge_continue(state: State<'_, AppState>) -> Result<(), String> {
     crate::git_ops::merge_continue(&ledger_dir(&state)?)?;
-    note_rewritten_files(&state)
+    note_best_effort(&state);
+    Ok(())
 }
 
 /// Abandon a merge, restoring the branch and working tree.
@@ -1546,14 +1618,17 @@ pub fn git_merge_continue(state: State<'_, AppState>) -> Result<(), String> {
 #[specta::specta]
 pub fn git_merge_abort(state: State<'_, AppState>) -> Result<(), String> {
     crate::git_ops::merge_abort(&ledger_dir(&state)?)?;
-    note_rewritten_files(&state)
+    note_best_effort(&state);
+    Ok(())
 }
 
 /// Undo one commit as a new commit (history stays append-only).
 #[tauri::command]
 #[specta::specta]
 pub fn git_revert_commit(id: String, state: State<'_, AppState>) -> Result<String, String> {
-    crate::git_ops::revert_commit(&ledger_dir(&state)?, &id)
+    let commit = crate::git_ops::revert_commit(&ledger_dir(&state)?, &id)?;
+    note_best_effort(&state);
+    Ok(commit)
 }
 
 /// Files the ledger's folder changed behind the app (another device, a cloud
@@ -1601,103 +1676,15 @@ pub fn commit_ledger(message: String, state: State<'_, AppState>) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::AppRuntime;
-    use specta_typescript::Typescript;
-    use tauri_specta::{Builder, collect_commands};
-
     #[test]
     fn export_bindings() {
-        Builder::<AppRuntime>::new()
-            .commands(collect_commands![
-                greet,
-                accounts,
-                account_transactions,
-                load_ledger,
-                ledger_summary,
-                list_folders,
-                pick_ledger_folder,
-                lsp_start,
-                lsp_send,
-                lsp_file_path,
-                update_transaction,
-                transaction_source,
-                update_transaction_source,
-                transaction_file,
-                update_file_source,
-                journal_files,
-                file_transactions,
-                file_text,
-                update_file_text,
-                suggest_transaction_file,
-                add_transaction,
-                budget,
-                budget_range,
-                dashboards,
-                save_dashboard,
-                delete_dashboard,
-                git_state,
-                git_init,
-                git_set_identity,
-                price_sources,
-                price_targets,
-                fetch_prices,
-                write_prices,
-                ai_settings,
-                ai_configure,
-                ai_models,
-                ai_tools,
-                ai_chat,
-                query,
-                ai_stream,
-                quick_add_suggestions,
-                storage_kind,
-                sync_ledger_tree,
-                reload_ledger_tree,
-                resolve_tree_conflicts,
-                index_provider_list,
-                index_series,
-                index_import,
-                index_refresh,
-                lifestyle_report,
-                conversations,
-                conversation,
-                conversation_append,
-                conversation_rename,
-                conversation_delete,
-                history,
-                history_undo,
-                sync_changes,
-                sync_conflicts,
-                conflict_compare,
-                conflict_resolve,
-                report_net_worth,
-                report_cashflow,
-                report_categories,
-                attachment_describe,
-                attachment_pdf_pages,
-                attachment_table,
-                attachment_text,
-                tool_schemas,
-                tool_invoke,
-                git_branches,
-                git_create_branch,
-                git_checkout,
-                git_log,
-                git_commit_diff,
-                git_stage,
-                git_unstage,
-                git_discard,
-                git_merge,
-                git_conflict_texts,
-                git_resolve,
-                git_merge_continue,
-                git_merge_abort,
-                git_revert_commit,
-                ledger_diff,
-                commit_ledger,
-            ])
-            .export(Typescript::default(), "../src/bindings.ts")
-            .unwrap();
+        // The same registry `run()` installs: a command that reaches one and not
+        // the other is a method `bindings.ts` promises and the backend refuses.
+        crate::command_builder()
+            .export(
+                specta_typescript::Typescript::default(),
+                "../src/bindings.ts",
+            )
+            .expect("Failed to export typescript bindings");
     }
 }

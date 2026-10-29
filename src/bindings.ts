@@ -158,7 +158,7 @@ export const commands = {
 	 *  whether the text is a legal ledger, a refusal puts the file back
 	 *  byte-for-byte, and a success stages it for a later commit.
 	 */
-	updateFileText: (file: string, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_text", { file, text })),
+	updateFileText: (file: string, text: string, base: string | null) => typedError<null, string>(__TAURI_INVOKE("update_file_text", { file, text, base })),
 	/**
 	 *  The journal file a new transaction should go into, given the accounts it
 	 *  mentions — the new-entry form's default, so the form can preselect a file
@@ -231,7 +231,7 @@ export const commands = {
 	 *  Append fetched quotes to one journal file as `price` directives, through the
 	 *  same loader-verified write pipeline as every other edit.
 	 */
-	writePrices: (file: string, quotes: PriceQuote[]) => typedError<null, string>(__TAURI_INVOKE("write_prices", { file, quotes })),
+	writePrices: (file: string, quotes: PriceQuote[]) => typedError<number, string>(__TAURI_INVOKE("write_prices", { file, quotes })),
 	/**  The assistant's endpoint/model, and whether a key is stored (never the key). */
 	aiSettings: () => typedError<AiSettingsView, string>(__TAURI_INVOKE("ai_settings")),
 	/**
@@ -276,8 +276,8 @@ export const commands = {
 	storageKind: () => __TAURI_INVOKE<StorageKind>("storage_kind"),
 	/**
 	 *  Android: write the mirror's changed files back into the SAF tree. Called after
-	 *  a successful edit (and by the UI's explicit sync action); returns the paths
-	 *  that were written.
+	 *  a successful edit (and by the UI's explicit sync action); reports what moved
+	 *  and what could not.
 	 */
 	syncLedgerTree: () => typedError<SyncReport, string>(__TAURI_INVOKE("sync_ledger_tree")),
 	/**
@@ -1659,9 +1659,11 @@ export type Role = "user" | "assistant" | "tool";
 /**
  *  Which storage the ledger lives in.
  * 
- *  Serialized as `"local"`/`"tree"` so it can cross IPC once the frontend has a
- *  command to read it: today the SAF path is implemented and unit-tested but no
- *  command opens a tree or reports this kind, so the app is always `Local`.
+ *  Serialized as `"local"`/`"tree"` and read over IPC (`storage_kind`): the
+ *  frontend branches on it to decide whether a write has to be pushed into a
+ *  folder and whether "reload" means pulling one first. It follows the ledger
+ *  that is loaded — a path inside the mirror is `Tree` — so opening an ordinary
+ *  directory afterwards ends tree mode again.
  */
 export type StorageKind = 
 /**

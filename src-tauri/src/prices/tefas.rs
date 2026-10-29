@@ -44,16 +44,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rust_decimal::Decimal;
-use rustledger::cmd::price::sources::{PricePair, PriceSource};
 use rustledger::cmd::price::PriceResponse;
+use rustledger::cmd::price::sources::{PricePair, PriceSource};
 use rustledger_core::NaiveDate;
 
 /// The name a request asks this source by, and the name the source list shows.
 pub(crate) const NAME: &str = "tefas";
 
 /// What the source list says it covers.
-pub(crate) const DESCRIPTION: &str =
-    "TEFAS — Turkish fund unit prices, in TRY (tefas.gov.tr)";
+pub(crate) const DESCRIPTION: &str = "TEFAS — Turkish fund unit prices, in TRY (tefas.gov.tr)";
 
 /// Every TEFAS price is in lira; the platform publishes nothing else.
 pub(crate) const QUOTE_CURRENCY: &str = "TRY";
@@ -247,7 +246,9 @@ fn preview(body: &str) -> String {
 fn checked_fund_code(ticker: &str) -> Result<String, String> {
     let code = ticker.trim().to_uppercase();
     let shaped = (2..=10).contains(&code.len())
-        && code.chars().all(|character| character.is_ascii_alphanumeric());
+        && code
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric());
     if !shaped {
         return Err(format!(
             "`{ticker}` is not a TEFAS fund code (the short alphanumeric code the platform \
@@ -325,8 +326,7 @@ mod tests {
             .expect_err("the old shape is not the envelope");
         assert!(error.contains("changed shape"), "{error}");
         assert!(error.contains("resultList"), "{error}");
-        let error = parse_latest("AFA", "<html>maintenance</html>")
-            .expect_err("html is not JSON");
+        let error = parse_latest("AFA", "<html>maintenance</html>").expect_err("html is not JSON");
         assert!(error.contains("changed shape"), "{error}");
     }
 
@@ -357,7 +357,10 @@ mod tests {
         assert_eq!(checked_fund_code(" afa ").unwrap(), "AFA");
         assert_eq!(checked_fund_code("TI2").unwrap(), "TI2");
         for bad in ["", "A", "A F A", "AFA/TRY", "abcdefghijk"] {
-            assert!(checked_fund_code(bad).is_err(), "`{bad}` is not a fund code");
+            assert!(
+                checked_fund_code(bad).is_err(),
+                "`{bad}` is not a fund code"
+            );
         }
     }
 

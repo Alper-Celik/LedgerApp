@@ -480,7 +480,7 @@ pub fn pre_image_for(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String
             operations
                 .iter()
                 .flat_map(|operation| &operation.ops)
-                .find(|file| match local_path(root, &file.path) {
+                .find(|file| match local_path_exact(root, &file.path) {
                     Some(local) => same_path(&local, path),
                     None => false,
                 })
@@ -523,6 +523,35 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// [`local_path`] for a use that cannot afford a guess.
+///
+/// The conflict base is presented to the reader as "what both sides started
+/// from", so equating a peer's `<phone>/tree/old/main.bean` with this device's
+/// `main.bean` on the strength of a shared file name would classify their
+/// directives against another file's. A suffix has to keep its directory (or the
+/// recorded path to have none) to be accepted.
+fn local_path_exact(root: &Path, recorded: &Path) -> Option<PathBuf> {
+    if recorded.exists() {
+        return Some(recorded.to_path_buf());
+    }
+    let ledger = ledger_of(root)?;
+    let parts: Vec<_> = recorded.components().collect();
+    for start in 0..parts.len() {
+        // A bare file name is accepted only when the recorded path was one too.
+        if start + 2 > parts.len() && parts.len() > 1 {
+            continue;
+        }
+        let mut candidate = ledger.to_path_buf();
+        for part in &parts[start..] {
+            candidate.push(part.as_os_str());
+        }
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// The ledger directory a log directory belongs to (`<ledger>/.ledger/log`).
 fn ledger_of(root: &Path) -> Option<&Path> {
     root.parent()?.parent()
@@ -535,7 +564,7 @@ fn ledger_of(root: &Path) -> Option<&Path> {
 /// The ledger-relative tail of the path is the part every device shares, so it is
 /// resolved against this device's own ledger directory. An existing path is
 /// returned untouched.
-fn local_path(root: &Path, recorded: &Path) -> Option<PathBuf> {
+pub(crate) fn local_path(root: &Path, recorded: &Path) -> Option<PathBuf> {
     if recorded.exists() {
         return Some(recorded.to_path_buf());
     }
@@ -674,12 +703,16 @@ fn prune_after(root: &Path, retention: Retention, grace: Duration) -> Result<u64
         let metadata = entry
             .metadata()
             .map_err(|error| format!("{}: {error}", entry.path().display()))?;
-        if metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age < grace)
-        {
+        // A stamp in the future is fresh: `elapsed` fails for exactly that case,
+        // and a peer whose clock runs ahead stamps the pre-images it pushes that
+        // way. Reading the failure as "old" would delete the image before the
+        // line that names it arrives — the one thing this window protects.
+        let fresh = metadata.modified().ok().is_none_or(|modified| {
+            std::time::SystemTime::now()
+                .duration_since(modified)
+                .map_or(true, |age| age < grace)
+        });
+        if fresh {
             continue;
         }
         let size = metadata.len();
@@ -1189,16 +1222,9 @@ pub fn note_seen(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
 /// Swap `state.json` in whole: a temp file and a rename, so a peer syncing
 /// mid-write never copies half a state file.
 fn write_state(root: &Path, device: &str, state: &State) -> Result<(), String> {
-    let path = state_file(root, device);
-    let temp = root.join(format!(".{STATE_PREFIX}{:04x}.json", next_id_part()));
     let mut json = serde_json::to_vec_pretty(state).map_err(|error| format!("state: {error}"))?;
     json.push(b'\n');
-    fs::write(&temp, json).map_err(|error| format!("{}: {error}", temp.display()))?;
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("{}: {error}", path.display()));
-    }
-    Ok(())
+    crate::fsutil::write_atomic(&state_file(root, device), &json, None)
 }
 
 /// Held for one append. A file rather than an advisory lock: a file survives
@@ -1249,6 +1275,11 @@ impl Lock {
     /// lock exists for.
     pub(crate) fn for_store(dir: &Path) -> Result<Self, String> {
         Self::acquire(dir, "indexes")
+    }
+
+    /// The same lock for another whole-file store in the same directory.
+    pub(crate) fn for_named_store(dir: &Path, name: &str) -> Result<Self, String> {
+        Self::acquire(dir, name)
     }
 }
 

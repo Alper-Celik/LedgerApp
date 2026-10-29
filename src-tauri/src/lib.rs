@@ -29,6 +29,7 @@ mod dashboards;
 mod editing;
 mod files;
 mod folders;
+mod fsutil;
 mod git;
 mod git_ops;
 mod history;
@@ -45,8 +46,8 @@ mod rewrite;
 mod session;
 mod source;
 mod storage;
-mod sync;
 mod suggest;
+mod sync;
 mod tools;
 
 #[cfg(test)]
@@ -56,13 +57,6 @@ mod testing;
 use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
 
-use commands::{
-    account_transactions, accounts, add_transaction, budget, commit_ledger, file_text,
-    file_transactions, greet, journal_files, ledger_diff, ledger_summary, list_folders,
-    load_ledger, lsp_file_path, lsp_send, lsp_start, pick_ledger_folder, suggest_transaction_file,
-    transaction_file, transaction_source, update_file_source, update_file_text,
-    update_transaction, update_transaction_source,
-};
 use commands::*;
 use session::AppState;
 
@@ -74,9 +68,14 @@ pub type AppRuntime = tauri_runtime_qt::QtRuntime;
 #[cfg(any(not(target_os = "linux"), feature = "wry"))]
 pub type AppRuntime = tauri::Wry;
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let builder = Builder::<AppRuntime>::new().commands(collect_commands![
+/// The one command registry: what `run()` installs and what `bindings.ts` is
+/// exported from.
+///
+/// One list, not one in `run()` and another in the export test — a command added
+/// to a copy that the other one lacks is a method the frontend can call and the
+/// backend does not know, which is invisible until something tries it.
+pub fn command_builder() -> Builder<AppRuntime> {
+    Builder::<AppRuntime>::new().commands(collect_commands![
         greet,
         accounts,
         account_transactions,
@@ -120,6 +119,8 @@ pub fn run() {
         quick_add_suggestions,
         storage_kind,
         sync_ledger_tree,
+        reload_ledger_tree,
+        resolve_tree_conflicts,
         index_provider_list,
         index_series,
         index_import,
@@ -161,7 +162,11 @@ pub fn run() {
         git_revert_commit,
         ledger_diff,
         commit_ledger,
-    ]);
+    ])
+}
+
+pub fn run() {
+    let builder = command_builder();
 
     // Only export bindings on non-release desktop builds: a phone's debug build
     // must not try to write `../src/bindings.ts` (and panic when it cannot).

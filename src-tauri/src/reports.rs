@@ -542,6 +542,14 @@ pub fn lifestyle_report(
             categories: Vec::new(),
         });
     };
+    // An exchange rate is not a price level: restating spending with it divides
+    // one month's rate by another's and calls the result inflation.
+    if matches!(series.id.as_str(), "ecb-usd" | "ecb-try") {
+        return Err(format!(
+            "`{}` is a reference exchange rate, not a price level; choose a consumer or producer price index",
+            series.id
+        ));
+    }
     if series.currency != currency {
         return Err(format!(
             "price index `{}` measures {}, but the report is in {currency}",

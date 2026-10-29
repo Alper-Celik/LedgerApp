@@ -20,9 +20,8 @@
 //! without re-reading the file.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -225,7 +224,7 @@ pub fn apply_edits(path: &Path, ops: &[EditOp]) -> Result<EditOutcome, String> {
     let rendered = edited.render();
     let written = rendered != previous;
     if written {
-        write_atomically(path, &rendered)?;
+        crate::fsutil::write_atomic(path, rendered.as_bytes(), None)?;
     }
 
     let total = edited.lines.len();
@@ -267,7 +266,10 @@ fn plan(document: &Document, ops: &[EditOp]) -> Result<Vec<Planned>, String> {
     for (index, op) in ops.iter().enumerate() {
         let resolved = match op {
             EditOp::Write { .. } => {
-                return Err("`write` replaces the whole file and cannot be combined with other operations".to_string());
+                return Err(
+                    "`write` replaces the whole file and cannot be combined with other operations"
+                        .to_string(),
+                );
             }
             EditOp::Replace { at, lines } => {
                 let line = resolve(document, at).map_err(|error| operation(index, &error))?;
@@ -335,9 +337,10 @@ fn parse_anchor(raw: &str) -> Result<Anchor, String> {
     let trimmed = raw.trim();
     let (hash, line) = match trimmed.split_once('@') {
         Some((hash, number)) => {
-            let number = number.trim().parse::<usize>().map_err(|_| {
-                format!("anchor `{raw}`: `{number}` is not a line number")
-            })?;
+            let number = number
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| format!("anchor `{raw}`: `{number}` is not a line number"))?;
             if number == 0 {
                 return Err(format!("anchor `{raw}`: line numbers start at 1"));
             }
@@ -465,52 +468,12 @@ fn region(document: &Document, start: usize, end: usize) -> (usize, Vec<LineView
 }
 
 fn decode(path: &Path, bytes: &[u8]) -> Result<String, String> {
-    std::str::from_utf8(bytes)
-        .map(str::to_string)
-        .map_err(|_| {
-            if bytes.contains(&0) {
-                format!("{} is not a text file", path.display())
-            } else {
-                format!("{} is not UTF-8 text", path.display())
-            }
-        })
-}
-
-/// Replace `path` with `text` through a sibling temporary file, so a reader
-/// never sees half a file and a failure leaves the old one untouched.
-fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_string());
-    let temporary = parent.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-
-    let permissions = fs::metadata(path).ok().map(|meta| meta.permissions());
-    let mut file = fs::File::create(&temporary)
-        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
-    let result = file
-        .write_all(text.as_bytes())
-        .and_then(|()| file.flush())
-        .and_then(|()| match &permissions {
-            Some(permissions) => fs::set_permissions(&temporary, permissions.clone()),
-            None => Ok(()),
-        });
-    drop(file);
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!("cannot write {}: {error}", path.display()));
-    }
-    fs::rename(&temporary, path).map_err(|error| {
-        let _ = fs::remove_file(&temporary);
-        format!("cannot replace {}: {error}", path.display())
+    std::str::from_utf8(bytes).map(str::to_string).map_err(|_| {
+        if bytes.contains(&0) {
+            format!("{} is not a text file", path.display())
+        } else {
+            format!("{} is not UTF-8 text", path.display())
+        }
     })
 }
 
@@ -520,7 +483,7 @@ fn write_whole(path: &Path, text: &str) -> Result<bool, String> {
     if fs::read(path).is_ok_and(|existing| existing == text.as_bytes()) {
         return Ok(false);
     }
-    write_atomically(path, text)?;
+    crate::fsutil::write_atomic(path, text.as_bytes(), None)?;
     Ok(true)
 }
 
@@ -567,7 +530,10 @@ mod tests {
 
     #[test]
     fn hashes_are_content_only() {
-        assert_eq!(hash_line("2026-01-01 * \"Groceries\""), hash_line("2026-01-01 * \"Groceries\""));
+        assert_eq!(
+            hash_line("2026-01-01 * \"Groceries\""),
+            hash_line("2026-01-01 * \"Groceries\"")
+        );
         assert_ne!(hash_line("Assets:Bank"), hash_line("Assets:Cash"));
         assert_eq!(hash_line("").len(), 4);
     }
@@ -575,7 +541,11 @@ mod tests {
     #[test]
     fn document_round_trips_line_endings() {
         for text in ["", "\n", "a", "a\n", "a\nb", "a\nb\n", "a\r\nb\r\n", "\r\n"] {
-            assert_eq!(Document::parse(text).render(), text, "round trip of {text:?}");
+            assert_eq!(
+                Document::parse(text).render(),
+                text,
+                "round trip of {text:?}"
+            );
         }
     }
 
@@ -588,7 +558,10 @@ mod tests {
         assert_eq!(read.first, 1);
         assert!(!read.truncated);
         assert_eq!(
-            read.lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            read.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
             ["one", "two", "three"]
         );
         assert_eq!(read.lines[1], LineView::new(2, "two"));
@@ -603,10 +576,28 @@ mod tests {
         assert_eq!(past_end.first, 4, "one past the last line");
         assert!(!past_end.truncated);
 
-        assert!(read_file(&path, Some(0), None).unwrap_err().contains("1-based"));
-        assert!(read_file(&path, None, Some(0)).unwrap_err().contains("at least 1"));
-        assert!(read_file(&dir.path().join("nope.bean"), None, None).unwrap_err().contains("no such file"));
-        assert_eq!(read_file(&path, None, Some(usize::MAX)).unwrap().lines.len(), 3);
+        assert!(
+            read_file(&path, Some(0), None)
+                .unwrap_err()
+                .contains("1-based")
+        );
+        assert!(
+            read_file(&path, None, Some(0))
+                .unwrap_err()
+                .contains("at least 1")
+        );
+        assert!(
+            read_file(&dir.path().join("nope.bean"), None, None)
+                .unwrap_err()
+                .contains("no such file")
+        );
+        assert_eq!(
+            read_file(&path, None, Some(usize::MAX))
+                .unwrap()
+                .lines
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -649,10 +640,17 @@ mod tests {
             &[insert_after(&anchor(&outcome.lines[0]), &["2.5", "2.75"])],
         )
         .unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "one\nTWO\n2.5\n2.75\nthree\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "one\nTWO\n2.5\n2.75\nthree\n"
+        );
         assert_eq!(outcome.first, 3);
         assert_eq!(
-            outcome.lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            outcome
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
             ["2.5", "2.75"]
         );
 
@@ -660,7 +658,10 @@ mod tests {
         let current = read_file(&path, None, None).unwrap();
         apply_edits(
             &path,
-            &[delete(&anchor(&current.lines[2]), &anchor(&current.lines[3]))],
+            &[delete(
+                &anchor(&current.lines[2]),
+                &anchor(&current.lines[3]),
+            )],
         )
         .unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\nTWO\nthree\n");
@@ -678,7 +679,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\nTWO!\nextra\n");
         assert_eq!(outcome.first, 2);
         assert_eq!(
-            outcome.lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            outcome
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
             ["TWO!", "extra"]
         );
     }
@@ -688,20 +693,34 @@ mod tests {
         let dir = scratch();
         let path = dir.path().join("new.bean");
 
-        let outcome = apply_edits(&path, &[EditOp::Write { content: "a\nb\n".into() }]).unwrap();
+        let outcome = apply_edits(
+            &path,
+            &[EditOp::Write {
+                content: "a\nb\n".into(),
+            }],
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\n");
         assert!(outcome.written);
         assert_eq!(outcome.total_lines, 2);
         assert_eq!(outcome.lines.len(), 2);
 
         // An identical write is not a write at all.
-        let outcome = apply_edits(&path, &[EditOp::Write { content: "a\nb\n".into() }]).unwrap();
+        let outcome = apply_edits(
+            &path,
+            &[EditOp::Write {
+                content: "a\nb\n".into(),
+            }],
+        )
+        .unwrap();
         assert!(!outcome.written);
 
         let error = apply_edits(
             &path,
             &[
-                EditOp::Write { content: "x".into() },
+                EditOp::Write {
+                    content: "x".into(),
+                },
                 replace("0000", &["y"]),
             ],
         )
@@ -735,7 +754,11 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("line changed at 2"), "{error}");
         assert!(error.contains("operation 2"), "{error}");
-        assert_eq!(fs::read(&path).unwrap(), untouched, "the file must not change");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            untouched,
+            "the file must not change"
+        );
 
         // The same, anchored by hash alone: the line that changed is gone from
         // the file, so the hash no longer names anything.
@@ -749,13 +772,17 @@ mod tests {
         let dir = scratch();
         let path = seed(&dir, "main.bean", "a\n\nb\n\nc\n");
         let read = read_file(&path, None, None).unwrap();
-        assert_eq!(read.lines[1].hash, read.lines[3].hash, "blank lines hash alike");
+        assert_eq!(
+            read.lines[1].hash, read.lines[3].hash,
+            "blank lines hash alike"
+        );
 
         let error = apply_edits(&path, &[replace(&read.lines[1].hash, &["x"])]).unwrap_err();
         assert!(error.contains("ambiguous anchor"), "{error}");
         assert!(error.contains("write"), "{error}");
 
-        let outcome = apply_edits(&path, &[replace(&anchor(&read.lines[3]), &["between"])]).unwrap();
+        let outcome =
+            apply_edits(&path, &[replace(&anchor(&read.lines[3]), &["between"])]).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "a\n\nb\nbetween\nc\n");
         assert_eq!(outcome.first, 4);
     }
@@ -815,9 +842,7 @@ mod tests {
 
         let error = apply_edits(
             &path,
-            &[
-                delete(&anchor(&read.lines[1]), &anchor(&read.lines[0])),
-            ],
+            &[delete(&anchor(&read.lines[1]), &anchor(&read.lines[0]))],
         )
         .unwrap_err();
         assert!(error.contains("give `from` first"), "{error}");
@@ -841,7 +866,13 @@ mod tests {
         let empty = seed(&dir, "empty.bean", "");
         let read = read_file(&empty, None, None).unwrap();
         assert_eq!(read.total_lines, 0);
-        let outcome = apply_edits(&empty, &[EditOp::Write { content: "x\n".into() }]).unwrap();
+        let outcome = apply_edits(
+            &empty,
+            &[EditOp::Write {
+                content: "x\n".into(),
+            }],
+        )
+        .unwrap();
         assert_eq!(outcome.total_lines, 1);
     }
 

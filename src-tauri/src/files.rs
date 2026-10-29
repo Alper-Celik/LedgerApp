@@ -128,21 +128,14 @@ pub(crate) fn file_transaction_views(
     let view = ledger.balance_view();
     let sources = source_directive_index(ledger, &view);
     Ok(account_transaction_views_in_file(
-        ledger,
-        baseline,
-        &view,
-        &sources,
-        found.id,
+        ledger, baseline, &view, &sources, found.id,
     ))
 }
 
 /// The journal file the loader holds under the path `file` — the one lookup
 /// every command that names a file starts with, so an unknown path fails the
 /// same way whichever one asked.
-pub(crate) fn source_of_file<'a>(
-    ledger: &'a Ledger,
-    file: &str,
-) -> Result<&'a SourceFile, String> {
+pub(crate) fn source_of_file<'a>(ledger: &'a Ledger, file: &str) -> Result<&'a SourceFile, String> {
     ledger
         .source_map
         .get_by_path(Path::new(file))

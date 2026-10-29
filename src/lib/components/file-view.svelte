@@ -114,11 +114,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			One editor per file: a different file is a different text, so the editor
 			is rebuilt for it. It is opened by path, so the file itself is what is
 			edited — no entry of it is — and a file that writes no transactions is
-			still text. The editor is rebuilt whenever the ledger is reloaded or
-			anything writes it, because its buffer is text the file no longer
-			holds: saving it afterwards would put it back.
+			still text. The editor is rebuilt only when another journal is opened;
+			a reload under an open draft keeps the draft, and the save that follows
+			is refused if the file moved on (the editor sends the text it opened).
 		-->
-		{#key `${path}:${ledgerEpoch.value}:${ledgerRevision.value}`}
+		{#key `${path}:${ledgerEpoch.value}`}
 			<div class={mode === "text" ? "" : "hidden"}>
 				<SourceEditor
 					file={path}

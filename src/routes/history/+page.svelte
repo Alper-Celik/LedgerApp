@@ -52,19 +52,35 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** What the last undo did, kept under the row it belongs to. */
 	type Outcome = { id: string; restored: string[] } | { id: string; error: string };
 
-	/** The route's own page of the log, read once; filters refetch through it. */
-	const loaded = untrack(() => data);
+	/** The route's own page of the log, taken once to seed the screen. */
+	const first = untrack(() => data);
+	/** The load the state below was last taken from. */
+	let loaded = $state(first);
 
-	let operations = $state<Operation[]>(loaded.operations);
-	let error = $state(loaded.error);
+	let operations = $state<Operation[]>(first.operations);
+	let error = $state(first.error);
 	let loading = $state(false);
-	let limit = $state(loaded.page);
-	let exhausted = $state(loaded.operations.length < loaded.page);
+	let limit = $state(first.page);
+	let exhausted = $state(first.operations.length < first.page);
 	let origin = $state<OriginFilter>("all");
 	let pathFilter = $state("");
 	let busyId = $state<string | null>(null);
 	let outcome = $state<Outcome | null>(null);
 	let filterTimer: ReturnType<typeof setTimeout> | undefined;
+
+	$effect(() => {
+		// `invalidateAll` re-runs the loader — after another ledger is opened, or
+		// after an undo — and the page above was seeded from an earlier read. The
+		// log belongs to whichever ledger is open, so the page follows its own
+		// load instead of offering the previous one's operations to Undo.
+		if (data === loaded) return;
+		loaded = data;
+		operations = data.operations;
+		limit = data.page;
+		exhausted = data.operations.length < data.page;
+		error = data.error;
+		outcome = null;
+	});
 
 	const filtered = $derived(origin !== "all" || pathFilter.trim() !== "");
 

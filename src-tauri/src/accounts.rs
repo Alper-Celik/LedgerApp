@@ -197,12 +197,7 @@ fn collect_transaction_views(
             let modified = sources
                 .and_then(|sources| sources.get(id).copied().flatten())
                 .is_some_and(|index| {
-                    touches_changes(
-                        ledger,
-                        changed,
-                        &mut line_starts,
-                        &ledger.directives[index],
-                    )
+                    touches_changes(ledger, changed, &mut line_starts, &ledger.directives[index])
                 });
             Some(TransactionView {
                 id: u32::try_from(id).unwrap_or(u32::MAX),
@@ -288,7 +283,9 @@ fn primary_holding(held: &HashMap<String, Decimal>, operating: &[String]) -> (St
         }
     }
     held.iter()
-        .max_by_key(|(_, units)| units.abs())
+        // Tied positions break on the commodity's name: two calls over one
+        // ledger must not answer different currencies for the same account.
+        .max_by(|a, b| a.1.abs().cmp(&b.1.abs()).then_with(|| a.0.cmp(b.0)))
         .map(|(currency, units)| (currency.clone(), *units))
         .unwrap_or_default()
 }

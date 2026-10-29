@@ -161,7 +161,7 @@ const LOCAL_TOOLS: ToolSchema[] = [
 			"`await ledger.file_text(path)`, `await ledger.budget_range('2026-01', '2026-06')`, " +
 			"`await ledger.index_series()`, `await ledger.lifestyle_report(months, index)`, " +
 			"`await ledger.price_targets()`, `await ledger.query(bql, max_rows=200)`; each answers the same JSON as the tool of that name. " +
-			"`await ledger.df(bql)` answers a pandas DataFrame (pandas is downloaded on first use, so it needs a network connection; `ledger.query` works offline). " +
+			"`await ledger.df(bql)` answers a pandas DataFrame (the runtime and its packages ship with the app, so it works offline; `ledger.query` is faster for plain aggregates). " +
 			"`ledger.table(name, data)` puts a table in the transcript (a DataFrame, a list of dicts/rows, or a dict of columns); " +
 			"`ledger.chart({...})` puts one chart there: `kind` line|bar|area|donut, `currency`, and `series: [{name, points: [{label, value}]}]` with amounts as decimal strings (a donut draws the first series as its slices). " +
 			"Use print() for prose; stdout, tables and the chart come back with the run. " +
@@ -642,7 +642,7 @@ export async function applyProposal(proposal: Proposal): Promise<void> {
 				`\`${proposal.file}\` changed since this was proposed; ask again so it is staged against the current text`
 			);
 		}
-		await unwrap(commands.updateFileText(proposal.file, proposal.after));
+		await unwrap(commands.updateFileText(proposal.file, proposal.after, proposal.before));
 	}
 	bumpLedgerRevision();
 	await invalidateAll();

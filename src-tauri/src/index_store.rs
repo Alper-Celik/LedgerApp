@@ -173,21 +173,12 @@ fn index_path(dir: &Path) -> PathBuf {
 }
 
 fn write_indexes(dir: &Path, series: &[IndexSeries]) -> Result<(), String> {
-    fs::create_dir_all(dir)
-        .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
-    let path = index_path(dir);
+    fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     let text = serde_json::to_string_pretty(series)
-        .map_err(|error| format!("could not encode the index series: {error}"))?;
-    // A unique temp name: two writers (a refresh on a worker thread, a CSV
-    // import from the UI) must not share one scratch file, or the rename can
-    // publish a half-written store.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let scratch = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = dir.join(format!("{INDEX_FILE}.{}.{scratch}.tmp", std::process::id()));
-    fs::write(&temporary, text)
-        .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("could not replace {}: {error}", path.display()))
+        .map_err(|error| format!("cannot encode the index series: {error}"))?;
+    // One writer at a time in this process (`save_series` holds the file lock)
+    // and a unique temp name, so two writers can never share a scratch file.
+    crate::fsutil::write_atomic(&index_path(dir), text.as_bytes(), None)
 }
 
 #[cfg(test)]

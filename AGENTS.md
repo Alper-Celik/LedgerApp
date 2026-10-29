@@ -22,11 +22,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   byte-range surgery), `conflict.rs` (directive-level three-way merge), `conflict_cmd.rs` (compare/resolve
   over the operation log), `conflict_names.rs` (every sync client's conflict-copy naming).
 - **Storage, git and history** — `storage.rs` (local vs Android SAF tree: `pick_ledger_folder` picks a
-  tree on Android, mirrors it privately, and `sync_ledger_tree` writes changes back — the mirror is what
-  the loader and git open, so git is off in tree mode), `repo.rs` (repo state/init/identity), `git.rs` (working-tree
-  detection, diff, commit), `git_ops.rs` (branches, log, stage, merge, revert; not yet exposed as commands),
-  `history.rs` (the operation log inside the ledger: per-device jsonl + pre-image blobs + `state.json`,
-  which serves undo *and* merge bases without git).
+  tree on Android and mirrors it privately, and every sync is three-way against a per-file base
+  (`<mirror>.manifest.json`) — a folder-only change is pulled on open and reported on a write, an
+  app-only change is pushed, a both-sides change is reported and settled only on request; `.git` and
+  friends never cross, and the mirror is what the loader opens, so git is off in tree mode), `repo.rs`
+  (repo state/init/identity), `git.rs` (working-tree detection, diff, commit built from the workdir the
+  screen reviewed), `git_ops.rs` (branches, log, stage, merge, revert; not yet exposed as commands),
+  `history.rs` (the operation log inside the ledger: per-device jsonl + pre-image blobs + one
+  `state-<id>.json` per device, which serves undo *and* merge bases without git; paths resolve per
+  device, so a phone's operation undoes on the desktop).
 - **Fetchers** — `prices.rs` + `prices/tefas.rs` (quotes via rustledger's `PriceSource`, TEFAS
   downstream, written to the journal through the edit pipeline), `index.rs` (index-as-price maths),
   `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `dashboards.rs` (the saved

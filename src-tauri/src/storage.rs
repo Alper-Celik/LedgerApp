@@ -10,8 +10,17 @@
 //! URIs instead of paths, and the loader, the editor, `git2` and the rustledger
 //! crates all want real paths on a real filesystem. So the app keeps a private,
 //! ordinary-filesystem mirror of that tree and hands the mirror to everything
-//! else; [`mirror_into`] fills it when a tree is opened and [`sync_back`] writes
-//! the edited files home.
+//! else.
+//!
+//! The mirror is not a copy the app owns outright: the folder is edited by the
+//! same sync client that carries the ledger to other devices, so a write-back
+//! that only knows the mirror's bytes would overwrite work it never saw. Every
+//! pass is therefore three-way, with a per-file base (see [`Manifest`]): a file
+//! only the folder changed is pulled on open and reported on a write, a file only
+//! the app changed is pushed, and a file both changed is left alone, reported,
+//! and settled only when the reader picks a side ([`resolve_conflicts`]). Opening
+//! a tree reconciles ([`mirror_into`]); a write calls [`sync_back`], which differs
+//! only in refusing to pull over bytes the app is showing.
 //!
 //! The mirror logic is plain `std::fs` over a [`TreeSource`], so it compiles and
 //! is tested on every platform; only the provider that talks to Android is
@@ -29,9 +38,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which storage the ledger lives in.
 ///
-/// Serialized as `"local"`/`"tree"` so it can cross IPC once the frontend has a
-/// command to read it: today the SAF path is implemented and unit-tested but no
-/// command opens a tree or reports this kind, so the app is always `Local`.
+/// Serialized as `"local"`/`"tree"` and read over IPC (`storage_kind`): the
+/// frontend branches on it to decide whether a write has to be pushed into a
+/// folder and whether "reload" means pulling one first. It follows the ledger
+/// that is loaded — a path inside the mirror is `Tree` — so opening an ordinary
+/// directory afterwards ends tree mode again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageKind {
@@ -239,9 +250,7 @@ impl Manifest {
         };
         let mut json = serde_json::to_vec(&stored).map_err(|error| format!("manifest: {error}"))?;
         json.push(b'\n');
-        let temp = path.with_extension("json.tmp");
-        fs::write(&temp, json).map_err(|error| format!("{}: {error}", temp.display()))?;
-        fs::rename(&temp, &path).map_err(|error| format!("{}: {error}", path.display()))
+        crate::fsutil::write_atomic(&path, &json, None)
     }
 }
 
@@ -265,6 +274,19 @@ pub fn reset_mirror(target_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// One reconciliation at a time.
+///
+/// The manifest is a whole-file read-modify-write over a whole-tree walk, and the
+/// callers overlap: the UI syncs on every write without awaiting, a conversation
+/// command flushes its own pass, and a reload or a resolution can start while
+/// either is running. Two passes reading the same base invent a conflict neither
+/// side caused.
+static RECONCILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialized() -> std::sync::MutexGuard<'static, ()> {
+    RECONCILE.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// Open a tree into the mirror, three-way.
 ///
 /// Called when a tree is picked or restored. It does **not** wipe the mirror:
@@ -276,6 +298,7 @@ pub fn reset_mirror(target_dir: &Path) -> Result<(), String> {
     allow(dead_code) // called by the Android open path; the tests exercise it here
 )]
 pub fn mirror_into(source: &dyn TreeSource, target_dir: &Path) -> Result<SyncReport, String> {
+    let _serial = serialized();
     reconcile(source, target_dir, true)
 }
 
@@ -289,7 +312,45 @@ pub fn mirror_into(source: &dyn TreeSource, target_dir: &Path) -> Result<SyncRep
     allow(dead_code) // called by the Android save path; the tests exercise it here
 )]
 pub fn sync_back(source: &dyn TreeSource, target_dir: &Path) -> Result<SyncReport, String> {
+    let _serial = serialized();
     reconcile(source, target_dir, false)
+}
+
+/// Adopt a newly picked tree: copy it into a staging mirror, prove the result is
+/// a ledger this app can load, and only then replace the mirror.
+///
+/// Replacing first would destroy the previous mirror — including edits this
+/// device never pushed — before anything knows the picked folder is a ledger at
+/// all; a folder without a journal would leave the app holding a ledger whose
+/// files were just deleted.
+pub fn adopt_tree(source: &dyn TreeSource, target_dir: &Path) -> Result<(), String> {
+    let _serial = serialized();
+    let name = target_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tree".to_owned());
+    let staging = target_dir.with_file_name(format!("{name}.next"));
+    reset_mirror(&staging)?;
+    let adopted = reconcile(source, &staging, true).and_then(|_| {
+        crate::session::load_baselined(&staging)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = adopted {
+        let _ = reset_mirror(&staging);
+        return Err(error);
+    }
+    // The swap: the manifest moves with the bytes, or the next pass would compare
+    // the new mirror against the old folder's base.
+    reset_mirror(target_dir)?;
+    fs::rename(&staging, target_dir)
+        .map_err(|error| format!("cannot replace {}: {error}", target_dir.display()))?;
+    fs::rename(Manifest::path(&staging), Manifest::path(target_dir)).map_err(|error| {
+        format!(
+            "cannot replace {}: {error}",
+            Manifest::path(target_dir).display()
+        )
+    })
 }
 
 /// Reconcile the mirror and the tree, file by file, with the last agreed bytes
@@ -370,11 +431,18 @@ fn reconcile(source: &dyn TreeSource, target_dir: &Path, pull: bool) -> Result<S
                         });
                     }
                     // Never seen in the manifest (a folder this app did not
-                    // mirror, or a lost manifest): the folder is the record.
+                    // mirror, a lost manifest, or a path whose deletion this app
+                    // already pushed and the folder re-created): opening takes
+                    // the folder's version, a write reports it instead of
+                    // replacing bytes the reader is looking at.
                     None => {
-                        write_local(target_dir, path, &source.read(path)?)?;
-                        report.pulled.push(path.clone());
-                        base.insert(path.clone(), tree_hash);
+                        if pull {
+                            write_local(target_dir, path, &source.read(path)?)?;
+                            report.pulled.push(path.clone());
+                            base.insert(path.clone(), tree_hash);
+                        } else {
+                            report.external.push(path.clone());
+                        }
                     }
                 }
             }
@@ -404,15 +472,33 @@ fn reconcile(source: &dyn TreeSource, target_dir: &Path, pull: bool) -> Result<S
     let mut extra = Vec::new();
     collect_local(target_dir, "", &mut extra)?;
     for path in extra {
-        if tree.contains_key(&path) || manifest.conflicts.contains(&path) {
+        if tree.contains_key(&path) {
+            continue;
+        }
+        if manifest.conflicts.contains(&path) {
+            // A delete-versus-edit conflict stays visible until the reader
+            // settles it: reporting it once and then skipping the path would
+            // leave the file unpushable and unremovable with nothing on screen
+            // saying why.
+            report.conflicts.push(MirrorConflict {
+                path,
+                reason: "deleted in the folder, edited in the app".to_string(),
+            });
             continue;
         }
         let bytes = fs::read(target_dir.join(&path))
             .map_err(|error| format!("{}: {error}", target_dir.join(&path).display()))?;
         let local_hash = crate::sync::hash(&bytes);
         match base.get(&path).map(String::as_str) {
-            // Known and untouched here: the folder deleted it.
+            // Known and untouched here: the folder deleted it. Opening follows
+            // the folder; a write must not drop a file the loaded ledger still
+            // has, so it reports the deletion and leaves the reload to the
+            // reader.
             Some(known) if known == local_hash => {
+                if !pull {
+                    report.external.push(path.clone());
+                    continue;
+                }
                 source.delete(&path)?;
                 fs::remove_file(target_dir.join(&path))
                     .map_err(|error| format!("{}: {error}", path))?;
@@ -484,7 +570,11 @@ pub fn resolve_conflicts(
     target_dir: &Path,
     take: Resolve,
 ) -> Result<SyncReport, String> {
+    let _serial = serialized();
     let mut manifest = Manifest::load(target_dir);
+    // One walk answers "does the folder still have this file?", so a deletion is
+    // a fact rather than a read error that might have been a revoked grant.
+    let tree = walk_tree(source)?;
     for path in std::mem::take(&mut manifest.conflicts) {
         let local = target_dir.join(&path);
         match take {
@@ -498,17 +588,21 @@ pub fn resolve_conflicts(
                 source.write(&path, &bytes)?;
                 manifest.files.insert(path, crate::sync::hash(&bytes));
             }
-            Resolve::Folder => match source.read(&path) {
-                Ok(bytes) => {
+            Resolve::Folder => match tree.get(&path) {
+                Some(hash) => {
+                    let bytes = source.read(&path)?;
                     write_local(target_dir, &path, &bytes)?;
-                    manifest.files.insert(path, crate::sync::hash(&bytes));
+                    manifest.files.insert(path, hash.clone());
                 }
-                // The folder could not be read — a revoked grant and a deleted
-                // file look the same from here, and only one of them means "take
-                // the deletion". Keeping the app's copy and leaving the base
-                // alone makes the next pass report the conflict again rather
-                // than deleting bytes on a transient failure.
-                Err(_) => continue,
+                // Gone from the folder: the folder's answer is that it is gone.
+                None => {
+                    match fs::remove_file(&local) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(format!("{}: {error}", local.display())),
+                    }
+                    manifest.files.remove(&path);
+                }
             },
         }
     }
@@ -814,7 +908,10 @@ mod tests {
     use std::cell::RefCell;
     use std::fs;
 
-    use super::{LocalTree, StorageKind, TreeEntry, TreeSource, kind, mirror_into, sync_back};
+    use super::{
+        LocalTree, Resolve, StorageKind, TreeEntry, TreeSource, kind, mirror_into,
+        resolve_conflicts, sync_back,
+    };
     use crate::testing::TempDir;
 
     /// The ledger fixture: a root file including a nested one, the shape the
@@ -914,6 +1011,80 @@ mod tests {
             fs::read_to_string(source.file("accounts/2026.bean")).unwrap(),
             remote
         );
+    }
+
+    #[test]
+    fn a_write_reports_a_folder_deletion_instead_of_dropping_the_file() {
+        let source = tree("tree-gone-source");
+        let target = TempDir::new("tree-gone-target");
+        let mirror = target.file("mirror");
+        mirror_into(&LocalTree::new(source.dir()), &mirror).unwrap();
+        // The folder lost a file while the app was running.
+        fs::remove_file(source.file("accounts/2026.bean")).unwrap();
+
+        let tree = LocalTree::new(source.dir());
+        let recording = Recording {
+            inner: &tree,
+            writes: RefCell::new(Vec::new()),
+        };
+        let report = sync_back(&recording, &mirror).unwrap();
+
+        // The loaded ledger still has the file, so the write pass neither deletes
+        // the mirror's copy (a reload the reader never asked for) nor writes
+        // anything: it reports the deletion, which is what offers the reload.
+        assert_eq!(report.external, ["accounts/2026.bean"]);
+        assert!(report.removed.is_empty(), "{report:?}");
+        assert!(mirror.join("accounts/2026.bean").exists());
+        assert!(recording.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn taking_the_folders_side_settles_a_deleted_file() {
+        let source = tree("tree-resolve-source");
+        let target = TempDir::new("tree-resolve-target");
+        let mirror = target.file("mirror");
+        mirror_into(&LocalTree::new(source.dir()), &mirror).unwrap();
+        let tree = LocalTree::new(source.dir());
+
+        // Edited here, deleted there: the one state a reader has to settle.
+        let edited = "2026-01-02 * \"Coffee\"\n  Expenses:Food 9.00 USD\n  Assets:Bank\n";
+        fs::write(mirror.join("accounts/2026.bean"), edited).unwrap();
+        fs::remove_file(source.file("accounts/2026.bean")).unwrap();
+        let conflicted = sync_back(&tree, &mirror).unwrap();
+        assert_eq!(conflicted.conflicts.len(), 1, "{conflicted:?}");
+
+        // Taking the folder's answer is the deletion, and it clears.
+        let settled = resolve_conflicts(&tree, &mirror, Resolve::Folder).unwrap();
+
+        assert!(settled.conflicts.is_empty(), "{settled:?}");
+        assert!(!mirror.join("accounts/2026.bean").exists());
+        assert!(!source.file("accounts/2026.bean").exists());
+        // And the state is stable: nothing to report on the next pass.
+        assert!(sync_back(&tree, &mirror).unwrap().is_empty());
+    }
+
+    #[test]
+    fn keeping_this_sides_bytes_writes_them_home() {
+        let source = tree("tree-keep-source");
+        let target = TempDir::new("tree-keep-target");
+        let mirror = target.file("mirror");
+        mirror_into(&LocalTree::new(source.dir()), &mirror).unwrap();
+        let tree = LocalTree::new(source.dir());
+
+        let remote = "2026-01-02 * \"Tea\"\n  Expenses:Food 2.00 USD\n  Assets:Bank\n";
+        fs::write(source.file("accounts/2026.bean"), remote).unwrap();
+        let local = "2026-01-02 * \"Coffee\"\n  Expenses:Food 7.00 USD\n  Assets:Bank\n";
+        fs::write(mirror.join("accounts/2026.bean"), local).unwrap();
+        assert_eq!(sync_back(&tree, &mirror).unwrap().conflicts.len(), 1);
+
+        let settled = resolve_conflicts(&tree, &mirror, Resolve::Mine).unwrap();
+
+        assert!(settled.conflicts.is_empty(), "{settled:?}");
+        assert_eq!(
+            fs::read_to_string(source.file("accounts/2026.bean")).unwrap(),
+            local
+        );
+        assert!(sync_back(&tree, &mirror).unwrap().is_empty());
     }
 
     #[test]
