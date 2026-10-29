@@ -2,8 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The assistant's transport: one OpenAI-compatible chat endpoint, the
-//! configuration that points at it, and the two calls the chat screen makes.
+//! The assistant's transport: one OpenAI-compatible chat endpoint and the
+//! configuration that points at it. The chat screen calls [`models`] and
+//! [`complete`]; [`stream`] is implemented and unit-tested but no command
+//! forwards its events yet, so the panel is non-streaming in v1.
 //!
 //! # Why this speaks the wire itself
 //!

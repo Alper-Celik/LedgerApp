@@ -16,6 +16,7 @@ use rustledger_loader::{Ledger, LedgerError};
 
 use crate::files::source_of_file;
 use crate::git::stage_file;
+use crate::history::Origin;
 use crate::model::{NewTransaction, TransactionEdit, TransactionFile};
 use crate::rewrite::{checked_date, checked_flag, quote_beancount, rewrite_transaction};
 use crate::session::{AppState, Loaded, load_journal};
@@ -40,7 +41,7 @@ pub(crate) fn edit_transaction(state: &AppState, edit: TransactionEdit) -> Resul
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported)
+    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
 }
 
 /// The body of [`transaction_source`](crate::commands::transaction_source), split
@@ -86,7 +87,7 @@ pub(crate) fn edit_transaction_source(state: &AppState, id: u32, text: &str) -> 
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported)
+    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
 }
 
 /// The body of
@@ -129,7 +130,7 @@ pub(crate) fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<
         )
     };
 
-    apply_file_edit(state, &path, &previous, text.to_string(), reported)
+    apply_file_edit(state, &path, &previous, text.to_string(), reported, Origin::User)
 }
 
 /// The body of [`update_file_text`](crate::commands::update_file_text): a journal
@@ -155,7 +156,7 @@ pub(crate) fn edit_named_file_source(
         )
     };
 
-    apply_file_edit(state, &path, &previous, text.to_string(), reported)
+    apply_file_edit(state, &path, &previous, text.to_string(), reported, Origin::User)
 }
 
 /// The body of [`add_transaction`](crate::commands::add_transaction), split out
@@ -185,7 +186,7 @@ pub(crate) fn create_transaction(state: &AppState, entry: NewTransaction) -> Res
         )
     };
 
-    apply_file_edit(state, &path, &previous, rewritten, reported)
+    apply_file_edit(state, &path, &previous, rewritten, reported, Origin::User)
 }
 
 /// `text` with `entry` appended to the end of the file as a new transaction.
@@ -378,6 +379,7 @@ fn apply_file_edit(
     previous: &str,
     rewritten: String,
     reported: Vec<String>,
+    origin: Origin,
 ) -> Result<(), String> {
     if rewritten == previous {
         // The edit describes the file exactly as it already stands.
@@ -405,18 +407,17 @@ fn apply_file_edit(
             .unwrap_or_else(|| path.to_path_buf())
     };
 
-    fs::write(path, rewritten.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
+    write_atomic(path, rewritten.as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let reloaded = match load_journal(&root) {
         Ok(ledger) => ledger,
         Err(e) => {
-            let _ = fs::write(path, &previous_bytes);
-            return Err(format!("{}: {e}", root.display()));
+            return Err(rollback(path, &previous_bytes, format!("{}: {e}", root.display())));
         }
     };
     let raised = new_errors(&reported, error_signatures(&reloaded.errors));
     if !raised.is_empty() {
-        let _ = fs::write(path, &previous_bytes);
-        return Err(raised.join("\n"));
+        return Err(rollback(path, &previous_bytes, raised.join("\n")));
     }
 
     // The reload is the ledger the app now holds; the baseline keeps what the
@@ -430,7 +431,66 @@ fn apply_file_edit(
         }
         None => *guard = Some(Loaded::fresh(reloaded, root)),
     }
+    drop(guard);
+    // The operation log is the undo (and merge-base) authority when there is no
+    // git; a failure to record it must not turn a good edit into a failed one,
+    // so it is reported and the edit stands.
+    record_history(state, path, &previous_bytes, rewritten.as_bytes(), origin);
     stage_file(path)
+}
+
+/// Put the file back after a refused edit. A rollback that itself fails is the
+/// one case where the caller must know the ledger on disk is now wrong: the
+/// loader's message alone would read as "nothing was written".
+fn rollback(path: &Path, previous_bytes: &[u8], refusal: String) -> String {
+    match write_atomic(path, previous_bytes) {
+        Ok(()) => refusal,
+        Err(error) => format!(
+            "{refusal}\n{} could not be restored ({error}); it holds the refused edit",
+            path.display()
+        ),
+    }
+}
+
+/// Replace a file's bytes so a crash leaves either the old text or the new one:
+/// write a temp beside it, flush it, rename over the target, then flush the
+/// directory. Truncating the journal in place would lose it on ENOSPC or power
+/// loss, which is the one failure a ledger app must not have.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ledger".to_owned());
+    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
+    {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&temporary, path)?;
+    if let Ok(handle) = fs::File::open(directory) {
+        let _ = handle.sync_all();
+    }
+    Ok(())
+}
+
+/// Append one operation to the ledger's log (`<ledger>/.ledger/log`).
+fn record_history(state: &AppState, path: &Path, before: &[u8], after: &[u8], origin: Origin) {
+    let Some(directory) = ({
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .and_then(|loaded| loaded.root.parent().map(Path::to_path_buf))
+    }) else {
+        return;
+    };
+    let log = directory.join(crate::conversations::DIRECTORY).join("log");
+    let change = crate::history::Change::new(path, Some(before), Some(after));
+    if let Err(error) = crate::history::record(&log, origin, "edit", &[change]) {
+        eprintln!("history: {error}");
+    }
 }
 
 /// The ledger's errors in comparable form: code and message are what separate an

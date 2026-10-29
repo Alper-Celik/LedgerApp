@@ -6,9 +6,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # LedgerApp
 
-A desktop ledger for Beancount journals: the account tree and register the way GnuCash draws
-them, in-place and source-text editing that writes the `.bean` file itself, and a git-aware
-diff/commit flow for the journal.
+A ledger for Beancount journals — desktop on Linux/Windows/macOS and Android. The account tree
+and register are drawn the way GnuCash draws them; edits go into the `.bean` file itself and are
+undoable whether or not the journal is a git repository. Around that: an envelope budget, saved
+dashboards and charts, prices for what the ledger holds, inflation and lifestyle comparisons, a
+sync-conflict resolver for journals living in a cloud folder, and an assistant that answers from
+the ledger through typed tools.
 
 - **Backend** — Rust on [rustledger](https://github.com/rustledger/rustledger) (parse, book,
   validate, query), behind Tauri's [Qt runtime](vendor/TauriQt) (Qt windowing + QtWebEngine)
@@ -28,26 +31,40 @@ npm run tauri dev    # builds the Rust side and serves the frontend on :1420
 The journal to open is, in order: the last CLI argument, `LEDGER_PATH` (per-machine, e.g. via a
 git-ignored `.envrc.local`), `main.bean` in the working directory. A directory is resolved to
 the root journal inside it, and **Open folder…** (sidebar footer or Settings) switches journals
-without restarting.
+without restarting; the chooser is the desktop's own (xdg-desktop-portal on Linux).
+
+For the phone, the same Rust code builds an APK:
+
+```sh
+scripts/android-build.sh                 # debug APK for aarch64
+scripts/android-build.sh --apk --release # stripped APK + AAB
+```
+
+which runs `npm run tauri android build` inside `nix develop .#android` (SDK, NDK, JDK 17 and a
+rustc with the Android std targets). No device or emulator is needed to build it.
 
 ## Layout
 
 | Path | What lives there |
 |---|---|
 | `src-tauri/src/commands.rs` | the Tauri/specta command surface |
-| `src-tauri/src/{session,accounts,source,editing,rewrite,git,folders,model}.rs` | backend, one module per concern (see `AGENTS.md`) |
-| `src/lib/components/` | register, sidebar, source editor, diff, folder picker |
-| `src/lib/*.svelte.ts` | shared stores (filters, editor scope, ledger, sidebar width) |
+| `src-tauri/src/` | one module per concern: ledger views (`accounts`, `source`, `files`, `budget`, `reports`), edits (`editing`, `rewrite`, `conflict*`), storage and history (`session`, `storage`, `repo`, `git`, `git_ops`, `history`), fetchers (`prices`, `index*`), assistant (`ai`, `ai_cmd`, `attachments`, `tools`, `conversations`), `lsp` (see `AGENTS.md`) |
+| `src/lib/components/` | register, sidebar, source editor, diff, folder picker, assistant, budget, dashboards, inflation, prices, conflicts |
+| `src/lib/*.svelte.ts` | shared stores (filters, editor scope, ledger, git state, sidebar width) |
+| `crates/chart-render` | chart spec → PNG / terminal (kitty graphics or Unicode) |
 | `vendor/TauriQt` | git submodule: the Qt runtime, taken by path |
 | `plugins/rustledger-envelope` | the envelope-budgeting WASM plugin (own crate, own flake output) |
+| `src-tauri/gen/android` | the generated Gradle project `tauri android init` emits |
 | `books/`, `main.bean` | ignored/private: the actual ledger lives outside this repo |
 
 ## Checks
 
 ```sh
 cd src-tauri && cargo test --lib        # backend unit tests
+cd crates/chart-render && cargo test    # the chart crate's own tests
 npx svelte-check --tsconfig ./tsconfig.json
 npx playwright test                     # e2e against a stubbed Tauri IPC
+reuse lint                              # SPDX on every file
 ```
 
 Runtime work has its own gate inside the submodule: `scripts/smoke.sh` drives a headless demo

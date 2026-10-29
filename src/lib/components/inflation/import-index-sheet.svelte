@@ -30,8 +30,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		onimported: (series: IndexSeries) => void;
 	} = $props();
 
-	/** Provider ids this build can also fetch, worth mentioning where the id is typed. */
-	const PROVIDERS = "us-cpi, tr-cpi, tr-ppi, tr-enag";
+	/**
+	 * Provider ids this build can also fetch, shown where the id is typed. They
+	 * come from the backend so the hint cannot name a provider that is gone.
+	 */
+	let providers = $state<string[]>([]);
+	$effect(() => {
+		void commands.indexProviderList().then(
+			(list) => (providers = list.map((provider) => provider.id)),
+			() => (providers = [])
+		);
+	});
 
 	let id = $state("");
 	let label = $state("");
@@ -100,7 +109,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							spellcheck="false"
 						/>
 						<span class="text-muted-foreground text-[0.625rem]">
-							An id a built-in provider uses ({PROVIDERS}) can also be refreshed from its
+							An id a built-in provider uses ({providers.join(", ") || "none in this build"}) can also be refreshed from its
 							publisher; any other id is import-only.
 						</span>
 					</div>

@@ -15,6 +15,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as Select from "$lib/components/ui/select/index.js";
 	import * as Sheet from "$lib/components/ui/sheet/index.js";
 	import { messageOf } from "$lib/errors.js";
+	import { ledger } from "$lib/ledger.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import {
 		amountOf,
@@ -147,7 +148,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				to = known.has(remembered.to) ? remembered.to : derived.to;
 			}
 			if (accounts.length === 0) {
-				error = "No ledger is open, so there is nothing to add to.";
+				// An open journal with no `open` directives yet is not a missing
+				// ledger: say which one it is, because the fix is different.
+				error = ledger.summary
+					? "This journal has no accounts yet — open one in the ledger first."
+					: "No ledger is open, so there is nothing to add to.";
 			}
 		} catch (cause) {
 			// No ledger loaded, or an IPC refusal: the sheet says why rather than

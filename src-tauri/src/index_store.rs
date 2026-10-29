@@ -5,12 +5,11 @@
 //! The index series a ledger has installed, and the CSV import that puts one
 //! there.
 //!
-//! The store is one plain JSON file per ledger (`indexes.json`) inside the
-//! per-ledger directory the caller hands in — the same on-disk cache idea as
-//! `rustledger::cmd::price`'s quote cache, but for inflation series rather than
-//! market quotes. Keeping it a committed-nowhere config file means a ledger's
-//! indexes travel with its settings and the file stays readable and fixable by
-//! hand.
+//! The store is one plain JSON file (`indexes.json`) inside the directory the
+//! caller hands in — in the app that is the app's config directory, so every
+//! ledger the app opens shares one set of series (they are measurements of a
+//! currency, not of a journal). The file is readable and fixable by hand, and
+//! [`IndexSeries::normalised`] is what makes a hand-edited file safe.
 //!
 //! Everything that enters the file goes through [`IndexSeries::normalised`], so
 //! a hand-edited duplicate month, an unsorted export and a decimal written with
@@ -22,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::index::{IndexPoint, IndexSeries, is_iso_date, is_year_month};
 
-/// The file, inside the per-ledger directory, that holds every series.
+/// The file, inside the caller's directory, that holds every series.
 const INDEX_FILE: &str = "indexes.json";
 
 /// The publisher names that mark a series as unofficial. ENAG is an independent
@@ -120,7 +119,15 @@ pub(crate) fn load_indexes(dir: &Path) -> Result<Vec<IndexSeries>, String> {
 ///
 /// The write is a rename over the existing file, so a crash mid-write leaves
 /// the previous file intact rather than a truncated one.
+/// The store's writers serialise on this: a save is read-modify-write of the
+/// whole file, and two overlapping saves (a refresh on a worker thread, an import
+/// from the UI) would otherwise each publish the state it read and drop the
+/// other's series. Only this process writes the file, so a process-wide lock is
+/// the whole contract.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn save_series(dir: &Path, series: &IndexSeries) -> Result<(), String> {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let series = series.clone().normalised()?;
     let mut all = load_indexes(dir)?;
     match all.iter().position(|stored| stored.id == series.id) {
@@ -168,7 +175,12 @@ fn write_indexes(dir: &Path, series: &[IndexSeries]) -> Result<(), String> {
     let path = index_path(dir);
     let text = serde_json::to_string_pretty(series)
         .map_err(|error| format!("could not encode the index series: {error}"))?;
-    let temporary = dir.join(format!("{INDEX_FILE}.tmp"));
+    // A unique temp name: two writers (a refresh on a worker thread, a CSV
+    // import from the UI) must not share one scratch file, or the rename can
+    // publish a half-written store.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let scratch = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = dir.join(format!("{INDEX_FILE}.{}.{scratch}.tmp", std::process::id()));
     fs::write(&temporary, text)
         .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
     fs::rename(&temporary, &path)

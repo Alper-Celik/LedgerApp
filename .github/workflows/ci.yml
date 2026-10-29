@@ -8,12 +8,14 @@ on:
   push:
     paths:
       - "plugins/rustledger-envelope/**"
+      - "crates/chart-render/**"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "plugins/rustledger-envelope/**"
+      - "crates/chart-render/**"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/ci.yml"
@@ -34,6 +36,17 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: rustfmt
         run: nix develop .#plugin -c bash -c 'cd plugins/rustledger-envelope && cargo fmt --all -- --check'
+
+  # The chart crate is standalone (no workspace root), so nothing else ever
+  # compiles it: this job is its gate.
+  chart-render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: test
+        run: cargo test --locked
+        working-directory: crates/chart-render
 
   # The derivation runs the crate's test suite, so a green build is a tested
   # build; the file it installs is exactly what a release carries.

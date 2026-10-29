@@ -785,7 +785,9 @@ fn render(meta: &Meta, messages: &[Message]) -> String {
     text.push_str(&format!("title: {}\n", meta.title));
     text.push_str(&format!("created: {}\n", meta.created));
     text.push_str(&format!("updated: {}\n", meta.updated));
-    text.push_str(&format!("model: {}\n", meta.model));
+    // A model name is user input (typed in settings); one newline in it would
+    // add a frontmatter key or close the block early.
+    text.push_str(&format!("model: {}\n", flatten_title(&meta.model)));
     if !meta.tags.is_empty() {
         text.push_str(&format!("tags: [{}]\n", meta.tags.join(", ")));
     }

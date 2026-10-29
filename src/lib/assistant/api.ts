@@ -24,6 +24,8 @@ export type AiSettings = {
 	max_tokens: number | null;
 	temperature: number | null;
 	has_key: boolean;
+	/** The instructions the backend defines; the panel sends them with each turn. */
+	system_prompt: string;
 };
 
 /** One model the endpoint lists. `vision` is the endpoint's own answer, when it gives one. */

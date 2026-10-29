@@ -469,9 +469,10 @@ pub fn git_set_identity(
     repo::set_identity(&ledger_dir(&state)?, &name, &email)
 }
 
-/// Where price indexes and dashboards live: the app's config directory, keyed
-/// by nothing yet — both are per-app data, not ledger data.
-pub(crate) fn app_data_dir(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
+/// Where the app's own data lives (indexes, dashboards, the assistant's
+/// settings): the app's config directory — per-app data, never part of a
+/// ledger, so none of it can dirty a read-only journal.
+pub(crate) fn app_config_dir(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map_err(|error| format!("no config directory: {error}"))
@@ -526,7 +527,7 @@ pub fn write_prices(
 /// Where the assistant's own settings live: the app's config dir, never the
 /// ledger — the key must not be committed.
 fn ai_dir(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("ai"))
+    Ok(app_config_dir(app)?.join("ai"))
 }
 
 /// The assistant's endpoint/model, and whether a key is stored (never the key).
@@ -597,7 +598,7 @@ pub async fn ai_chat(
 /// Where price indexes live: beside the dashboards in the app's config dir, so
 /// a fetched series is shared by every ledger the app opens.
 fn indexes_dir(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("indexes"))
+    Ok(app_config_dir(app)?.join("indexes"))
 }
 
 /// What a provider publishes, without its points — the picker's fix, without
@@ -745,15 +746,10 @@ pub fn conversation_append(
     state: State<'_, AppState>,
 ) -> Result<crate::conversations::Summary, String> {
     let dir = ledger_dir(&state)?;
-    if id.is_empty() {
-        crate::conversations::create(&dir, &crate::conversations::new_id(), &title, &model, &[])?;
-    }
+    // `create` answers with the summary it wrote; deriving the id from a listing
+    // would pick the wrong conversation when two share a second.
     let id = if id.is_empty() {
-        crate::conversations::list(&dir)?
-            .sessions
-            .first()
-            .map(|session| session.id.clone())
-            .ok_or("the conversation could not be created")?
+        crate::conversations::create(&dir, &crate::conversations::new_id(), &title, &model, &[])?.id
     } else {
         id
     };
@@ -822,7 +818,9 @@ pub fn history(
 pub fn history_undo(id: String, state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let root = history_dir(&state)?;
     let plan = crate::history::revert_plan(&root, &id)?;
-    let mut restored = Vec::new();
+    // Validate the whole plan first: undoing half an operation and then refusing
+    // the rest would leave the ledger in a state the log cannot describe.
+    let mut writes = Vec::with_capacity(plan.len());
     for entry in plan {
         let Some(bytes) = entry.before else {
             return Err(format!(
@@ -832,8 +830,12 @@ pub fn history_undo(id: String, state: State<'_, AppState>) -> Result<Vec<String
         };
         let text = String::from_utf8(bytes)
             .map_err(|_| format!("{} is not UTF-8 text", entry.path.display()))?;
-        edit_named_file_source(&state, &entry.path.display().to_string(), &text)?;
-        restored.push(entry.path.display().to_string());
+        writes.push((entry.path.display().to_string(), text));
+    }
+    let mut restored = Vec::with_capacity(writes.len());
+    for (path, text) in writes {
+        edit_named_file_source(&state, &path, &text)?;
+        restored.push(path);
     }
     Ok(restored)
 }
@@ -850,7 +852,11 @@ pub fn conflict_compare(
     copy: String,
     state: State<'_, AppState>,
 ) -> Result<crate::conflict_cmd::ConflictView, String> {
-    crate::conflict_cmd::compare(&ledger_dir(&state)?, Path::new(&original), Path::new(&copy))
+    // Both paths come from the webview, and `resolve` can delete the copy: they
+    // are confined to the ledger's own directory like every other file argument.
+    let original = ledger_path(&state, &original)?;
+    let copy = ledger_path(&state, &copy)?;
+    crate::conflict_cmd::compare(&ledger_dir(&state)?, &original, &copy)
 }
 
 /// Apply the user's picks to the compared original, through the loader-verified
@@ -862,7 +868,299 @@ pub fn conflict_resolve(
     picks: Vec<(String, String)>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    crate::conflict_cmd::resolve(&state, Path::new(&original), &picks)
+    let original = ledger_path(&state, &original)?;
+    crate::conflict_cmd::resolve(&state, &original, &picks)
+}
+
+// ----------------------------------------------------------------- reports ---
+
+/// Month-end net worth over the last `months` months, oldest first.
+#[tauri::command]
+#[specta::specta]
+pub fn report_net_worth(
+    months: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::reports::NetWorthMonth>, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    Ok(crate::reports::net_worth_months(&loaded.ledger, months))
+}
+
+/// Money in and out per month over the last `months` months.
+#[tauri::command]
+#[specta::specta]
+pub fn report_cashflow(
+    months: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::reports::CashflowMonth>, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    Ok(crate::reports::cashflow_months(&loaded.ledger, months))
+}
+
+/// Spending per expense category per month over the last `months` months.
+#[tauri::command]
+#[specta::specta]
+pub fn report_categories(
+    months: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::reports::CategoryMonths>, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    Ok(crate::reports::category_months(&loaded.ledger, months))
+}
+
+// ------------------------------------------------------------- attachments ---
+
+/// Resolve a path the frontend named, refusing anything outside the ledger's own
+/// directory: attachments are user files beside the journal, never `/etc`.
+fn ledger_path(state: &AppState, path: &str) -> Result<PathBuf, String> {
+    let root = ledger_dir(state)?;
+    let candidate = Path::new(path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+    let canonical = std::fs::canonicalize(&resolved)
+        .map_err(|error| format!("{}: {error}", resolved.display()))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "{} is outside the ledger's directory; only files there can be attached",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+/// What kind of file an attachment is, how big, and (for PDFs/spreadsheets) how
+/// many pages or sheets it has.
+#[tauri::command]
+#[specta::specta]
+pub fn attachment_describe(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::attachments::AttachmentInfo, String> {
+    crate::attachments::describe(&ledger_path(&state, &path)?)
+}
+
+/// Rasterise a PDF's pages — what a vision model is shown, instead of extracted
+/// text. Capped by page count, dpi and a total pixel budget.
+#[tauri::command]
+#[specta::specta]
+pub fn attachment_pdf_pages(
+    path: String,
+    dpi: u32,
+    max_pages: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::attachments::PdfPage>, String> {
+    let mut options = crate::attachments::RenderOptions::default();
+    options.dpi = dpi;
+    options.max_pages = max_pages;
+    crate::attachments::render_pdf(&ledger_path(&state, &path)?, options)
+}
+
+/// A spreadsheets's (or CSV's) rows as strings, headers first.
+#[tauri::command]
+#[specta::specta]
+pub fn attachment_table(
+    path: String,
+    sheet: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::attachments::Table, String> {
+    crate::attachments::read_table(
+        &ledger_path(&state, &path)?,
+        sheet.as_deref(),
+        crate::attachments::TableOptions::default(),
+    )
+}
+
+/// Text files an attachment may be (markdown, JSON, CSV), size-capped.
+#[tauri::command]
+#[specta::specta]
+pub fn attachment_text(
+    path: String,
+    max_bytes: u32,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    crate::attachments::read_text(&ledger_path(&state, &path)?, u64::from(max_bytes))
+}
+
+// ------------------------------------------------------------- file tools ---
+
+/// The assistant's base tools (read/edit/grep/glob) as OpenAI-style schemas,
+/// serialised: a `serde_json::Value` cannot cross specta (it has no static type
+/// on the TypeScript side), and the panel hands each schema straight back to the
+/// model anyway.
+#[tauri::command]
+#[specta::specta]
+pub fn tool_schemas() -> Result<String, String> {
+    let tools: Vec<serde_json::Value> = crate::tools::registry()
+        .iter()
+        .map(|definition| {
+            serde_json::json!({
+                "name": definition.name,
+                "description": definition.description,
+                "parameters": definition.schema,
+                "read_only": definition.read_only,
+            })
+        })
+        .collect();
+    serde_json::to_string(&tools).map_err(|error| error.to_string())
+}
+
+/// Run one base tool against the open ledger's directory. `edit` is hash-anchored
+/// and atomic: one stale anchor refuses the whole batch.
+#[tauri::command]
+#[specta::specta]
+pub fn tool_invoke(
+    name: String,
+    args: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let root = ledger_dir(&state)?;
+    // `args` (a JSON object as text): `arguments` is a reserved word in the
+    // strict-mode module specta emits, so it cannot be a parameter name there.
+    let arguments: serde_json::Value =
+        serde_json::from_str(&args).map_err(|error| format!("arguments: {error}"))?;
+    let result = crate::tools::invoke(&root, &name, &arguments).map_err(|error| error.to_string())?;
+    serde_json::to_string(&result).map_err(|error| error.to_string())
+}
+
+// -------------------------------------------------------------------- git ---
+
+/// The repository's branches, local and remote.
+#[tauri::command]
+#[specta::specta]
+pub fn git_branches(state: State<'_, AppState>) -> Result<Vec<crate::git_ops::BranchInfo>, String> {
+    crate::git_ops::branches(&ledger_dir(&state)?)
+}
+
+/// Create a branch, optionally switching to it.
+#[tauri::command]
+#[specta::specta]
+pub fn git_create_branch(
+    name: String,
+    checkout: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::git_ops::create_branch(&ledger_dir(&state)?, &name, checkout)
+}
+
+/// Switch branches; refuses while the ledger has uncommitted changes, naming them.
+#[tauri::command]
+#[specta::specta]
+pub fn git_checkout(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    crate::git_ops::checkout(&ledger_dir(&state)?, &name)
+}
+
+/// The commit log, newest first.
+#[tauri::command]
+#[specta::specta]
+pub fn git_log(
+    limit: u32,
+    path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::git_ops::CommitInfo>, String> {
+    crate::git_ops::log(
+        &ledger_dir(&state)?,
+        limit as usize,
+        path.as_deref().map(Path::new),
+    )
+}
+
+/// One commit's patch, in the diff view's own rendering.
+#[tauri::command]
+#[specta::specta]
+pub fn git_commit_diff(id: String, state: State<'_, AppState>) -> Result<String, String> {
+    crate::git_ops::commit_diff(&ledger_dir(&state)?, &id)
+}
+
+/// Stage paths (relative to the ledger directory or absolute).
+#[tauri::command]
+#[specta::specta]
+pub fn git_stage(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let root = ledger_dir(&state)?;
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    crate::git_ops::stage(&root, &paths)
+}
+
+/// Unstage paths, leaving the working tree alone.
+#[tauri::command]
+#[specta::specta]
+pub fn git_unstage(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let root = ledger_dir(&state)?;
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    crate::git_ops::unstage(&root, &paths)
+}
+
+/// Restore paths from the index (never deletes uncommitted bytes).
+#[tauri::command]
+#[specta::specta]
+pub fn git_discard(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let root = ledger_dir(&state)?;
+    let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    crate::git_ops::discard(&root, &paths)
+}
+
+/// Merge a branch into the current one: fast-forward, up to date, or a list of
+/// conflicted files with their index stages.
+#[tauri::command]
+#[specta::specta]
+pub fn git_merge(
+    theirs: String,
+    state: State<'_, AppState>,
+) -> Result<crate::git_ops::MergeOutcome, String> {
+    crate::git_ops::merge(&ledger_dir(&state)?, &theirs)
+}
+
+/// A conflicted file's three versions, from the index stages.
+#[tauri::command]
+#[specta::specta]
+pub fn git_conflict_texts(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<crate::git_ops::ConflictTexts, String> {
+    crate::git_ops::conflict_texts(&ledger_dir(&state)?, Path::new(&path))
+}
+
+/// Write a resolved text for a conflicted file and stage it.
+#[tauri::command]
+#[specta::specta]
+pub fn git_resolve(
+    path: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // The merged text is a ledger edit like any other: the loader must accept it
+    // (and a refusal must put the bytes back), and only then does git stage it.
+    let file = ledger_path(&state, &path)?;
+    let file = file.display().to_string();
+    edit_named_file_source(&state, &file, &text)?;
+    let root = ledger_dir(&state)?;
+    crate::git_ops::stage(&root, &[PathBuf::from(&file)])
+}
+
+/// Finish a merge whose conflicts are all resolved.
+#[tauri::command]
+#[specta::specta]
+pub fn git_merge_continue(state: State<'_, AppState>) -> Result<(), String> {
+    crate::git_ops::merge_continue(&ledger_dir(&state)?)
+}
+
+/// Abandon a merge, restoring the branch and working tree.
+#[tauri::command]
+#[specta::specta]
+pub fn git_merge_abort(state: State<'_, AppState>) -> Result<(), String> {
+    crate::git_ops::merge_abort(&ledger_dir(&state)?)
+}
+
+/// Undo one commit as a new commit (history stays append-only).
+#[tauri::command]
+#[specta::specta]
+pub fn git_revert_commit(id: String, state: State<'_, AppState>) -> Result<String, String> {
+    crate::git_ops::revert_commit(&ledger_dir(&state)?, &id)
 }
 
 /// Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
@@ -953,6 +1251,29 @@ mod tests {
                 sync_conflicts,
                 conflict_compare,
                 conflict_resolve,
+                report_net_worth,
+                report_cashflow,
+                report_categories,
+                attachment_describe,
+                attachment_pdf_pages,
+                attachment_table,
+                attachment_text,
+                tool_schemas,
+                tool_invoke,
+                git_branches,
+                git_create_branch,
+                git_checkout,
+                git_log,
+                git_commit_diff,
+                git_stage,
+                git_unstage,
+                git_discard,
+                git_merge,
+                git_conflict_texts,
+                git_resolve,
+                git_merge_continue,
+                git_merge_abort,
+                git_revert_commit,
                 ledger_diff,
                 commit_ledger,
             ])

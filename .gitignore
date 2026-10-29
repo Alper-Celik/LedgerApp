@@ -55,3 +55,7 @@ books/
 # Playwright artifacts.
 test-results/
 playwright-report/
+
+# Cargo artifacts from the standalone chart crate (it has no workspace root to
+# share a target dir with, so it builds in place).
+crates/chart-render/target/

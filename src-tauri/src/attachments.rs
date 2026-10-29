@@ -43,8 +43,10 @@ pub enum AttachmentKind {
 pub struct AttachmentInfo {
     pub path: String,
     pub kind: AttachmentKind,
-    /// Size on disk at the moment of describing, in bytes.
-    pub bytes: u64,
+    /// Size on disk at the moment of describing, in bytes. `u32` because the
+    /// attachment ceiling is 64 MiB and specta refuses to export 64-bit integers
+    /// (a JS number cannot carry one).
+    pub bytes: u32,
     /// Pages of a PDF; `None` for everything else — and for a PDF on a build
     /// without MuPDF (Android), where the count would need the renderer.
     pub pages: Option<u32>,
@@ -55,7 +57,7 @@ pub struct AttachmentInfo {
 /// One rasterised PDF page. The PNG stays in memory: at 150 dpi an A4 page is
 /// 1240 × 1754 and a handful of megabytes at worst, so writing it to disk first
 /// would only add temporary files to clean up.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 pub struct PdfPage {
     /// Zero-based page number in the document.
     pub index: u32,
@@ -165,7 +167,7 @@ pub fn describe(path: &Path) -> Result<AttachmentInfo, String> {
     Ok(AttachmentInfo {
         path: path.display().to_string(),
         kind,
-        bytes,
+        bytes: bytes.min(u64::from(u32::MAX)) as u32,
         pages,
         sheets,
     })
@@ -906,7 +908,7 @@ mod tests {
         assert_eq!(info.path, path.display().to_string());
         assert_eq!(info.kind, AttachmentKind::Pdf);
         assert_eq!(info.pages, Some(3));
-        assert_eq!(info.bytes, fs::metadata(&path).unwrap().len());
+        assert_eq!(u64::from(info.bytes), fs::metadata(&path).unwrap().len());
         assert!(info.sheets.is_empty());
     }
 
@@ -955,7 +957,7 @@ mod tests {
         assert_eq!(image.kind, AttachmentKind::Image);
         assert_eq!(image.pages, None);
         assert!(image.sheets.is_empty());
-        assert_eq!(image.bytes, fs::metadata(&png_named).unwrap().len());
+        assert_eq!(u64::from(image.bytes), fs::metadata(&png_named).unwrap().len());
     }
 
     #[test]

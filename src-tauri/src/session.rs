@@ -67,7 +67,16 @@ pub(crate) fn load_baselined(path: &Path) -> Result<Loaded, String> {
 /// loader is configured, so a reload after an edit parses the file exactly as
 /// opening it did.
 pub(crate) fn load_journal(root: &Path) -> Result<Ledger, String> {
-    rustledger_loader::load(root, &LoadOptions::default()).map_err(|e| e.to_string())
+    // `path_security` is off by default in the loader, which means an `include`
+    // could reach outside the journal's directory — a ledger is user data, but it
+    // is also a file that arrives from elsewhere. Refuse traversal; a ledger that
+    // genuinely shares files above its directory needs an explicit option, not a
+    // silent hole.
+    let options = LoadOptions {
+        path_security: true,
+        ..LoadOptions::default()
+    };
+    rustledger_loader::load(root, &options).map_err(|e| e.to_string())
 }
 
 /// The journal a path names: the file itself, or the root journal directly

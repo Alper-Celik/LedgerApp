@@ -2,12 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Ledger app backend: the Tauri command surface (`commands`), the loaded
-//! ledger session (`session`), the ledger-derived views (`accounts`, `source`,
-//! `files`, `budget`), the file edits behind the editors (`editing`, `rewrite`),
-//! the in-app folder picker (`folders`), the git integration (`git`), the
-//! embedded language server (`lsp`), and the shapes the frontend sends and
-//! receives (`model`).
+//! Ledger app backend. One module per concern: the command surface
+//! (`commands`); ledger views (`session`, `accounts`, `source`, `files`,
+//! `budget`, `reports`); edits (`editing`, `rewrite`, `conflict*`); storage,
+//! git and history (`storage`, `repo`, `git`, `git_ops`, `history`); fetchers
+//! (`prices`, `index*`, `dashboards`); the assistant (`ai`, `ai_cmd`,
+//! `tools`, `attachments`, `conversations`); the embedded language server
+//! (`lsp`); and the original payload types (`model`). `AGENTS.md` says what
+//! each one is for.
 
 mod accounts;
 mod ai;
@@ -53,14 +55,7 @@ use commands::{
     transaction_file, transaction_source, update_file_source, update_file_text,
     update_transaction, update_transaction_source,
 };
-use commands::{
-    ai_chat, ai_configure, ai_models, ai_settings, ai_tools, budget_range, conflict_compare,
-    conflict_resolve, conversation, conversation_append, conversation_delete, conversation_rename,
-    conversations, dashboards, delete_dashboard, fetch_prices, git_init, git_set_identity,
-    git_state, history, history_undo, index_import, index_provider_list, index_refresh,
-    index_series,
-    lifestyle_report, price_sources, price_targets, save_dashboard, sync_conflicts, write_prices,
-};
+use commands::*;
 use session::AppState;
 
 /// The runtime this app runs on: the Qt runtime (Qt windowing + QtWebEngine)
@@ -127,6 +122,29 @@ pub fn run() {
         sync_conflicts,
         conflict_compare,
         conflict_resolve,
+        report_net_worth,
+        report_cashflow,
+        report_categories,
+        attachment_describe,
+        attachment_pdf_pages,
+        attachment_table,
+        attachment_text,
+        tool_schemas,
+        tool_invoke,
+        git_branches,
+        git_create_branch,
+        git_checkout,
+        git_log,
+        git_commit_diff,
+        git_stage,
+        git_unstage,
+        git_discard,
+        git_merge,
+        git_conflict_texts,
+        git_resolve,
+        git_merge_continue,
+        git_merge_abort,
+        git_revert_commit,
         ledger_diff,
         commit_ledger,
     ]);

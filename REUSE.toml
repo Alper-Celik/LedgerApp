@@ -5,10 +5,12 @@
 # Licensing metadata for trees whose files are generated rather than written,
 # so they cannot carry an SPDX header of their own (REUSE spec 3.3, annotations).
 #
-# `src-tauri/gen/android` is the Gradle project `tauri android init` emits from
-# Tauri's own templates; its files are distributed under Tauri's MIT license
-# (see the MIT text in LICENSES/). Re-running `tauri android init` regenerates
-# them, which is also why an inline header would be lost.
+# `src-tauri/gen/android` is the Gradle project `tauri android init` emits. Two
+# licences meet there and are separated below rather than blurred into one
+# aggregate: Tauri's templates are MIT, the Gradle wrapper is Apache-2.0 with
+# the Gradle authors' copyright (its own files say so). Re-running
+# `tauri android init` regenerates the tree, which is also why an inline header
+# would be lost.
 
 version = 1
 
@@ -17,3 +19,14 @@ path = "src-tauri/gen/android/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2025 Tauri Programme within The Commons Conservancy"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = [
+	"src-tauri/gen/android/gradlew",
+	"src-tauri/gen/android/gradlew.bat",
+	"src-tauri/gen/android/gradle/wrapper/gradle-wrapper.jar",
+	"src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2015 the original authors"
+SPDX-License-Identifier = "Apache-2.0"

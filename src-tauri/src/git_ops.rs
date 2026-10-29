@@ -6,10 +6,12 @@
 //!
 //! [`crate::git`] owns the app's own flows — which lines of the journal are
 //! uncommitted, the diff view, and committing the ledger's staged files. This
-//! module is the layer behind the branch and history screens. It holds no state
-//! between calls (every call opens the workdir it is given), and it phrases
-//! failures for a person — "cannot switch branches: books/2026.bean has
-//! uncommitted changes" rather than libgit2's negative error code.
+//! module is the layer a branch/history screen will drive: it is implemented and
+//! tested, and **no command exposes it yet** (the `/history` route reads the
+//! operation log in [`crate::history`], not git). It holds no state between
+//! calls (every call opens the workdir it is given), and it phrases failures for
+//! a person — "cannot switch branches: books/2026.bean has uncommitted changes"
+//! rather than libgit2's negative error code.
 //!
 //! The operations are the ones a single-file ledger needs, no more. Rebase and
 //! cherry-pick are deliberately absent: both rewrite or replay commits, and a
@@ -51,9 +53,14 @@ pub struct CommitInfo {
     /// Seconds since the Unix epoch, in the author's clock — the time git
     /// records and `git log` prints by default. The offset is not carried; a
     /// ledger app only needs the ordering and the day.
+    ///
+    /// Exported as `f64` because specta refuses 64-bit integers (a JS number
+    /// cannot carry one); every Unix second this century is exact in a double.
+    #[specta(type = f64)]
     pub time: i64,
-    /// How many files the commit changed, the row's "3 files" badge.
-    pub files: usize,
+    /// How many files the commit changed, the row's "3 files" badge. `u32`: a
+    /// commit that touched four billion files is not a ledger.
+    pub files: u32,
 }
 
 /// How a merge ended.
@@ -88,8 +95,9 @@ pub struct ConflictFile {
     pub kind: String,
     /// How many of the three index stages (base, ours, theirs) exist: 3 for a
     /// plain both-modified conflict, fewer when one side added or deleted the
-    /// file, which is a hint the UI can use to pick the right editor.
-    pub stages: usize,
+    /// file, which is a hint the UI can use to pick the right editor. `u8`: git
+    /// has exactly three stages, and specta refuses wider integers.
+    pub stages: u8,
 }
 
 /// The three versions of a conflicted file, read from the index stages rather
@@ -241,7 +249,7 @@ pub fn log(repo: &Path, limit: usize, path: Option<&Path>) -> Result<Vec<CommitI
                 continue;
             }
         }
-        let files = changed_files(&repo, &commit, None)?;
+        let files = u32::try_from(changed_files(&repo, &commit, None)?).unwrap_or(u32::MAX);
         let author = commit.author();
         commits.push(CommitInfo {
             id: id.to_string(),
@@ -955,7 +963,7 @@ fn conflicts(repo: &Repository) -> Result<Vec<ConflictFile>, String> {
         files.push(ConflictFile {
             path,
             kind: kind.to_string(),
-            stages: usize::from(base) + usize::from(ours) + usize::from(theirs),
+            stages: u8::from(base) + u8::from(ours) + u8::from(theirs),
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));

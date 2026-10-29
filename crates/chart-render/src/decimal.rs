@@ -293,7 +293,17 @@ fn apply_exponent(micros: i128, exponent: i32) -> i128 {
     if exponent > 0 {
         micros.saturating_mul(factor)
     } else {
-        micros / factor.max(1)
+        // Round half away from zero, the rule the mantissa path documents: a
+        // bare division would make `5e-7` parse as 0 while `0.0000005` parses as
+        // one micro-unit, so the same value would depend on its spelling.
+        let divisor = factor.max(1);
+        let quotient = micros / divisor;
+        let remainder = (micros % divisor).abs();
+        if remainder.saturating_mul(2) >= divisor {
+            quotient + micros.signum()
+        } else {
+            quotient
+        }
     }
 }
 

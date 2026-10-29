@@ -29,8 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which storage the ledger lives in.
 ///
-/// Serialized as `"local"`/`"tree"` for the `storage_kind` command the frontend
-/// uses to decide whether to offer a folder picker or a SAF tree picker.
+/// Serialized as `"local"`/`"tree"` so it can cross IPC once the frontend has a
+/// command to read it: today the SAF path is implemented and unit-tested but no
+/// command opens a tree or reports this kind, so the app is always `Local`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageKind {

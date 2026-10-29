@@ -14,15 +14,29 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 - `lib.rs` — crate root: runtime alias, module list, `run()` (specta registration + bindings export).
 - `commands.rs` — the Tauri/specta command surface; frontend-facing names live here, keep them thin.
-- `session.rs` — `AppState`, the loaded `Ledger` plus its per-file baseline, ledger path resolution.
-- `accounts.rs` — account tree balances and the register (`balance_view` walks, envelope filtering).
-- `source.rs` — `balance_view` ↔ source-directive mapping, transaction span lookup, line/column helpers.
-- `editing.rs` — the edit pipeline: write, reload, roll back on new loader errors, stage.
-- `folders.rs` — the in-app folder picker's directory listing and root-journal detection.
-- `rewrite.rs` — pure byte-range source surgery (header and posting rewrites).
-- `git.rs` — working-tree change detection, diff rendering, committing the ledger's own files.
-- `model.rs` — serde/specta types exported to `src/bindings.ts`.
-- `testing.rs` — shared test fixtures (temp dirs, throwaway repos, loaded `AppState`); tests sit beside their module.
+- **Ledger views** — `session.rs` (`AppState`, the loaded `Ledger` + baseline, path resolution), `accounts.rs`
+  (tree balances, register rows), `source.rs` (`balance_view` ↔ source spans), `files.rs` (journal files,
+  per-file transactions, the new-entry file suggestion), `budget.rs` (one month and a range of envelope
+  budget), `reports.rs` (net worth, cash flow, category months, lifestyle inflation).
+- **Edits** — `editing.rs` (write → reload → roll back on a *new* loader error → stage), `rewrite.rs` (pure
+  byte-range surgery), `conflict.rs` (directive-level three-way merge), `conflict_cmd.rs` (compare/resolve
+  over the operation log), `conflict_names.rs` (every sync client's conflict-copy naming).
+- **Storage, git and history** — `storage.rs` (local vs Android SAF tree; the mirror is implemented and
+  unit-tested but no command wires it yet), `repo.rs` (repo state/init/identity), `git.rs` (working-tree
+  detection, diff, commit), `git_ops.rs` (branches, log, stage, merge, revert; not yet exposed as commands),
+  `history.rs` (the operation log inside the ledger: per-device jsonl + pre-image blobs + `state.json`,
+  which serves undo *and* merge bases without git).
+- **Fetchers** — `prices.rs` + `prices/tefas.rs` (quotes via rustledger's `PriceSource`, TEFAS
+  downstream, written to the journal through the edit pipeline), `index.rs` (index-as-price maths),
+  `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `dashboards.rs` (the saved
+  dashboard store).
+- **Assistant** — `ai.rs` (OpenAI-compatible transport, settings that never leak the key), `ai_cmd.rs`
+  (IPC surface, system prompt, tool table), `tools/` (hashline read/edit, grep, glob, one registry
+  rendered twice: OpenAI tools and a Python stub), `attachments.rs` (MuPDF pages, calamine sheets, CSV),
+  `conversations.rs` (markdown conversations inside the ledger, so they sync with it).
+- `lsp.rs` — the embedded language server; `model.rs` — the original register/session payload types
+  (newer payload types live beside their module); `folders.rs` — the in-app picker's listing;
+  `testing.rs` — shared fixtures (temp dirs, throwaway repos, loaded `AppState`); tests sit beside their module.
 
 ## Qt runtime (`vendor/TauriQt`, git submodule)
 

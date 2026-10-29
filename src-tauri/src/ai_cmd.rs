@@ -72,6 +72,9 @@ pub struct AiSettingsView {
     pub temperature: Option<f32>,
     /// Whether a key is stored. The key itself never crosses IPC.
     pub has_key: bool,
+    /// The instructions the panel sends with every turn: defined in this module,
+    /// so the two halves of the app cannot disagree about them.
+    pub system_prompt: String,
 }
 
 impl AiSettingsView {
@@ -83,6 +86,7 @@ impl AiSettingsView {
             max_tokens: config.max_tokens(),
             temperature: config.temperature(),
             has_key: config.has_key(),
+            system_prompt: SYSTEM_PROMPT.to_string(),
         }
     }
 }
@@ -262,37 +266,19 @@ struct ToolSpec {
 /// reads are the figures the user sees.
 const TOOLS: &[ToolSpec] = &[
     ToolSpec {
-        name: "query",
-        description: "Run one BQL (Beancount Query Language) statement against the loaded ledger and return its columns and rows, e.g. `SELECT account, sum(position) GROUP BY account`. Amounts arrive as exact decimal strings; use this for any total instead of adding figures yourself.",
-        args: &[ToolArg {
-            name: "query",
-            kind: ArgKind::Text,
-            description: "One BQL statement, e.g. `SELECT payee, sum(position) WHERE account ~ \"^Expenses:Food\" GROUP BY payee ORDER BY payee`.",
-            required: true,
-        }],
-    },
-    ToolSpec {
         name: "accounts",
         description: "Every account with its exact balance as a decimal string, its commodity, and whether its subtree has uncommitted changes. Balances follow beancount `bal` semantics: a parent is already the sum of its whole subtree, so never add a parent to its children.",
         args: &[],
     },
     ToolSpec {
         name: "transactions",
-        description: "The transactions of one account, newest first, with date, payee, narration, postings and amounts as decimal strings. `month` narrows the answer to a single month; without it the account's whole history comes back.",
-        args: &[
-            ToolArg {
-                name: "account",
-                kind: ArgKind::Text,
-                description: "The account to read, e.g. `Expenses:Food`.",
-                required: true,
-            },
-            ToolArg {
-                name: "month",
-                kind: ArgKind::Text,
-                description: "A month as `YYYY-MM`, e.g. `2026-03`; the whole history when omitted.",
-                required: false,
-            },
-        ],
+        description: "The transactions of one account, newest first, with date, payee, narration, postings and amounts as decimal strings. An account with a long history answers with a lot of rows; read a narrower account (a leaf) rather than a root.",
+        args: &[ToolArg {
+            name: "account",
+            kind: ArgKind::Text,
+            description: "The account to read, e.g. `Expenses:Food`.",
+            required: true,
+        }],
     },
     ToolSpec {
         name: "files",
@@ -597,7 +583,6 @@ mod tests {
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
             [
-                "query",
                 "accounts",
                 "transactions",
                 "files",

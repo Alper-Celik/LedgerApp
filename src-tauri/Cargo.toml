@@ -33,7 +33,6 @@ tauri = { version = "2", default-features = false, features = [
     "dynamic-acl",
     "x11",
 ] }
-tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 specta = "2.0.0-rc.25"
@@ -65,7 +64,7 @@ rustledger = { version = "0.24.0", default-features = false }
 anyhow = "1"
 # Price-index providers: fetching the published series, and reading the CSV
 # payloads FRED serves and the CSV imports users hand in. `ureq`'s TLS is
-# rustls, so the build needs no system OpenSSL — the same reason git2 above
+# rustls, so the build needs no system OpenSSL — the same reason git2 below
 # keeps its HTTPS transport off.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 csv = "1"
@@ -107,16 +106,16 @@ mupdf = { version = "0.8", default-features = false, features = [
     "img",
 ] }
 
-# Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
-# builds against the checkout so runtime fixes land here first. Qt windowing
-# (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk. The dialog
-# plugin rides along for `pick_ledger_folder`, through its xdg-desktop-portal
-# backend (D-Bus; no toolkit in the process) rather than rfd's default GTK one.
 [dev-dependencies]
 # Temp directories for the backend's tests: every module's fixture builder needs
 # one, and `tempfile` is what the existing tests already assume exists.
 tempfile = "3"
 
+# Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
+# builds against the checkout so runtime fixes land here first. Qt windowing
+# (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk. The dialog
+# plugin rides along for `pick_ledger_folder`, through its xdg-desktop-portal
+# backend (D-Bus; no toolkit in the process) rather than rfd's default GTK one.
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri-runtime-qt = { path = "../vendor/TauriQt/tauri-runtime-qt" }
 tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }

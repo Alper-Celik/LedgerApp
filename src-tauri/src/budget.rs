@@ -281,6 +281,10 @@ pub(crate) fn budget_view(state: &AppState, month: Option<&str>) -> Result<Budge
 /// the multi-month screen opens on.
 const DEFAULT_RANGE_MONTHS: i32 = 6;
 
+/// The widest window a caller may ask for. Ten years is longer than any budget
+/// screen and short enough that one request cannot become ten thousand.
+const MAX_RANGE_MONTHS: usize = 120;
+
 /// Several consecutive months of the ledger's envelope budget.
 ///
 /// The single-month [`BudgetMonth`] is the screen's *one* page; this is the
@@ -409,7 +413,16 @@ fn budget_range_of(
     if from_index > to_index {
         return Err(format!("the budget range `{from}`–`{to}` runs backwards"));
     }
-    let mut months = Vec::with_capacity((to_index - from_index + 1) as usize);
+    // A window is a screen. An unbounded range — a tool call, a hand-written URL —
+    // would walk the ledger once per month of recorded history, so it is refused
+    // by name rather than clamped: a silent short answer would look like data.
+    let span = (to_index - from_index + 1) as usize;
+    if span > MAX_RANGE_MONTHS {
+        return Err(format!(
+            "the budget range `{from}`–`{to}` spans {span} months; ask for at most {MAX_RANGE_MONTHS}"
+        ));
+    }
+    let mut months = Vec::with_capacity(span);
     for index in from_index..=to_index {
         let label = month_label(index);
         let month = budget_month(ledger, Some(&label))?;

@@ -307,6 +307,69 @@ export const commands = {
 	 *  write path, and retire the conflict copy when it is unchanged.
 	 */
 	conflictResolve: (original: string, picks: ([string, string])[]) => typedError<string, string>(__TAURI_INVOKE("conflict_resolve", { original, picks })),
+	/**  Month-end net worth over the last `months` months, oldest first. */
+	reportNetWorth: (months: number) => typedError<NetWorthMonth[], string>(__TAURI_INVOKE("report_net_worth", { months })),
+	/**  Money in and out per month over the last `months` months. */
+	reportCashflow: (months: number) => typedError<CashflowMonth[], string>(__TAURI_INVOKE("report_cashflow", { months })),
+	/**  Spending per expense category per month over the last `months` months. */
+	reportCategories: (months: number) => typedError<CategoryMonths[], string>(__TAURI_INVOKE("report_categories", { months })),
+	/**
+	 *  What kind of file an attachment is, how big, and (for PDFs/spreadsheets) how
+	 *  many pages or sheets it has.
+	 */
+	attachmentDescribe: (path: string) => typedError<AttachmentInfo, string>(__TAURI_INVOKE("attachment_describe", { path })),
+	/**
+	 *  Rasterise a PDF's pages — what a vision model is shown, instead of extracted
+	 *  text. Capped by page count, dpi and a total pixel budget.
+	 */
+	attachmentPdfPages: (path: string, dpi: number, maxPages: number) => typedError<PdfPage[], string>(__TAURI_INVOKE("attachment_pdf_pages", { path, dpi, maxPages })),
+	/**  A spreadsheets's (or CSV's) rows as strings, headers first. */
+	attachmentTable: (path: string, sheet: string | null) => typedError<Table, string>(__TAURI_INVOKE("attachment_table", { path, sheet })),
+	/**  Text files an attachment may be (markdown, JSON, CSV), size-capped. */
+	attachmentText: (path: string, maxBytes: number) => typedError<string, string>(__TAURI_INVOKE("attachment_text", { path, maxBytes })),
+	/**
+	 *  The assistant's base tools (read/edit/grep/glob) as OpenAI-style schemas,
+	 *  serialised: a `serde_json::Value` cannot cross specta (it has no static type
+	 *  on the TypeScript side), and the panel hands each schema straight back to the
+	 *  model anyway.
+	 */
+	toolSchemas: () => typedError<string, string>(__TAURI_INVOKE("tool_schemas")),
+	/**
+	 *  Run one base tool against the open ledger's directory. `edit` is hash-anchored
+	 *  and atomic: one stale anchor refuses the whole batch.
+	 */
+	toolInvoke: (name: string, args: string) => typedError<string, string>(__TAURI_INVOKE("tool_invoke", { name, args })),
+	/**  The repository's branches, local and remote. */
+	gitBranches: () => typedError<BranchInfo[], string>(__TAURI_INVOKE("git_branches")),
+	/**  Create a branch, optionally switching to it. */
+	gitCreateBranch: (name: string, checkout: boolean) => typedError<null, string>(__TAURI_INVOKE("git_create_branch", { name, checkout })),
+	/**  Switch branches; refuses while the ledger has uncommitted changes, naming them. */
+	gitCheckout: (name: string) => typedError<null, string>(__TAURI_INVOKE("git_checkout", { name })),
+	/**  The commit log, newest first. */
+	gitLog: (limit: number, path: string | null) => typedError<CommitInfo[], string>(__TAURI_INVOKE("git_log", { limit, path })),
+	/**  One commit's patch, in the diff view's own rendering. */
+	gitCommitDiff: (id: string) => typedError<string, string>(__TAURI_INVOKE("git_commit_diff", { id })),
+	/**  Stage paths (relative to the ledger directory or absolute). */
+	gitStage: (paths: string[]) => typedError<null, string>(__TAURI_INVOKE("git_stage", { paths })),
+	/**  Unstage paths, leaving the working tree alone. */
+	gitUnstage: (paths: string[]) => typedError<null, string>(__TAURI_INVOKE("git_unstage", { paths })),
+	/**  Restore paths from the index (never deletes uncommitted bytes). */
+	gitDiscard: (paths: string[]) => typedError<null, string>(__TAURI_INVOKE("git_discard", { paths })),
+	/**
+	 *  Merge a branch into the current one: fast-forward, up to date, or a list of
+	 *  conflicted files with their index stages.
+	 */
+	gitMerge: (theirs: string) => typedError<MergeOutcome, string>(__TAURI_INVOKE("git_merge", { theirs })),
+	/**  A conflicted file's three versions, from the index stages. */
+	gitConflictTexts: (path: string) => typedError<ConflictTexts, string>(__TAURI_INVOKE("git_conflict_texts", { path })),
+	/**  Write a resolved text for a conflicted file and stage it. */
+	gitResolve: (path: string, text: string) => typedError<null, string>(__TAURI_INVOKE("git_resolve", { path, text })),
+	/**  Finish a merge whose conflicts are all resolved. */
+	gitMergeContinue: () => typedError<null, string>(__TAURI_INVOKE("git_merge_continue")),
+	/**  Abandon a merge, restoring the branch and working tree. */
+	gitMergeAbort: () => typedError<null, string>(__TAURI_INVOKE("git_merge_abort")),
+	/**  Undo one commit as a new commit (history stays append-only). */
+	gitRevertCommit: (id: string) => typedError<string, string>(__TAURI_INVOKE("git_revert_commit", { id })),
 	/**
 	 *  Unified diff of the ledger's files against HEAD, index and working tree
 	 *  together, for the diff view: git's own patch text under a `=== path ===`
@@ -361,6 +424,53 @@ export type AiSettingsView = {
 	temperature: number | null,
 	/**  Whether a key is stored. The key itself never crosses IPC. */
 	has_key: boolean,
+	/**
+	 *  The instructions the panel sends with every turn: defined in this module,
+	 *  so the two halves of the app cannot disagree about them.
+	 */
+	system_prompt: string,
+};
+
+/**  A file as the panel lists it before deciding how to use it. */
+export type AttachmentInfo = {
+	path: string,
+	kind: AttachmentKind,
+	/**
+	 *  Size on disk at the moment of describing, in bytes. `u32` because the
+	 *  attachment ceiling is 64 MiB and specta refuses to export 64-bit integers
+	 *  (a JS number cannot carry one).
+	 */
+	bytes: number,
+	/**
+	 *  Pages of a PDF; `None` for everything else — and for a PDF on a build
+	 *  without MuPDF (Android), where the count would need the renderer.
+	 */
+	pages: number | null,
+	/**  Sheet names of a spreadsheet, in workbook order; empty otherwise. */
+	sheets: string[],
+};
+
+/**
+ *  What a file is, as far as the panel cares. Decided by extension, and by the
+ *  first bytes when the extension says nothing.
+ */
+export type AttachmentKind = "pdf" | "image" | "spreadsheet" | "csv" | "text" | "other";
+
+/**  One branch of the repository, as the branch list shows it. */
+export type BranchInfo = {
+	/**  The branch's short name: `main`, or `origin/main` for a remote branch. */
+	name: string,
+	/**
+	 *  Whether HEAD is on this branch. Always false for remote branches, which
+	 *  cannot be the checked-out branch.
+	 */
+	is_current: boolean,
+	is_remote: boolean,
+	/**
+	 *  The remote-tracking branch this local branch follows, when one is
+	 *  configured. `None` for remote branches and for locals with no upstream.
+	 */
+	upstream: string | null,
 };
 
 /**
@@ -514,6 +624,44 @@ export type Candidate = {
 	stamp: string | null,
 };
 
+/**  One month of income and expenses. */
+export type CashflowMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  Money that came in: income postings, signed so they read positive. */
+	inflow: string,
+	/**  Money that went out: expense postings, positive. */
+	outflow: string,
+	/**  The commodity every figure is in. */
+	currency: string,
+};
+
+/**  One month of one expense category. */
+export type CategoryMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  That month's spending in the category, a positive decimal string. */
+	spent: string,
+};
+
+/**  Spending over time for one top-level expense branch. */
+export type CategoryMonths = {
+	/**
+	 *  The grouped account, e.g. `Expenses:Food:Groceries`: the top two levels
+	 *  under `Expenses`. Deeper accounts roll up into it.
+	 */
+	account: string,
+	/**  The branch's own path below `Expenses`, e.g. `Food:Groceries`. */
+	label: string,
+	/**  The commodity every figure is in. */
+	currency: string,
+	/**
+	 *  One row per month of the report range, oldest first; a month with no
+	 *  spending reports `"0"`.
+	 */
+	months: CategoryMonth[],
+};
+
 /**
  *  How a file, an entry or an account stands against the ledger's last commit —
  *  the one letter a git client would put beside it.
@@ -599,6 +747,67 @@ export type ChatRole =
 "assistant" | 
 /**  A tool's answer to an earlier call. */
 "tool";
+
+/**  One commit in the history, as the log rows show it. */
+export type CommitInfo = {
+	/**  The full hex object id, the handle the other calls take. */
+	id: string,
+	/**  The first seven characters, for the row's id column. */
+	short: string,
+	/**  The message's first line, as git's own `%s` would show it. */
+	summary: string,
+	author: string,
+	email: string,
+	/**
+	 *  Seconds since the Unix epoch, in the author's clock — the time git
+	 *  records and `git log` prints by default. The offset is not carried; a
+	 *  ledger app only needs the ordering and the day.
+	 * 
+	 *  Exported as `f64` because specta refuses 64-bit integers (a JS number
+	 *  cannot carry one); every Unix second this century is exact in a double.
+	 */
+	time: number | null,
+	/**
+	 *  How many files the commit changed, the row's "3 files" badge. `u32`: a
+	 *  commit that touched four billion files is not a ledger.
+	 */
+	files: number,
+};
+
+/**  One path the merge left in conflict, with what kind of edit it was. */
+export type ConflictFile = {
+	/**  Repository-relative path, as git writes it. */
+	path: string,
+	/**
+	 *  One of `both_modified`, `both_added`, `deleted_by_us` or
+	 *  `deleted_by_them`; `added_by_us`/`added_by_them` cover the rarer
+	 *  add/rename side, where only one stage exists; `deleted_by_both` and
+	 *  `unclassified` are the remaining stage shapes, which a merge of two
+	 *  text files cannot normally produce.
+	 */
+	kind: string,
+	/**
+	 *  How many of the three index stages (base, ours, theirs) exist: 3 for a
+	 *  plain both-modified conflict, fewer when one side added or deleted the
+	 *  file, which is a hint the UI can use to pick the right editor. `u8`: git
+	 *  has exactly three stages, and specta refuses wider integers.
+	 */
+	stages: number,
+};
+
+/**
+ *  The three versions of a conflicted file, read from the index stages rather
+ *  than from the working tree's `<<<<<<<` markers, so the UI can run a real
+ *  three-way merge over them.
+ */
+export type ConflictTexts = {
+	/**  Stage 1: the merge base. */
+	base: string | null,
+	/**  Stage 2: the branch being merged into. */
+	ours: string | null,
+	/**  Stage 3: the branch merged in. */
+	theirs: string | null,
+};
 
 /**
  *  One conflicted copy as the merge UI shows it: the three texts, where the
@@ -1012,6 +1221,28 @@ export type MediaPart = {
 	detail?: ImageDetail | null,
 };
 
+/**
+ *  How a merge ended.
+ * 
+ *  The clean non-fast-forward case is `Conflicts` with an empty list: the merge
+ *  result is staged and waiting for [`merge_continue`], exactly like a resolved
+ *  one, and reporting it that way keeps this type to the three states the
+ *  screen has to draw.
+ */
+export type MergeOutcome = 
+/**  HEAD is on the merged commit; nothing else is left to do. */
+({ fast_forward: {
+	new_head: string,
+} }) & { conflicts?: never } | 
+/**  The branch already contains `theirs`; nothing happened. */
+"up_to_date" | 
+/**
+ *  The merge is staged and awaiting [`merge_continue`]. Each entry is a
+ *  path that still needs a resolved text; an empty list means the merge is
+ *  clean and only needs finishing.
+ */
+({ conflicts: ConflictFile[] }) & { fast_forward?: never };
+
 /**  [`crate::conflict::MergeSummary`] as the frontend reads it. */
 export type MergeSummaryDto = {
 	/**  Directives neither side touched. */
@@ -1058,6 +1289,19 @@ export type ModelInfo = {
 	context_window: number | null,
 	/**  Whether the model takes images, when the endpoint says. */
 	vision: boolean | null,
+};
+
+/**
+ *  One month of the ledger's net worth: assets plus liabilities, the liabilities
+ *  being the negative balances Beancount books them as.
+ */
+export type NetWorthMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  Net worth at the month's end, an exact decimal string. */
+	value: string,
+	/**  The commodity every figure is in. */
+	currency: string,
 };
 
 /**  One posting of a new transaction: the account, and what it is worth. */
@@ -1131,6 +1375,20 @@ export type Orphan = {
 	client: SyncClient,
 	/**  The timestamp the name carries, when it has one. */
 	stamp: string | null,
+};
+
+/**
+ *  One rasterised PDF page. The PNG stays in memory: at 150 dpi an A4 page is
+ *  1240 × 1754 and a handful of megabytes at worst, so writing it to disk first
+ *  would only add temporary files to clean up.
+ */
+export type PdfPage = {
+	/**  Zero-based page number in the document. */
+	index: number,
+	width: number,
+	height: number,
+	/**  The page as PNG bytes, 8-bit RGB. */
+	png: number[],
 };
 
 /**
@@ -1329,6 +1587,17 @@ export type SyncClient =
 "seafile" | 
 /**  iCloud Drive: `name 2.bean` — the lowest number a conflicted copy gets. */
 "icloud";
+
+/**
+ *  A sheet or CSV as rows of strings. Rows may be shorter than `headers` when
+ *  the file's own rows are ragged; that raggedness is the file's, and is kept.
+ */
+export type Table = {
+	headers: string[],
+	rows: string[][],
+	/**  True when rows or columns were dropped to fit `TableOptions`. */
+	truncated: boolean,
+};
 
 /**
  *  One call the model asked for, or one the caller replays back.

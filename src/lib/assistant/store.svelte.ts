@@ -350,7 +350,7 @@ export class Assistant {
 			let response: ChatResponse;
 			try {
 				response = await aiChat({
-					messages: [systemWire(this.tools.length > 0), ...replayable(this.wire)],
+					messages: [systemWire(this.tools.length > 0, this.settings?.system_prompt ?? ""), ...replayable(this.wire)],
 					tools: $state.snapshot(this.tools),
 					media: pendingMedia,
 				});
@@ -541,13 +541,13 @@ function userWire(text: string): ChatMessage {
  * ledger figure. The tool sentence changes when the backend offered none, so
  * the model is told to decline instead of guessing.
  */
-function systemWire(hasTools: boolean): ChatMessage {
+function systemWire(hasTools: boolean, base = ""): ChatMessage {
 	const ledger = hasTools
 		? "Use the provided read-only tools for every ledger fact. Every amount, date, account and transaction must come from a tool result."
 		: "No ledger tools are available in this session, so say plainly that you cannot read the ledger instead of guessing any figure.";
 	return {
 		role: "system",
-		text: `You are the assistant inside a Beancount ledger app. ${ledger} Never invent balances, transactions, budgets, prices or dates. Report a tool's error exactly as it was returned. Amounts are exact decimal strings: do not re-add or round them. Be concise.`,
+		text: base.trim() === "" ? `You are the assistant inside a Beancount ledger app. ${ledger}` : `${base.trim()} ${ledger}`,
 		tool_calls: [],
 		tool_call_id: null,
 	};

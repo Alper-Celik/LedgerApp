@@ -603,7 +603,19 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
 ///
 /// Stable and random rather than a hostname: two machines can share a name, and
 /// the id is also what keeps two devices' operation ids apart.
+/// Whether `id` is the shape [`device_id`] generates: 16 lowercase hex.
+fn is_device_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub fn device_id(root: &Path) -> Result<String, String> {
+    // The id names a file *and* a lock inside the log directory, and the file is
+    // synced: a peer could hand us a traversal in it. Anything that is not the
+    // shape this function generates is replaced with a fresh id.
+
     let path = root.join(DEVICE_FILE);
     let mut empty_reads = 0;
     for _ in 0..200 {
@@ -611,7 +623,15 @@ pub fn device_id(root: &Path) -> Result<String, String> {
             Ok(text) => {
                 let id = text.trim();
                 if !id.is_empty() {
-                    return Ok(id.to_string());
+                    // Generated ids are 16 lowercase hex characters. Anything
+                    // else (a synced file from a peer, a hand edit) is not a
+                    // filename this app may use: replace it rather than splice a
+                    // path out of it.
+                    if is_device_id(id) {
+                        return Ok(id.to_string());
+                    }
+                    let _ = fs::remove_file(&path);
+                    continue;
                 }
                 // Another process creates the file and writes the id in the
                 // next breath, so an empty read is almost certainly that gap —
