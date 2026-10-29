@@ -5,7 +5,8 @@
 import { invalidateAll } from "$app/navigation";
 import { commands, type LoadSummary } from "../bindings";
 import { messageOf } from "./errors.js";
-import { bumpLedgerRevision } from "./ledger-revision.svelte.js";
+import { noteTreeReport } from "./sync.svelte.js";
+import { bumpLedgerEpoch, bumpLedgerRevision } from "./ledger-revision.svelte.js";
 
 /**
  * The ledger the app has open, as the backend resolved it. `summary.path` is
@@ -68,9 +69,18 @@ export async function syncTree(): Promise<void> {
 	try {
 		const kind = await commands.storageKind();
 		if (kind !== "tree") return;
-		await commands.syncLedgerTree();
+		const result = await commands.syncLedgerTree();
+		if (result.status === "error") {
+			noteTreeReport({ external: [], conflicts: [], error: result.error });
+			return;
+		}
+		const report = result.data;
+		// A write that never reached the folder, or a file the folder changed
+		// under it, is the reader's to know about: an edit that silently stayed in
+		// the private mirror would be lost on the next restore.
+		noteTreeReport({ external: report.external, conflicts: report.conflicts });
 	} catch (cause) {
-		console.error("tree sync failed", cause);
+		noteTreeReport({ external: [], conflicts: [], error: messageOf(cause) });
 	}
 }
 
@@ -104,12 +114,25 @@ export async function openLedgerPath(path: string): Promise<boolean> {
 	ledger.opening = true;
 	ledger.error = "";
 	try {
+		// A ledger in a SAF tree is read from the app's private mirror, so
+		// reopening the path would re-read the same stale bytes. The folder's
+		// versions are pulled into the mirror first — that is what makes the sync
+		// bar's "Reload ledger" mean anything there.
+		if ((await commands.storageKind()) === "tree") {
+			const pulled = await commands.reloadLedgerTree();
+			if (pulled.status === "ok") {
+				noteTreeReport({ external: pulled.data.external, conflicts: pulled.data.conflicts });
+			}
+		}
 		const result = await commands.loadLedger(path);
 		if (result.status === "error") {
 			ledger.error = result.error;
 			return false;
 		}
 		ledger.summary = result.data;
+		// A different journal: drafts, selections and half-typed entries that
+		// remember an id from the previous one are now about nothing.
+		bumpLedgerEpoch();
 		bumpLedgerRevision();
 		await invalidateAll();
 		return true;

@@ -45,6 +45,20 @@ pub(crate) fn ledger_diff_text(state: &AppState) -> Result<String, String> {
 /// changes, so the commit is built from a private index seeded with HEAD's tree
 /// and overlaid with the ledger's staged entries. Everything else stays staged,
 /// exactly as `git commit <paths>` leaves it.
+/// The index mode a working-tree file is committed with: the executable bit is
+/// the only one git records.
+fn workdir_mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0) {
+            return 0o100755;
+        }
+    }
+    let _ = path;
+    0o100644
+}
+
 pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, String> {
     if message.trim().is_empty() {
         return Err("commit message must not be empty".to_string());
@@ -63,12 +77,55 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
             .read_tree(head)
             .map_err(|e| format!("git index: {e}"))?;
     }
+    // The commit is built from the working tree, not from the repository index:
+    // the screen reviewed the working tree's diff, and the index may still hold
+    // what an earlier app edit staged — a sync client's newer bytes would then
+    // be reviewed but not committed.
     let mut tracked = 0;
     for relative in ledger_files_in(&repo, ledger) {
-        if let Some(entry) = index.get_path(&relative, 0) {
-            staged.add(&entry).map_err(|e| format!("git index: {e}"))?;
-            tracked += 1;
+        if index.get_path(&relative, 1).is_some() {
+            return Err(format!(
+                "{} has an unresolved merge; resolve it before committing",
+                relative.display()
+            ));
         }
+        if index.get_path(&relative, 0).is_none() {
+            continue;
+        }
+        let disk = repo.workdir().map(|dir| dir.join(&relative));
+        match disk.filter(|path| path.is_file()) {
+            Some(path) => {
+                let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let blob = repo
+                    .blob(&bytes)
+                    .map_err(|e| format!("git blob for {}: {e}", relative.display()))?;
+                // The private index is not backed by a repository, so the entry
+                // is built here rather than read off the workdir by git.
+                let mode = workdir_mode(&path);
+                let entry = git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode,
+                    uid: 0,
+                    gid: 0,
+                    file_size: bytes.len() as u32,
+                    id: blob,
+                    flags: 0,
+                    flags_extended: 0,
+                    path: relative.to_string_lossy().replace('\\', "/").into_bytes(),
+                };
+                staged.add(&entry).map_err(|e| format!("git index: {e}"))?;
+            }
+            None => {
+                // Deleted on disk: the commit records the deletion.
+                staged
+                    .remove_path(&relative)
+                    .map_err(|e| format!("git index: {e}"))?;
+            }
+        }
+        tracked += 1;
     }
     // With no ledger file in it the tree is HEAD's own, message and all.
     if tracked == 0 {

@@ -122,12 +122,15 @@ pub(crate) fn load_indexes(dir: &Path) -> Result<Vec<IndexSeries>, String> {
 /// The store's writers serialise on this: a save is read-modify-write of the
 /// whole file, and two overlapping saves (a refresh on a worker thread, an import
 /// from the UI) would otherwise each publish the state it read and drop the
-/// other's series. Only this process writes the file, so a process-wide lock is
-/// the whole contract.
-static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// other's series.
+///
+/// The lock is a file, not a process static: the CLI (`ledger index import`) and
+/// the app resolve the same config directory and can run at the same time, so
+/// the mutex has to be seen by other processes too. `history` already carries the
+/// one primitive every platform agrees on for that (`O_EXCL`), so the edge is
+/// shared rather than duplicated.
 pub(crate) fn save_series(dir: &Path, series: &IndexSeries) -> Result<(), String> {
-    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = crate::history::Lock::for_store(dir)?;
     let series = series.clone().normalised()?;
     let mut all = load_indexes(dir)?;
     match all.iter().position(|stored| stored.id == series.id) {

@@ -14,3 +14,19 @@ export const ledgerRevision = $state({ value: 0 });
 export function bumpLedgerRevision() {
 	ledgerRevision.value += 1;
 }
+
+/**
+ * Bumped when a *different journal* becomes the session's ledger.
+ *
+ * A write (the revision above) must leave an open draft alone; a different
+ * ledger must not. Transaction ids are positions in the booked stream, so entry
+ * 7 of one journal is an unrelated entry in another — a draft kept across a
+ * switch would save onto the wrong transaction. Every surface holding an id
+ * from the previous ledger watches this and drops its draft.
+ */
+export const ledgerEpoch = $state({ value: 0 });
+
+/** Call after a load *replaced* the ledger, before the routes refetch. */
+export function bumpLedgerEpoch() {
+	ledgerEpoch.value += 1;
+}

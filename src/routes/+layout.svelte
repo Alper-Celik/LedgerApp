@@ -13,7 +13,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import { syncTree } from "$lib/ledger.svelte.js";
 	import { refreshSyncWatch } from "$lib/sync.svelte.js";
-	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { resetLanguageServer } from "$lib/lsp.js";
 	import { load as loadTheme } from "$lib/theme/store.svelte.js";
 	import "../app.css";
 	import { ModeWatcher } from "mode-watcher";
@@ -32,6 +33,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// Every write also tells whether the folder moved behind us; the bar in
 		// the inset offers the reload.
 		void refreshSyncWatch();
+	});
+
+	$effect(() => {
+		// A different journal is open: the language server the backend stopped is
+		// not the one the next editor should attach to.
+		void ledgerEpoch.value;
+		resetLanguageServer();
 	});
 </script>
 

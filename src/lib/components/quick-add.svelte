@@ -4,6 +4,7 @@ SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
+	import { untrack } from "svelte";
 	import { browser } from "$app/environment";
 	import { invalidateAll } from "$app/navigation";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
@@ -16,7 +17,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as Sheet from "$lib/components/ui/sheet/index.js";
 	import { messageOf } from "$lib/errors.js";
 	import { ledger } from "$lib/ledger.svelte.js";
-	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { bumpLedgerRevision, ledgerEpoch } from "$lib/ledger-revision.svelte.js";
 	import {
 		amountOf,
 		appendKey,
@@ -52,6 +53,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let modalOpen = $state(false);
 
 	/** The amount as typed, never as a number: `appendKey`/`amountOf` own it. */
+	/**
+	 * A different journal is open: the account pair this sheet defaulted to (and
+	 * any half-typed amount) belongs to the previous one, so the sheet closes
+	 * empty rather than adding to a ledger the reader did not choose it for.
+	 */
+	$effect(() => {
+		void ledgerEpoch.value;
+		// `open` is read untracked: tracking it would make the flush that opens
+		// the sheet re-run this effect and close it again.
+		if (untrack(() => open)) close();
+		from = "";
+		to = "";
+	});
+
 	let digits = $state("");
 	let sign = $state<QuickAddSign>("expense");
 	/** Today's date once the sheet opens; empty at rest, so SSR and the client agree. */
@@ -179,6 +194,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		open = false;
 		fromOpen = false;
 		toOpen = false;
+		digits = "";
+		text = "";
+		error = "";
 	}
 
 	function press(key: string) {

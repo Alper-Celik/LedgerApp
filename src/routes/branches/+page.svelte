@@ -33,23 +33,44 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 */
 	let { data }: PageProps = $props();
 
-	/** The route's own read, taken once; the screen's state takes over from here. */
-	const loaded = untrack(() => data);
-	const root = loaded.root;
+	/** The route's own read, taken once to seed the screen. */
+	const first = untrack(() => data);
+	/** The load the state below was last taken from. */
+	let loaded = $state(first);
+	const root = $derived(loaded.root ?? "");
 
-	let branches = $state<BranchInfo[]>(loaded.branches);
-	let commits = $state<CommitInfo[]>(loaded.commits);
-	let journal = $state(loaded.journal);
-	let tree = $state<string[]>(loaded.tree);
-	let limit = $state(loaded.limit);
-	let branchesError = $state(loaded.branchesError);
-	let logError = $state(loaded.logError);
-	let treeError = $state(loaded.treeError);
+	let branches = $state<BranchInfo[]>(first.branches);
+	let commits = $state<CommitInfo[]>(first.commits);
+	let journal = $state(first.journal);
+	let tree = $state<string[]>(first.tree);
+	let limit = $state(first.limit);
+	let branchesError = $state(first.branchesError);
+	let logError = $state(first.logError);
+	let treeError = $state(first.treeError);
 	/** A failed read of the screen's own data, or a ledger that would not reload. */
-	let failure = $state(loaded.error);
+	let failure = $state(first.error);
 	/** The last write's sentence. */
 	let notice = $state("");
 	let refreshing = $state(false);
+
+	$effect(() => {
+		// `invalidateAll` re-runs the route's load — after another ledger is
+		// opened, or after this screen reloads the ledger — and the state above
+		// was taken from an earlier read. Following the prop is what keeps a
+		// "Switch" on a stale row from driving the previous repository.
+		if (data === loaded) return;
+		loaded = data;
+		branches = data.branches;
+		commits = data.commits;
+		journal = data.journal;
+		tree = data.tree;
+		limit = data.limit;
+		branchesError = data.branchesError;
+		logError = data.logError;
+		treeError = data.treeError;
+		failure = data.error;
+		notice = "";
+	});
 
 	const current = $derived(branches.find((branch) => branch.is_current)?.name ?? "");
 

@@ -24,12 +24,12 @@ use crate::files::{
 };
 use crate::folders;
 use crate::git::{commit_staged, ledger_diff_text};
-use crate::repo;
 use crate::lsp;
 use crate::model::{
     AccountBalance, BudgetMonth, FolderListing, JournalFile, LoadSummary, NewTransaction,
     TransactionEdit, TransactionFile, TransactionView,
 };
+use crate::repo;
 use crate::session::{AppState, load_baselined, summary_of};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -74,9 +74,18 @@ pub fn account_transactions(account: String, state: State<'_, AppState>) -> Vec<
 /// ledger untouched.
 #[tauri::command]
 #[specta::specta]
-pub fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSummary, String> {
+pub fn load_ledger(
+    path: String,
+    app: tauri::AppHandle<AppRuntime>,
+    state: State<'_, AppState>,
+) -> Result<LoadSummary, String> {
     let loaded = load_baselined(Path::new(&path))?;
     let summary = summary_of(&loaded);
+    // Whether this ledger is the SAF mirror is a property of the path, not a flag
+    // that stays set for the process: opening anything else afterwards must end
+    // tree mode, or git would stay off and every revision would push the old
+    // tree's mirror behind an unrelated ledger.
+    crate::storage::set_tree_active(is_mirror_ledger(&app, &loaded.root));
     // A poisoned lock means an earlier command panicked while holding the ledger;
     // its contents are still consistent, so recover rather than propagating it as
     // a permanent failure to every later command.
@@ -85,6 +94,13 @@ pub fn load_ledger(path: String, state: State<'_, AppState>) -> Result<LoadSumma
     // next editor starts one for this one.
     lsp::stop();
     Ok(summary)
+}
+
+/// Whether `root` is inside the app's private SAF mirror.
+fn is_mirror_ledger(app: &tauri::AppHandle<AppRuntime>, root: &Path) -> bool {
+    app_config_dir(app)
+        .map(|config| config.join("tree"))
+        .is_ok_and(|mirror| root.starts_with(mirror))
 }
 
 /// The ledger currently open — its root journal and what the load found — or
@@ -181,6 +197,7 @@ pub async fn pick_ledger_folder(
 ) -> Result<Option<String>, String> {
     // Read before any `.await`: the lock must not be held across one.
     let start = chooser_start(&state);
+    let _picking = begin_pick()?;
 
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     {
@@ -211,24 +228,34 @@ pub async fn pick_ledger_folder(
         // mirror back as if it were a folder.
         let _ = start;
         let handle = app.clone();
-        let picked =
-            tauri::async_runtime::spawn_blocking(move || crate::storage::AndroidTree::pick(&handle))
-                .await
-                .map_err(|error| error.to_string())??;
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            crate::storage::AndroidTree::pick(&handle)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
         let Some(tree) = picked else {
             return Ok(None);
         };
-        let mirror = app_config_dir(&app)?.join("tree");
-        crate::storage::mirror_into(&tree, &mirror)?;
-        crate::storage::set_tree_active(true);
-        let settings = app_config_dir(&app)?.join("storage.json");
-        if let Some(parent) = settings.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let config = app_config_dir(&app)?;
+        let mirror = config.join("tree");
+        // A tree that was open still owes the folder whatever the app wrote into
+        // its mirror; pushing is best effort (the reader is leaving it) but it
+        // must not be skipped silently, since the mirror is about to be dropped.
+        if let Ok(previous) = std::fs::read_to_string(config.join("storage.json"))
+            .map_err(|error| error.to_string())
+            .and_then(|json| crate::storage::AndroidTree::from_json(&app, json.trim()))
+            && let Err(error) = crate::storage::sync_back(&previous, &mirror)
+        {
+            eprintln!("previous tree not fully written: {error}");
         }
-        // The URI is the only thing that has to outlive the process: the mirror
-        // is rebuilt from it on the next open.
+        crate::storage::reset_mirror(&mirror)?;
+        crate::storage::mirror_into(&tree, &mirror)?;
+        let settings = config.join("storage.json");
+        // The URI lands before the mode flips: a crash between the two leaves a
+        // tree that the next launch can restore, not a mirror nothing owns.
         std::fs::write(&settings, tree.to_json()?)
             .map_err(|error| format!("{}: {error}", settings.display()))?;
+        crate::storage::set_tree_active(true);
         Ok(Some(mirror.display().to_string()))
     }
 
@@ -242,6 +269,31 @@ pub async fn pick_ledger_folder(
         let _ = (&app, start);
         Err("this platform has no folder chooser yet".to_owned())
     }
+}
+
+/// One folder is picked at a time.
+///
+/// Copying a tree takes seconds, and the picker closes when the URI is returned —
+/// before the copy is done. A second tap would then mirror a second folder into
+/// the same directory: each call's file creation races the other's, and the
+/// survivor is a mixture whose write-back copies one ledger's journal into the
+/// other folder.
+static PICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Held for the duration of a pick; dropped even on the error path.
+struct PickGuard;
+
+impl Drop for PickGuard {
+    fn drop(&mut self) {
+        PICKING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn begin_pick() -> Result<PickGuard, String> {
+    if PICKING.swap(true, std::sync::atomic::Ordering::Acquire) {
+        return Err("a folder is already being opened".to_string());
+    }
+    Ok(PickGuard)
 }
 
 /// Where the chooser opens: the open ledger's own directory, or nothing (the
@@ -653,9 +705,15 @@ fn tree_mirror(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
 #[specta::specta]
 pub async fn sync_ledger_tree(
     app: tauri::AppHandle<AppRuntime>,
-) -> Result<Vec<String>, String> {
+) -> Result<crate::storage::SyncReport, String> {
     #[cfg(target_os = "android")]
     {
+        // Only a ledger that came from a tree has anything to write back; the
+        // check is here as well as in the UI, so no caller can push the previous
+        // tree's mirror behind a local ledger.
+        if crate::storage::kind() != crate::storage::StorageKind::Tree {
+            return Ok(crate::storage::SyncReport::default());
+        }
         let handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let settings = app_config_dir(&handle)?.join("storage.json");
@@ -673,6 +731,68 @@ pub async fn sync_ledger_tree(
     {
         let _ = app;
         Err("a SAF tree exists only on Android".to_owned())
+    }
+}
+
+/// Android: pull the folder's versions into the mirror before the ledger is read
+/// again — what "Reload ledger" has to mean when the ledger is behind a tree.
+#[tauri::command]
+#[specta::specta]
+pub async fn reload_ledger_tree(
+    app: tauri::AppHandle<AppRuntime>,
+) -> Result<crate::storage::SyncReport, String> {
+    #[cfg(target_os = "android")]
+    {
+        if crate::storage::kind() != crate::storage::StorageKind::Tree {
+            return Ok(crate::storage::SyncReport::default());
+        }
+        let handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let settings = app_config_dir(&handle)?.join("storage.json");
+            let json = std::fs::read_to_string(&settings)
+                .map_err(|error| format!("{}: {error}", settings.display()))?;
+            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
+            crate::storage::mirror_into(&tree, &tree_mirror(&handle)?)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(crate::storage::SyncReport::default())
+    }
+}
+
+/// Android: settle every file the folder and the app both changed on one side.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_tree_conflicts(
+    take: crate::storage::Resolve,
+    app: tauri::AppHandle<AppRuntime>,
+) -> Result<crate::storage::SyncReport, String> {
+    #[cfg(target_os = "android")]
+    {
+        if crate::storage::kind() != crate::storage::StorageKind::Tree {
+            return Ok(crate::storage::SyncReport::default());
+        }
+        let handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let settings = app_config_dir(&handle)?.join("storage.json");
+            let json = std::fs::read_to_string(&settings)
+                .map_err(|error| format!("{}: {error}", settings.display()))?;
+            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
+            crate::storage::resolve_conflicts(&tree, &tree_mirror(&handle)?, take)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (take, app);
+        Ok(crate::storage::SyncReport::default())
     }
 }
 
@@ -761,9 +881,21 @@ pub fn restore_tree(app: &tauri::AppHandle<AppRuntime>) {
         return;
     };
     let mirror = config.join("tree");
-    if let Err(error) = crate::storage::mirror_into(&tree, &mirror) {
-        eprintln!("tree restore: {error}");
-        return;
+    // `mirror_into` reconciles: files this device wrote and did not push are
+    // pushed first, files the folder gained or changed are pulled, and a file
+    // both sides changed is kept in the mirror and left alone. Nothing is
+    // deleted, so a revoked grant or a transient provider error costs the new
+    // bytes, not the ones already here.
+    match crate::storage::mirror_into(&tree, &mirror) {
+        Ok(report) if !report.conflicts.is_empty() => eprintln!(
+            "tree restore: {} file(s) changed on both sides and were not written",
+            report.conflicts.len()
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("tree restore: {error}");
+            return;
+        }
     }
     crate::storage::set_tree_active(true);
     // The journal inside the mirror, resolved the same way a picked folder is.
@@ -902,9 +1034,7 @@ pub fn lifestyle_report(
 /// so they sync with it.
 #[tauri::command]
 #[specta::specta]
-pub fn conversations(
-    state: State<'_, AppState>,
-) -> Result<crate::conversations::Listing, String> {
+pub fn conversations(state: State<'_, AppState>) -> Result<crate::conversations::Listing, String> {
     crate::conversations::list(&ledger_dir(&state)?)
 }
 
@@ -926,6 +1056,7 @@ pub fn conversation_append(
     title: String,
     model: String,
     message: crate::conversations::Message,
+    app: tauri::AppHandle<AppRuntime>,
     state: State<'_, AppState>,
 ) -> Result<crate::conversations::Summary, String> {
     let dir = ledger_dir(&state)?;
@@ -936,7 +1067,9 @@ pub fn conversation_append(
     } else {
         id
     };
-    crate::conversations::append(&dir, &id, &message)
+    let summary = crate::conversations::append(&dir, &id, &message)?;
+    sync_tree_now(&app)?;
+    Ok(summary)
 }
 
 /// Rename a conversation (the file name stays: it is a creation record).
@@ -945,24 +1078,63 @@ pub fn conversation_append(
 pub fn conversation_rename(
     id: String,
     title: String,
+    app: tauri::AppHandle<AppRuntime>,
     state: State<'_, AppState>,
 ) -> Result<crate::conversations::Summary, String> {
-    crate::conversations::rename(&ledger_dir(&state)?, &id, &title)
+    let summary = crate::conversations::rename(&ledger_dir(&state)?, &id, &title)?;
+    sync_tree_now(&app)?;
+    Ok(summary)
 }
 
 /// Delete a conversation's file; its history is the repository's.
 #[tauri::command]
 #[specta::specta]
-pub fn conversation_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    crate::conversations::delete(&ledger_dir(&state)?, &id)
+pub fn conversation_delete(
+    id: String,
+    app: tauri::AppHandle<AppRuntime>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::conversations::delete(&ledger_dir(&state)?, &id)?;
+    sync_tree_now(&app)
 }
 
 // ---------------------------------------------------------------- history ---
 
+/// Android: push what the mirror holds into the SAF tree, without a report.
+///
+/// Conversations, chat transcripts and the log live inside the ledger folder, so
+/// they reach the folder through the same mirror as an edit. Nothing on those
+/// paths bumps the ledger revision, which is why the write-back cannot be left
+/// to the UI's effect: a conversation the app never flushed is deleted by the
+/// next restore's reconciliation as if the folder had deleted it.
+fn sync_tree_now(app: &tauri::AppHandle<AppRuntime>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        if crate::storage::kind() != crate::storage::StorageKind::Tree {
+            return Ok(());
+        }
+        let settings = app_config_dir(app)?.join("storage.json");
+        let json = std::fs::read_to_string(&settings)
+            .map_err(|error| format!("{}: {error}", settings.display()))?;
+        let tree = crate::storage::AndroidTree::from_json(app, json.trim())?;
+        let mirror = tree_mirror(app)?;
+        crate::storage::sync_back(&tree, &mirror)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 /// Where the operation log lives: the ledger's own hidden directory, so the
 /// lines and images travel with the ledger when it syncs through a file sync.
 fn history_dir(state: &AppState) -> Result<PathBuf, String> {
-    Ok(ledger_dir(state)?.join(crate::conversations::DIRECTORY).join("log"))
+    Ok(ledger_dir(state)?
+        .join(crate::conversations::DIRECTORY)
+        .join("log"))
 }
 
 /// One page of the operation log, newest first.
@@ -976,13 +1148,11 @@ pub fn history(
     limit: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::history::Operation>, String> {
-    let origin = origin
-        .as_deref()
-        .map(|name| match name {
-            "ai" => crate::history::Origin::Ai,
-            "importer" => crate::history::Origin::Importer,
-            _ => crate::history::Origin::User,
-        });
+    let origin = origin.as_deref().map(|name| match name {
+        "ai" => crate::history::Origin::Ai,
+        "importer" => crate::history::Origin::Importer,
+        _ => crate::history::Origin::User,
+    });
     crate::history::list(
         &history_dir(&state)?,
         crate::history::Filter {
@@ -1132,31 +1302,44 @@ pub fn attachment_describe(
 /// text. Capped by page count, dpi and a total pixel budget.
 #[tauri::command]
 #[specta::specta]
-pub fn attachment_pdf_pages(
+pub async fn attachment_pdf_pages(
     path: String,
     dpi: u32,
     max_pages: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::attachments::PdfPage>, String> {
+    // Rasterising twenty pages takes seconds, and a command with no `async` runs
+    // inline on the GUI thread — the window would stop repainting while the
+    // pages render. Read the path first: the lock must not be held across the
+    // hop to the blocking pool.
+    let file = ledger_path(&state, &path)?;
     let mut options = crate::attachments::RenderOptions::default();
     options.dpi = dpi;
     options.max_pages = max_pages;
-    crate::attachments::render_pdf(&ledger_path(&state, &path)?, options)
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::render_pdf(&file, options))
+        .await
+        .map_err(|error| format!("rendering the pages: {error}"))?
 }
 
 /// A spreadsheets's (or CSV's) rows as strings, headers first.
 #[tauri::command]
 #[specta::specta]
-pub fn attachment_table(
+pub async fn attachment_table(
     path: String,
     sheet: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<crate::attachments::Table, String> {
-    crate::attachments::read_table(
-        &ledger_path(&state, &path)?,
-        sheet.as_deref(),
-        crate::attachments::TableOptions::default(),
-    )
+    // Same rule as the pages: a workbook is parsed off the GUI thread.
+    let file = ledger_path(&state, &path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::attachments::read_table(
+            &file,
+            sheet.as_deref(),
+            crate::attachments::TableOptions::default(),
+        )
+    })
+    .await
+    .map_err(|error| format!("reading the sheet: {error}"))?
 }
 
 /// Text files an attachment may be (markdown, JSON, CSV), size-capped.
@@ -1207,7 +1390,8 @@ pub fn tool_invoke(
     // strict-mode module specta emits, so it cannot be a parameter name there.
     let arguments: serde_json::Value =
         serde_json::from_str(&args).map_err(|error| format!("arguments: {error}"))?;
-    let result = crate::tools::invoke(&root, &name, &arguments).map_err(|error| error.to_string())?;
+    let result =
+        crate::tools::invoke(&root, &name, &arguments).map_err(|error| error.to_string())?;
     serde_json::to_string(&result).map_err(|error| error.to_string())
 }
 
@@ -1235,7 +1419,8 @@ pub fn git_create_branch(
 #[tauri::command]
 #[specta::specta]
 pub fn git_checkout(name: String, state: State<'_, AppState>) -> Result<(), String> {
-    crate::git_ops::checkout(&ledger_dir(&state)?, &name)
+    crate::git_ops::checkout(&ledger_dir(&state)?, &name)?;
+    note_rewritten_files(&state)
 }
 
 /// The commit log, newest first.
@@ -1278,13 +1463,38 @@ pub fn git_unstage(paths: Vec<String>, state: State<'_, AppState>) -> Result<(),
     crate::git_ops::unstage(&root, &paths)
 }
 
+/// Tell the operation log what the working tree holds after a repository
+/// operation, so its own rewrites are not reported as changes made outside the
+/// app. The journal files are hashed again; git and the log stay separate
+/// records, this only corrects the baseline `sync::changed` compares against.
+fn note_rewritten_files(state: &State<'_, AppState>) -> Result<(), String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    let root = loaded
+        .root
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", loaded.root.display()))?;
+    // Every file the loader read, not just the root: a branch switch or a merge
+    // rewrites whichever ones the two branches disagree on.
+    let paths: Vec<PathBuf> = loaded
+        .ledger
+        .source_map
+        .files()
+        .iter()
+        .map(|file| file.path.clone())
+        .filter(|path| path.is_file())
+        .collect();
+    crate::history::note_seen(&crate::sync::log_dir(root), &paths)
+}
+
 /// Restore paths from the index (never deletes uncommitted bytes).
 #[tauri::command]
 #[specta::specta]
 pub fn git_discard(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
     let root = ledger_dir(&state)?;
     let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    crate::git_ops::discard(&root, &paths)
+    crate::git_ops::discard(&root, &paths)?;
+    note_rewritten_files(&state)
 }
 
 /// Merge a branch into the current one: fast-forward, up to date, or a list of
@@ -1295,7 +1505,9 @@ pub fn git_merge(
     theirs: String,
     state: State<'_, AppState>,
 ) -> Result<crate::git_ops::MergeOutcome, String> {
-    crate::git_ops::merge(&ledger_dir(&state)?, &theirs)
+    let outcome = crate::git_ops::merge(&ledger_dir(&state)?, &theirs)?;
+    note_rewritten_files(&state)?;
+    Ok(outcome)
 }
 
 /// A conflicted file's three versions, from the index stages.
@@ -1311,11 +1523,7 @@ pub fn git_conflict_texts(
 /// Write a resolved text for a conflicted file and stage it.
 #[tauri::command]
 #[specta::specta]
-pub fn git_resolve(
-    path: String,
-    text: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub fn git_resolve(path: String, text: String, state: State<'_, AppState>) -> Result<(), String> {
     // The merged text is a ledger edit like any other: the loader must accept it
     // (and a refusal must put the bytes back), and only then does git stage it.
     let file = ledger_path(&state, &path)?;
@@ -1329,14 +1537,16 @@ pub fn git_resolve(
 #[tauri::command]
 #[specta::specta]
 pub fn git_merge_continue(state: State<'_, AppState>) -> Result<(), String> {
-    crate::git_ops::merge_continue(&ledger_dir(&state)?)
+    crate::git_ops::merge_continue(&ledger_dir(&state)?)?;
+    note_rewritten_files(&state)
 }
 
 /// Abandon a merge, restoring the branch and working tree.
 #[tauri::command]
 #[specta::specta]
 pub fn git_merge_abort(state: State<'_, AppState>) -> Result<(), String> {
-    crate::git_ops::merge_abort(&ledger_dir(&state)?)
+    crate::git_ops::merge_abort(&ledger_dir(&state)?)?;
+    note_rewritten_files(&state)
 }
 
 /// Undo one commit as a new commit (history stays append-only).
@@ -1351,7 +1561,17 @@ pub fn git_revert_commit(id: String, state: State<'_, AppState>) -> Result<Strin
 /// loaded. Empty when nothing moved or when the ledger is not in a synced folder.
 #[tauri::command]
 #[specta::specta]
-pub fn sync_changes(state: State<'_, AppState>) -> Result<Vec<crate::sync::ExternalChange>, String> {
+pub fn sync_changes(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::sync::ExternalChange>, String> {
+    // In a SAF tree the ledger's own paths are the private mirror, so comparing
+    // it against its log can only ever say "unchanged": the folder is the other
+    // side, and the reconciliation (`sync_ledger_tree`) reports what it found
+    // there. Running this anyway would report the app's own writes as external
+    // after a restore, on every revision bump.
+    if crate::storage::kind() == crate::storage::StorageKind::Tree {
+        return Ok(Vec::new());
+    }
     crate::sync::changed(&crate::sync::log_dir(&ledger_dir(&state)?))
 }
 
@@ -1433,6 +1653,8 @@ mod tests {
                 quick_add_suggestions,
                 storage_kind,
                 sync_ledger_tree,
+                reload_ledger_tree,
+                resolve_tree_conflicts,
                 index_provider_list,
                 index_series,
                 index_import,

@@ -27,6 +27,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import MessageList from "$lib/components/assistant/message-list.svelte";
 	import Composer from "$lib/components/assistant/composer.svelte";
 	import { assistant } from "$lib/assistant/store.svelte.js";
+	import { ledgerEpoch } from "$lib/ledger-revision.svelte.js";
 
 	let mobileList = $state(false);
 	let settingsOpen = $state(false);
@@ -38,6 +39,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			(assistant.settings !== null &&
 				(!assistant.settings.has_key || assistant.settings.model.trim() === ""))
 	);
+
+	$effect(() => {
+		// Another ledger is open: the conversation and the tool reads it drives
+		// would all point at the previous one, so start clean.
+		assistant.adoptLedger(ledgerEpoch.value);
+	});
 
 	onMount(() => {
 		void assistant.init();

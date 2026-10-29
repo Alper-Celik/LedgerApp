@@ -308,6 +308,26 @@ class LanguageServer {
 		});
 	}
 
+	/**
+	 * Forget the server: the journal it was started for is gone.
+	 *
+	 * `load_ledger` stops the backend session, and the next `lspStart` builds one
+	 * for the new journal — but the startup memo here would keep the client from
+	 * ever asking again, leaving the editor attached to a server that answers
+	 * nothing. Dropping the memo (and the documents that belonged to the old
+	 * server) is what lets the next attach start it.
+	 */
+	async shutdown(): Promise<void> {
+		for (const document of this.documents.values()) {
+			clearTimeout(document.timer);
+		}
+		this.documents.clear();
+		this.byUri.clear();
+		this.starting = null;
+		await this.unlisten?.();
+		this.unlisten = null;
+	}
+
 	private ensureStarted(): Promise<void> {
 		if (!this.starting) {
 			this.starting = this.start().catch((cause) => {
@@ -527,6 +547,16 @@ class LanguageServer {
 }
 
 let shared: LanguageServer | null = null;
+
+/**
+ * Another journal is open, so the language server session — and this client's
+ * memo of it — belong to a ledger that is no longer loaded.
+ */
+export function resetLanguageServer(): void {
+	const previous = shared;
+	shared = null;
+	void previous?.shutdown();
+}
 
 /**
  * Open a journal file — or a transaction fragment at a document key of its

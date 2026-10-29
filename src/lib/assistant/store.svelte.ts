@@ -250,6 +250,29 @@ export class Assistant {
 		}
 	}
 
+	/**
+	 * The ledger epoch this conversation belongs to.
+	 *
+	 * A conversation lives inside the ledger that created it, so opening another
+	 * ledger must not keep talking into the old id: the backend would create a
+	 * fresh file under the new ledger's sessions and the model's transcript would
+	 * describe a ledger whose files are no longer the ones being read.
+	 */
+	epoch = 0;
+
+	/**
+	 * Start over for a ledger that was just opened: forget the conversation, its
+	 * messages and the listing, then read the new ledger's sessions.
+	 */
+	adoptLedger(epoch: number): void {
+		if (epoch === this.epoch) return;
+		this.epoch = epoch;
+		this.newConversation();
+		this.sessions = [];
+		this.malformed = [];
+		void this.refreshSessions();
+	}
+
 	/** A blank conversation; the file is created by the first message. */
 	newConversation(): void {
 		this.activeId = "";

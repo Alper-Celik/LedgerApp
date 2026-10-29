@@ -279,7 +279,14 @@ export const commands = {
 	 *  a successful edit (and by the UI's explicit sync action); returns the paths
 	 *  that were written.
 	 */
-	syncLedgerTree: () => typedError<string[], string>(__TAURI_INVOKE("sync_ledger_tree")),
+	syncLedgerTree: () => typedError<SyncReport, string>(__TAURI_INVOKE("sync_ledger_tree")),
+	/**
+	 *  Android: pull the folder's versions into the mirror before the ledger is read
+	 *  again — what "Reload ledger" has to mean when the ledger is behind a tree.
+	 */
+	reloadLedgerTree: () => typedError<SyncReport, string>(__TAURI_INVOKE("reload_ledger_tree")),
+	/**  Android: settle every file the folder and the app both changed on one side. */
+	resolveTreeConflicts: (take: Resolve) => typedError<SyncReport, string>(__TAURI_INVOKE("resolve_tree_conflicts", { take })),
 	/**  Every index series this build knows how to build. */
 	indexProviderList: () => __TAURI_INVOKE<IndexProviderInfo[]>("index_provider_list"),
 	/**
@@ -1327,6 +1334,17 @@ export type Message = {
 	data: any | null,
 };
 
+/**
+ *  A file both sides changed: the mirror keeps its bytes and the tree is left
+ *  alone until they agree again (or the reader resolves it in the merge screen).
+ */
+export type MirrorConflict = {
+	/**  The `/`-separated path relative to the ledger folder. */
+	path: string,
+	/**  Why the two sides could not be reconciled in one direction. */
+	reason: string,
+};
+
 /**  One model the endpoint offers. */
 export type ModelInfo = {
 	/**  The id to put in [`AiConfig::with_model`]. */
@@ -1628,6 +1646,13 @@ export type Report = {
 	orphans: Orphan[],
 };
 
+/**  Which side a conflicted file is settled on. */
+export type Resolve = 
+/**  Keep the app's bytes and write them to the folder. */
+"mine" | 
+/**  Take the folder's bytes, discarding the app's version of that file. */
+"folder";
+
 /**  Who said a message. */
 export type Role = "user" | "assistant" | "tool";
 
@@ -1693,6 +1718,30 @@ export type SyncClient =
 "seafile" | 
 /**  iCloud Drive: `name 2.bean` — the lowest number a conflicted copy gets. */
 "icloud";
+
+/**  What one reconciliation did, per relative path. */
+export type SyncReport = {
+	/**
+	 *  Files whose tree version replaced the mirror's, because the app had not
+	 *  touched them.
+	 */
+	pulled: string[],
+	/**  Files the mirror's version replaced in the tree. */
+	pushed: string[],
+	/**
+	 *  Files the mirror no longer has and the tree did not touch, so the tree's
+	 *  copy was removed.
+	 */
+	removed: string[],
+	/**  Files changed on both sides: neither was written. */
+	conflicts: MirrorConflict[],
+	/**
+	 *  Files the folder changed while the app had them, which the app must not
+	 *  overwrite — the sync bar offers the reload the same way it does for a
+	 *  local ledger.
+	 */
+	external: string[],
+};
 
 /**
  *  A sheet or CSV as rows of strings. Rows may be shorter than `headers` when

@@ -26,7 +26,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { IsMobile } from "$lib/hooks/is-mobile.svelte.js";
 	import { isSubAccountOf } from "$lib/accounts.js";
 	import { EDITOR_SCOPES, editorScope, setEditorScope, type EditorScope } from "$lib/editor-scope.svelte.js";
-	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { bumpLedgerRevision, ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { signOf, sumDecimals, type Amount } from "$lib/money.js";
 	import { cn } from "$lib/utils.js";
 
@@ -264,6 +264,28 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * `draft` does, so neither editor depends on a directive's shape.
 	 */
 	let composing = $state(false);
+
+	/**
+	 * Anything with an id-bound draft is dropped when the ledger reloads.
+	 *
+	 * A reload renumbers transactions: ids are positions in the booked stream,
+	 * so inserting one entry shifts every later id and opening another journal
+	 * replaces them wholesale. A draft kept across either would save onto an
+	 * unrelated transaction — silently, since the id still exists. The two
+	 * signals differ only in who caused the reload: `ledgerEpoch` for a different
+	 * journal, `ledgerRevision` for any write (an assistant's proposal, a
+	 * commit, an undo). Both close what this component was holding; the user's
+	 * own save already closed it before bumping.
+	 */
+	$effect(() => {
+		void ledgerEpoch.value;
+		void ledgerRevision.value;
+		cancelEdit();
+		sourceEditing = null;
+		cancelCompose();
+		current = null;
+		closing = null;
+	});
 	let saving = $state(false);
 	/** The backend's or the loader's refusal, shown under the form. */
 	let composeError = $state("");

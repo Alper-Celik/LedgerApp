@@ -16,11 +16,29 @@ import { messageOf } from "./errors.js";
  */
 export const syncWatch = $state({
 	changes: [] as ExternalChange[],
+	/**
+	 * Files a SAF tree changed while the app had them: the app never overwrites
+	 * one, so they need the same reload an external change does.
+	 */
+	external: [] as string[],
+	/** Files changed on both sides, which a reload cannot settle. */
+	conflicts: [] as string[],
 	/** Why the last check failed, when it did. */
 	error: "",
 	/** A reload is in flight. */
 	reloading: false,
 });
+
+/** Take what a tree reconciliation reported, replacing the previous report. */
+export function noteTreeReport(report: {
+	external: string[];
+	conflicts: { path: string }[];
+	error?: string;
+}) {
+	syncWatch.external = report.external;
+	syncWatch.conflicts = report.conflicts.map((conflict) => conflict.path);
+	if (report.error !== undefined) syncWatch.error = report.error;
+}
 
 /** Re-read the watch list. Cheap: one command call, no ledger walk. */
 export async function refreshSyncWatch() {
@@ -42,4 +60,6 @@ export async function refreshSyncWatch() {
 /** Dismiss the bar until the next change. */
 export function dismissSyncWatch() {
 	syncWatch.changes = [];
+	syncWatch.external = [];
+	syncWatch.conflicts = [];
 }

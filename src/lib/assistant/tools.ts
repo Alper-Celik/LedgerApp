@@ -629,7 +629,19 @@ export async function applyProposal(proposal: Proposal): Promise<void> {
 		if (!proposal.entry) throw new Error("this proposal has no entry to write");
 		await unwrap(commands.addTransaction(proposal.entry));
 	} else {
-		if (proposal.after === null) throw new Error("this proposal has no text to write");
+		if (proposal.after === null || proposal.before === null) {
+			throw new Error("this proposal has no text to write");
+		}
+		// The proposal was staged against the file as it stood then. If anything
+		// has written it since — the register, the source editor, a reload — the
+		// model's text would silently replace that edit, so it is refused instead
+		// and the reader can ask again against the current text.
+		const current = await unwrap(commands.fileText(proposal.file));
+		if (current !== proposal.before) {
+			throw new Error(
+				`\`${proposal.file}\` changed since this was proposed; ask again so it is staged against the current text`
+			);
+		}
 		await unwrap(commands.updateFileText(proposal.file, proposal.after));
 	}
 	bumpLedgerRevision();

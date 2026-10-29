@@ -60,8 +60,12 @@ use serde::{Deserialize, Serialize};
 
 /// The log's own id, so a reader can tell which device wrote an operation.
 const DEVICE_FILE: &str = "device";
-/// The per-device last-seen hashes conflict detection starts from.
-const STATE_FILE: &str = "state.json";
+/// The per-device last-seen hashes conflict detection starts from. One file per
+/// device: the log is synced, and a whole-file rewrite by two devices would drop
+/// whichever section the other read first.
+const STATE_PREFIX: &str = "state-";
+/// The single file every device wrote before the split, still read as a fallback.
+const LEGACY_STATE_FILE: &str = "state.json";
 /// Pre- and post-images, named by their hash.
 const BLOB_DIR: &str = "blobs";
 /// Held while one process on this device appends or prunes. One per device:
@@ -111,11 +115,7 @@ pub struct Change {
 
 impl Change {
     /// A change with no hunks — what a whole-file write knows.
-    pub fn new(
-        path: impl Into<PathBuf>,
-        before: Option<&[u8]>,
-        after: Option<&[u8]>,
-    ) -> Self {
+    pub fn new(path: impl Into<PathBuf>, before: Option<&[u8]>, after: Option<&[u8]>) -> Self {
         Self {
             path: path.into(),
             before: before.map(|bytes| bytes.to_vec()),
@@ -183,8 +183,7 @@ impl Filter {
     /// matches to keep, not which operations match — so a reader can apply the
     /// filter while it reads and keep only the newest `limit` of the matches.
     fn accepts(&self, operation: &Operation) -> bool {
-        self.origin
-            .is_none_or(|origin| operation.origin == origin)
+        self.origin.is_none_or(|origin| operation.origin == origin)
             && self
                 .path
                 .as_ref()
@@ -403,14 +402,13 @@ pub fn revert_plan(root: &Path, id: &str) -> Result<Vec<RevertEntry>, String> {
 
     let mut entries = Vec::with_capacity(operation.ops.len());
     for file in &operation.ops {
+        // The path as this device spells it: another device recorded its own.
+        let path = local_path(root, &file.path).unwrap_or_else(|| file.path.clone());
         // The file must still be what this operation left behind.
         match file.after_hash.as_deref() {
             Some(expected) => {
-                let current = fs::read(&file.path).map_err(|error| {
-                    format!(
-                        "{} changed since operation {id}: {error}",
-                        file.path.display()
-                    )
+                let current = fs::read(&path).map_err(|error| {
+                    format!("{} changed since operation {id}: {error}", path.display())
                 })?;
                 if hash_of(&current) != expected {
                     return Err(format!(
@@ -420,11 +418,8 @@ pub fn revert_plan(root: &Path, id: &str) -> Result<Vec<RevertEntry>, String> {
                 }
             }
             None => {
-                if file.path.exists() {
-                    return Err(format!(
-                        "{} changed since operation {id}",
-                        file.path.display()
-                    ));
+                if path.exists() {
+                    return Err(format!("{} changed since operation {id}", path.display()));
                 }
             }
         }
@@ -449,10 +444,7 @@ pub fn revert_plan(root: &Path, id: &str) -> Result<Vec<RevertEntry>, String> {
             }
             None => None,
         };
-        entries.push(RevertEntry {
-            path: file.path.clone(),
-            before,
-        });
+        entries.push(RevertEntry { path, before });
     }
     Ok(entries)
 }
@@ -482,6 +474,17 @@ pub fn pre_image_for(root: &Path, path: &Path) -> Result<Option<Vec<u8>>, String
         .iter()
         .flat_map(|operation| &operation.ops)
         .find(|file| same_path(&file.path, path))
+        .or_else(|| {
+            // A peer recorded its own spelling; both name one file when their
+            // ledger-relative tails match.
+            operations
+                .iter()
+                .flat_map(|operation| &operation.ops)
+                .find(|file| match local_path(root, &file.path) {
+                    Some(local) => same_path(&local, path),
+                    None => false,
+                })
+        })
     else {
         return Ok(None);
     };
@@ -520,6 +523,36 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The ledger directory a log directory belongs to (`<ledger>/.ledger/log`).
+fn ledger_of(root: &Path) -> Option<&Path> {
+    root.parent()?.parent()
+}
+
+/// A recorded path as it names a file on *this* machine.
+///
+/// The log travels with the ledger, and it records paths as the writer named
+/// them: a phone records its install-private mirror, which no other device has.
+/// The ledger-relative tail of the path is the part every device shares, so it is
+/// resolved against this device's own ledger directory. An existing path is
+/// returned untouched.
+fn local_path(root: &Path, recorded: &Path) -> Option<PathBuf> {
+    if recorded.exists() {
+        return Some(recorded.to_path_buf());
+    }
+    let ledger = ledger_of(root)?;
+    let parts: Vec<_> = recorded.components().collect();
+    for start in 0..parts.len() {
+        let mut candidate = ledger.to_path_buf();
+        for part in &parts[start..] {
+            candidate.push(part.as_os_str());
+        }
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Delete the images past the limits, returning the bytes freed.
 ///
 /// The lines stay: an operation is a fact, and a peer that syncs tomorrow still
@@ -539,6 +572,11 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// this device is in the middle of writing or deletes an image a write that has
 /// not landed yet is about to name.
 pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
+    prune_after(root, retention, sync_grace())
+}
+
+/// A prune that leaves unreferenced images younger than `grace` alone.
+fn prune_after(root: &Path, retention: Retention, grace: Duration) -> Result<u64, String> {
     // Nothing to reclaim, and pruning should not create the log: the first
     // write owns that.
     if !root.exists() {
@@ -585,9 +623,7 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
     let mut kept_operations = 0;
     for (index, operation) in operations.iter().enumerate() {
         let must_keep = protected[index];
-        if !must_keep
-            && retention.max_operations > 0
-            && kept_operations >= retention.max_operations
+        if !must_keep && retention.max_operations > 0 && kept_operations >= retention.max_operations
         {
             continue;
         }
@@ -599,10 +635,7 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
                 added.push(hash.to_string());
             }
         }
-        if !must_keep
-            && retention.max_bytes > 0
-            && kept_bytes + added_bytes > retention.max_bytes
-        {
+        if !must_keep && retention.max_bytes > 0 && kept_bytes + added_bytes > retention.max_bytes {
             continue;
         }
         referenced.extend(added);
@@ -633,10 +666,23 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
         if !kind.is_file() {
             continue;
         }
-        let size = entry
+        // An image whose operation has not arrived yet is indistinguishable from
+        // garbage: a sync client may deliver the blobs before the lines that
+        // name them, so an image younger than a round trip is left for a later
+        // prune rather than deleted under the peer's feet. The ceilings are
+        // approximate; the peer's pre-image is not.
+        let metadata = entry
             .metadata()
-            .map_err(|error| format!("{}: {error}", entry.path().display()))?
-            .len();
+            .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+        if metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < grace)
+        {
+            continue;
+        }
+        let size = metadata.len();
         fs::remove_file(entry.path())
             .map_err(|error| format!("{}: {error}", entry.path().display()))?;
         freed += size;
@@ -757,7 +803,10 @@ pub fn device_id(root: &Path) -> Result<String, String> {
             Err(error) => return Err(format!("{}: {error}", path.display())),
         }
     }
-    Err(format!("{}: could not read or create a device id", path.display()))
+    Err(format!(
+        "{}: could not read or create a device id",
+        path.display()
+    ))
 }
 
 /// What this device last saw for each path: the hash of the version, or `None`
@@ -769,7 +818,7 @@ pub fn device_id(root: &Path) -> Result<String, String> {
 /// are the record.
 pub fn last_seen(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let device = device_id(root)?;
-    let state = read_state(root);
+    let state = read_state(root, &device);
     Ok(state
         .devices
         .get(&device)
@@ -786,7 +835,9 @@ pub fn last_seen(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> 
 /// One operation, by id, from whichever device's log holds it.
 fn find(root: &Path, id: &str) -> Result<Operation, String> {
     let (operations, _issues, _torn) = read_operations(root, None)?;
-    let mut matches = operations.into_iter().filter(|operation| operation.id == id);
+    let mut matches = operations
+        .into_iter()
+        .filter(|operation| operation.id == id);
     let Some(operation) = matches.next() else {
         return Err(format!("no operation {id} under {}", root.display()));
     };
@@ -845,9 +896,9 @@ fn read_operations(
                         // A full selection: the newcomer takes the oldest
                         // slot only when it is newer than what holds it.
                         Some(limit) if newest.len() >= limit => {
-                            let newer = newest
-                                .peek()
-                                .is_some_and(|oldest| compare_newest_first(&operation, &oldest.0).is_lt());
+                            let newer = newest.peek().is_some_and(|oldest| {
+                                compare_newest_first(&operation, &oldest.0).is_lt()
+                            });
                             if newer {
                                 newest.pop();
                                 newest.push(Oldest(operation));
@@ -858,11 +909,7 @@ fn read_operations(
                     }
                 }
                 Err(error) => {
-                    issues.push(format!(
-                        "skipped {}:{}: {error}",
-                        path.display(),
-                        index + 1
-                    ));
+                    issues.push(format!("skipped {}:{}: {error}", path.display(), index + 1));
                     torn.push(line.to_vec());
                 }
             }
@@ -885,7 +932,11 @@ fn log_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| format!("{}: {error}", root.display()))?;
-        if entry.path().extension().is_none_or(|extension| extension != "jsonl") {
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -918,8 +969,7 @@ fn sort_newest_first(operations: &mut [Operation]) {
 /// sorts by, shared so a bounded selection and the final list cannot disagree
 /// about which operation is the newest.
 fn compare_newest_first(a: &Operation, b: &Operation) -> Ordering {
-    b.at
-        .cmp(&a.at)
+    b.at.cmp(&a.at)
         .then_with(|| b.id.cmp(&a.id))
         .then_with(|| b.device.cmp(&a.device))
 }
@@ -1068,10 +1118,22 @@ struct Seen {
     at: String,
 }
 
-/// Read `state.json`, or an empty state when it is missing or unreadable — it
-/// is a cache, and a stale or lost one costs a conflict report, not data.
-fn read_state(root: &Path) -> State {
-    fs::read_to_string(root.join(STATE_FILE))
+/// This device's state file.
+fn state_file(root: &Path, device: &str) -> PathBuf {
+    let short: String = device.chars().take(12).collect();
+    root.join(format!("{STATE_PREFIX}{short}.json"))
+}
+
+/// Read this device's state, or an empty one when it is missing or unreadable —
+/// it is a cache, and a stale or lost one costs a conflict report, not data.
+///
+/// A device that has not written since the split still reads the single file all
+/// devices used to share; anything it writes goes to its own file, so a peer's
+/// writes can never be dropped by this device's rename.
+fn read_state(root: &Path, device: &str) -> State {
+    let own = fs::read_to_string(state_file(root, device));
+    let legacy = fs::read_to_string(root.join(LEGACY_STATE_FILE));
+    own.or(legacy)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
@@ -1079,7 +1141,7 @@ fn read_state(root: &Path) -> State {
 
 /// Record in `state.json` what this operation left each path at.
 fn remember(root: &Path, operation: &Operation) -> Result<(), String> {
-    let mut state = read_state(root);
+    let mut state = read_state(root, &operation.device);
     let device = state.devices.entry(operation.device.clone()).or_default();
     for file in &operation.ops {
         device.paths.insert(
@@ -1091,12 +1153,45 @@ fn remember(root: &Path, operation: &Operation) -> Result<(), String> {
             },
         );
     }
+    write_state(root, &operation.device, &state)
+}
 
-    // Rewritten whole, under the lock the append already holds, and swapped in
-    // by rename so a peer syncing mid-write never copies half a state file.
-    let path = root.join(STATE_FILE);
-    let temp = root.join(format!(".{STATE_FILE}.{:04x}", next_id_part()));
-    let mut json = serde_json::to_vec_pretty(&state).map_err(|error| format!("state: {error}"))?;
+/// Record what `paths` hold now, without inventing an operation.
+///
+/// A branch switch, a merge finished or a revert rewrites the working tree
+/// through git2, which the operation log does not see. `sync::changed` compares
+/// the disk against what this device last saw, so without this the app's own
+/// write is reported as "changed in this folder outside the app" — and stays
+/// reported until something else rewrites the file.
+pub fn note_seen(root: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let device = device_id(root)?;
+    let _lock = Lock::acquire(root, &device)?;
+    let mut state = read_state(root, &device);
+    let (at, _) = timestamp_parts(SystemTime::now());
+    let known = state.devices.entry(device.clone()).or_default();
+    for path in paths {
+        let hash = fs::read(path).ok().map(|bytes| crate::sync::hash(&bytes));
+        known.paths.insert(
+            path.to_string_lossy().into_owned(),
+            Seen {
+                hash,
+                device: device.clone(),
+                at: at.clone(),
+            },
+        );
+    }
+    write_state(root, &device, &state)
+}
+
+/// Swap `state.json` in whole: a temp file and a rename, so a peer syncing
+/// mid-write never copies half a state file.
+fn write_state(root: &Path, device: &str, state: &State) -> Result<(), String> {
+    let path = state_file(root, device);
+    let temp = root.join(format!(".{STATE_PREFIX}{:04x}.json", next_id_part()));
+    let mut json = serde_json::to_vec_pretty(state).map_err(|error| format!("state: {error}"))?;
     json.push(b'\n');
     fs::write(&temp, json).map_err(|error| format!("{}: {error}", temp.display()))?;
     if let Err(error) = fs::rename(&temp, &path) {
@@ -1109,12 +1204,12 @@ fn remember(root: &Path, operation: &Operation) -> Result<(), String> {
 /// Held for one append. A file rather than an advisory lock: a file survives
 /// being synced, copied, and inspected, and `O_EXCL` is the one primitive every
 /// platform this app runs on agrees on.
-struct Lock {
+pub(crate) struct Lock {
     path: PathBuf,
 }
 
 impl Lock {
-    fn acquire(root: &Path, device: &str) -> Result<Self, String> {
+    pub(crate) fn acquire(root: &Path, device: &str) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|error| format!("{}: {error}", root.display()))?;
         let path = lock_path(root, device);
         let deadline = Instant::now() + LOCK_WAIT;
@@ -1144,9 +1239,39 @@ impl Lock {
     }
 }
 
+impl Lock {
+    /// The lock a directory's whole-file store (the index series) is written
+    /// under.
+    ///
+    /// Unlike the log's, this one is shared by every process that can reach the
+    /// directory — the app and the CLI — because they resolve the same config
+    /// directory and a read-modify-write of a shared file is exactly what the
+    /// lock exists for.
+    pub(crate) fn for_store(dir: &Path) -> Result<Self, String> {
+        Self::acquire(dir, "indexes")
+    }
+}
+
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// How long an unreferenced image is left alone: long enough for a sync client
+/// to deliver the line that names it after the image itself.
+const SYNC_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The grace a prune in this build applies. Tests run without it, because it is
+/// about how a folder syncs, and one test drives it explicitly.
+fn sync_grace() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::ZERO
+    }
+    #[cfg(not(test))]
+    {
+        SYNC_GRACE
     }
 }
 
@@ -1282,13 +1407,12 @@ mod tests {
         let path = ledger_file(&dir, "main.bean", "before\n");
         let root = log_of(&dir);
 
-        let change = Change::new(path.clone(), Some(b"before\n"), Some(b"after\n")).with_hunks(
-            vec![Hunk {
+        let change =
+            Change::new(path.clone(), Some(b"before\n"), Some(b"after\n")).with_hunks(vec![Hunk {
                 at: "9f2c".to_string(),
                 removed: 1,
                 added: 1,
-            }],
-        );
+            }]);
         let operation = record(&root, Origin::Ai, "assistant edit", &[change]).unwrap();
 
         // The id is `YYYY-MM-DDTHH-MM-SSZ-<device4>-<part4>`.
@@ -1297,7 +1421,11 @@ mod tests {
         assert_eq!(&stem[4..5], "-", "id: {}", operation.id);
         assert_eq!(&stem[10..11], "T", "id: {}", operation.id);
         assert_eq!(&stem[19..20], "Z", "id: {}", operation.id);
-        assert!(operation.at.starts_with(&stem[..10]), "at: {}", operation.at);
+        assert!(
+            operation.at.starts_with(&stem[..10]),
+            "at: {}",
+            operation.at
+        );
         assert!(operation.at.ends_with('Z'), "at: {}", operation.at);
         assert_eq!(operation.device.len(), 16);
         assert_eq!(&operation.id[21..25], &operation.device[..4]);
@@ -1320,11 +1448,20 @@ mod tests {
 
         // Both images are in the blob store, under their own hashes.
         let blobs = root.join(BLOB_DIR);
-        assert_eq!(fs::read(blobs.join(hash_of(b"before\n"))).unwrap(), b"before\n");
-        assert_eq!(fs::read(blobs.join(hash_of(b"after\n"))).unwrap(), b"after\n");
+        assert_eq!(
+            fs::read(blobs.join(hash_of(b"before\n"))).unwrap(),
+            b"before\n"
+        );
+        assert_eq!(
+            fs::read(blobs.join(hash_of(b"after\n"))).unwrap(),
+            b"after\n"
+        );
 
         // The device id is on disk, and stable.
-        assert_eq!(fs::read_to_string(root.join(DEVICE_FILE)).unwrap().trim(), operation.device);
+        assert_eq!(
+            fs::read_to_string(root.join(DEVICE_FILE)).unwrap().trim(),
+            operation.device
+        );
         assert_eq!(device_id(&root).unwrap(), operation.device);
 
         // What we last saw is in the state file, for conflict detection.
@@ -1378,11 +1515,7 @@ mod tests {
         let ids: Vec<&str> = all.iter().map(|operation| operation.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                third.id.as_str(),
-                second.id.as_str(),
-                first.id.as_str()
-            ]
+            vec![third.id.as_str(), second.id.as_str(), first.id.as_str()]
         );
 
         let ai = list(
@@ -1478,7 +1611,11 @@ mod tests {
             &root,
             Origin::Ai,
             "assistant edit",
-            &[Change::new(path.clone(), Some(b"first\n"), Some(b"second\n"))],
+            &[Change::new(
+                path.clone(),
+                Some(b"first\n"),
+                Some(b"second\n"),
+            )],
         )
         .unwrap();
         fs::write(&path, b"second\n").unwrap();
@@ -1818,14 +1955,9 @@ mod tests {
         let mut previous = String::from("v0\n");
         let mut versions = vec![previous.clone()];
         let mut ids = Vec::new();
-        for (index, origin) in [
-            Origin::User,
-            Origin::Ai,
-            Origin::User,
-            Origin::User,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, origin) in [Origin::User, Origin::Ai, Origin::User, Origin::User]
+            .into_iter()
+            .enumerate()
         {
             std::thread::sleep(Duration::from_millis(2));
             let after = format!("v{}\n", index + 1);
@@ -1891,7 +2023,11 @@ mod tests {
             &root,
             Origin::User,
             "write",
-            &[Change::new(path.clone(), Some(b"good\n"), Some(b"better\n"))],
+            &[Change::new(
+                path.clone(),
+                Some(b"good\n"),
+                Some(b"better\n"),
+            )],
         )
         .unwrap();
 
@@ -1922,7 +2058,11 @@ mod tests {
             &root,
             Origin::Ai,
             "after the tear",
-            &[Change::new(path.clone(), Some(b"better\n"), Some(b"best\n"))],
+            &[Change::new(
+                path.clone(),
+                Some(b"better\n"),
+                Some(b"best\n"),
+            )],
         )
         .unwrap();
         let (listed, issues) = list_with_issues(&root, Filter::default()).unwrap();
@@ -2025,7 +2165,12 @@ mod tests {
         // A fresh lock is live, so the append waits rather than breaking it.
         assert!(receiver.recv_timeout(Duration::from_millis(150)).is_err());
         fs::remove_file(&lock).unwrap();
-        assert!(receiver.recv_timeout(Duration::from_secs(10)).unwrap().is_ok());
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+                .is_ok()
+        );
         handle.join().unwrap();
         assert_eq!(list(&root, Filter::default()).unwrap().len(), 1);
     }
@@ -2168,7 +2313,11 @@ mod tests {
             &root,
             Origin::User,
             "here",
-            &[Change::new(path.clone(), Some(b"ours\n"), Some(b"ours 2\n"))],
+            &[Change::new(
+                path.clone(),
+                Some(b"ours\n"),
+                Some(b"ours 2\n"),
+            )],
         )
         .unwrap();
 
@@ -2204,7 +2353,11 @@ mod tests {
         assert_eq!(listed.len(), 2);
         // Both list, from their own files, and the ids stay apart.
         assert_ne!(listed[0].id, listed[1].id);
-        assert!(listed.iter().any(|operation| operation.device == peer.device));
+        assert!(
+            listed
+                .iter()
+                .any(|operation| operation.device == peer.device)
+        );
         assert_eq!(
             revert(&root, &peer.id).unwrap(),
             vec![(path, b"ours 2\n".to_vec())]
@@ -2293,8 +2446,7 @@ mod tests {
 
     #[test]
     fn timestamp_and_id_parts() {
-        let (at, stem) =
-            timestamp_parts(UNIX_EPOCH + std::time::Duration::new(1_771_000_000, 1));
+        let (at, stem) = timestamp_parts(UNIX_EPOCH + std::time::Duration::new(1_771_000_000, 1));
         assert_eq!(stem, "2026-02-13T16-26-40Z");
         assert_eq!(at, "2026-02-13T16:26:40.000000001Z");
         assert_eq!(date_of(0), (1970, 1, 1));
@@ -2411,11 +2563,7 @@ mod tests {
             &root,
             Origin::User,
             "write",
-            &[Change::new(
-                first.clone(),
-                Some(b"a250\n"),
-                Some(b"a251\n"),
-            )],
+            &[Change::new(first.clone(), Some(b"a250\n"), Some(b"a251\n"))],
         )
         .unwrap();
         assert_eq!(list(&root, Filter::default()).unwrap().len(), 251);

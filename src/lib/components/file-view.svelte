@@ -10,7 +10,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import AccountRegister from "$lib/components/account-register.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
 	import GitStatus from "$lib/components/git-status.svelte";
-	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
+	import { ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
 
 	/** How the open file is shown: its transactions, or its text. */
 	type FileMode = "transactions" | "text";
@@ -114,10 +114,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			One editor per file: a different file is a different text, so the editor
 			is rebuilt for it. It is opened by path, so the file itself is what is
 			edited — no entry of it is — and a file that writes no transactions is
-			still text. A file rewritten elsewhere is caught by the editor's own
-			save, which refuses text written against a stale copy.
+			still text. The editor is rebuilt whenever the ledger is reloaded or
+			anything writes it, because its buffer is text the file no longer
+			holds: saving it afterwards would put it back.
 		-->
-		{#key path}
+		{#key `${path}:${ledgerEpoch.value}:${ledgerRevision.value}`}
 			<div class={mode === "text" ? "" : "hidden"}>
 				<SourceEditor
 					file={path}

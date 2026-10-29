@@ -23,11 +23,20 @@ pub(crate) struct Root {
 
 impl Root {
     /// The canonical form of `path`, which must be an existing directory.
+    ///
+    /// A ledger opened as a bare file name (`main.bean`, the default) resolves to
+    /// no directory at all; that means the process's working directory, which is
+    /// where the loader looked for it in the first place.
     pub(crate) fn new(path: &Path) -> Result<Self, String> {
-        let canonical = fs::canonicalize(path).map_err(|error| {
+        let directory = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
+        let canonical = fs::canonicalize(directory).map_err(|error| {
             format!(
                 "the ledger directory {} is not readable: {error}",
-                path.display()
+                directory.display()
             )
         })?;
         if !canonical.is_dir() {
@@ -98,7 +107,10 @@ impl Root {
                     .parent()
                     .ok_or_else(|| format!("`{given}` does not name a file"))?;
                 let canonical_parent = fs::canonicalize(parent).map_err(|_| {
-                    format!("no such directory: {}", display_relative(&self.canonical, parent))
+                    format!(
+                        "no such directory: {}",
+                        display_relative(&self.canonical, parent)
+                    )
                 })?;
                 if !canonical_parent.starts_with(&self.canonical) {
                     return Err(format!(
@@ -186,10 +198,16 @@ mod tests {
         let inside = scratch();
         let outside = scratch();
         fs::write(outside.path().join("secret.bean"), "secret\n").unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret.bean"), inside.path().join("link.bean"))
-            .unwrap();
-        std::os::unix::fs::symlink(&outside.path().join("missing.bean"), inside.path().join("dangling.bean"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.bean"),
+            inside.path().join("link.bean"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            &outside.path().join("missing.bean"),
+            inside.path().join("dangling.bean"),
+        )
+        .unwrap();
 
         let root = Root::new(inside.path()).unwrap();
         let error = root.resolve("link.bean").unwrap_err();
@@ -204,7 +222,10 @@ mod tests {
     fn displays_relative_paths() {
         let dir = scratch();
         let root = Root::new(dir.path()).unwrap();
-        assert_eq!(display_relative(root.path(), &root.path().join("a/b.bean")), "a/b.bean");
+        assert_eq!(
+            display_relative(root.path(), &root.path().join("a/b.bean")),
+            "a/b.bean"
+        );
         assert_eq!(display_relative(root.path(), root.path()), ".");
     }
 }
