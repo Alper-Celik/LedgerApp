@@ -2,12 +2,20 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { invoke } from "@tauri-apps/api/core";
 import type { AccountBalance, TransactionView } from "../bindings";
 
 /**
  * The quick-add sheet's two pieces of thinking, kept out of the component so
  * both can be read on their own: the keypad's decimal accumulator, and the
  * guesses the sheet opens with.
+ *
+ * The guesses are the backend's: `quick_add_suggestions` counts the recent
+ * categories, payees and the last account pair over the ledger it already has
+ * loaded, so opening the sheet no longer ships the whole register to the
+ * webview. [`suggestions`] remains as the fallback for a build whose command
+ * refuses or is missing — same shape, same ranking, read from a register the
+ * caller fetched itself.
  *
  * Money never becomes a `number` here. The keypad collects the characters the
  * user pressed and the sign is glued on at the end, so the figure reaches the
@@ -50,6 +58,63 @@ export type QuickAddSuggestions = {
 
 /** One keypad press: a digit, the decimal point, or a backspace. */
 export type QuickAddKey = string;
+
+/**
+ * What `quick_add_suggestions` answers: the pair the ledger posted last, and
+ * the category and free-text names it sees most in the window.
+ *
+ * The pair arrives as two strings — the posting order is the ledger's — and
+ * `null` when no entry has both legs yet.
+ */
+export type QuickAddAnswer = {
+	last_pair: [string, string] | null;
+	categories: string[];
+	payees: string[];
+};
+
+/**
+ * The sheet's presets from the backend's answer.
+ *
+ * A remembered account this ledger no longer has is dropped rather than
+ * preselected: `from` falls back to the usual funding account and `to` to the
+ * most used category, exactly as [`suggestions`] would have answered. The
+ * lists keep the backend's order, capped at [`MAX_SUGGESTIONS`].
+ */
+export function fromAnswer(
+	answer: QuickAddAnswer,
+	accounts: AccountBalance[]
+): QuickAddSuggestions {
+	const known = new Set(accounts.map((account) => account.name));
+	const pair = answer.last_pair;
+	const from = pair && known.has(pair[0]) ? pair[0] : "";
+	const to = pair && known.has(pair[1]) ? pair[1] : "";
+	// A closed account is not a choice: the To picker only lists open ones, and
+	// preselecting something it cannot show would leave the field empty-looking.
+	const categories = answer.categories
+		.filter((name) => known.has(name))
+		.slice(0, MAX_SUGGESTIONS);
+	return {
+		from: from !== "" ? from : firstFundingAccount(accounts),
+		to: to !== "" ? to : (categories[0] ?? ""),
+		payees: answer.payees.slice(0, MAX_SUGGESTIONS),
+		categories,
+	};
+}
+
+/**
+ * The backend's suggestions over the last [`RECENT_DAYS`] days.
+ *
+ * `quick_add_suggestions` is not in `src/bindings.ts` yet — the command layer
+ * that registers it is being added separately — so the call goes through
+ * `invoke` by its Tauri name, the way `src/lib/assistant/api.ts` already calls
+ * the `ai_*` commands; the argument is spelled as Tauri's camelCasing expects
+ * it, so this wrapper keeps working when the command is generated. A refusal
+ * (an older backend, no ledger open) rejects, and the caller decides whether
+ * the register fallback applies.
+ */
+export function requestSuggestions(days: number = RECENT_DAYS): Promise<QuickAddAnswer> {
+	return invoke<QuickAddAnswer>("quick_add_suggestions", { days });
+}
 
 /**
  * The keypad after one press. Digits accumulate; a second decimal point is
@@ -95,11 +160,13 @@ export function todayIso(): string {
 }
 
 /**
- * The presets and lists the sheet opens with, derived from the transactions the
- * register already has.
+ * The presets and lists when `quick_add_suggestions` cannot answer, derived
+ * from a register the caller fetched itself.
  *
- * One pass over `transactions`, no sorting of the ledger itself, so a book with
- * tens of thousands of entries costs the same kind of walk as the register:
+ * The sheet prefers the backend's answer ([`fromAnswer`]) and only walks the
+ * ledger here when that command refuses or is missing. One pass over
+ * `transactions`, no sorting of the ledger itself, so a book with tens of
+ * thousands of entries costs the same kind of walk as the register:
  *
  * - **The pair**: the transaction with the greatest date — ties broken by
  *   `TransactionView.id`, the ledger stream position, so the answer never

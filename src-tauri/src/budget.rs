@@ -94,39 +94,35 @@ struct BudgetGroupTotals {
     balance: Decimal,
 }
 
-/// One month of the ledger's envelope budget.
+/// The ledger's envelope postings, summed in one walk and narrowed to the
+/// commodity the payload reports in.
 ///
-/// The plugin (`plugins/rustledger-envelope`) is the only writer of the
-/// `Equity:Envelope:` namespace and the owner of its arithmetic. For every
-/// budget month it emits one entry per step — the backing contra
-/// (`Equity:Envelope:Money` against `To-Be-Budgeted`), the inherited funding,
-/// the month's mirrored activity, the `adjust`/`zero`/`pad` reconciliation and
-/// the rollover sweep — each dated the month's last day, tagged `#envelope` and
-/// carrying `envelope-kind`/`envelope-month` metadata (see its `emit.rs`). Every
-/// posting stays inside the namespace, so the budget is one prefix away from the
-/// rest of the app.
+/// A month used to be read straight off the ledger, which made the range screen
+/// — six months plus its probe — clone the ledger and re-add every posting once
+/// per month. Collecting first makes a window cost the same one walk a single
+/// month costs; [`EnvelopeFlows::render`] then draws any number of months from
+/// these totals.
+struct EnvelopeFlows {
+    /// The commodity every figure is in: [`budget_currency`]'s pick.
+    currency: String,
+    /// Every month the plugin wrote in that commodity, oldest first.
+    months: BTreeSet<String>,
+    /// An account's months' flows, in month order: its balance at a month is
+    /// the running sum of them.
+    accounts: BTreeMap<String, BTreeMap<String, EnvelopeFlow>>,
+}
+
+/// Every posting inside the envelope namespace, summed per account, month and
+/// commodity, then narrowed to the commodity the payload reports in.
 ///
-/// This is the one surface that *reads* those accounts instead of hiding them
-/// (see [`is_envelope_account`]): a month's flows are the postings dated inside
-/// it, an envelope's balance is every posting up to and including the requested
-/// month — the same subtree total the plugin's month-end assertions measure —
-/// and the pool's balance is the screen's `to_budget`.
+/// The per-commodity sums survive the narrowing because the reported commodity
+/// — the ledger's operating currency when the plugin budgeted in it, else the
+/// one the most money moved in — is only knowable once the walk is done.
 ///
-/// `envelope-kind` decides what a posting is: activity is spending, funding,
-/// adjustments and the sweep are everything else. Without the metadata — a
-/// hand-written entry in the namespace — the posting's sign decides, which is
-/// what the plugin's own funding/activity postings imply (money leaving an
-/// envelope is spending).
-///
-/// `month` is a `YYYY-MM` label; `None` is the newest month with data, and a
-/// month outside the data (a gap, or before the first month) reports what stood
-/// at its end: the carries, with nothing moved in it.
-pub(crate) fn budget_month(ledger: &Ledger, month: Option<&str>) -> Result<BudgetMonth, String> {
-    if let Some(text) = month
-        && !is_month_label(text)
-    {
-        return Err(format!("`{text}` is not a budget month in YYYY-MM form"));
-    }
+/// The only failure is [`NO_ENVELOPE_BUDGET`]. A currency is picked only from
+/// the per-commodity totals, and each of those comes from a posting that also
+/// wrote a flow, so a collected set always has at least one month.
+fn collect_envelope_flows(ledger: &Ledger) -> Result<EnvelopeFlows, String> {
     // Every posting inside the namespace, summed per account, month and
     // commodity. The per-commodity totals pick the one to report in: the plugin
     // tracks each commodity separately, and the budget screen shows one.
@@ -178,94 +174,158 @@ pub(crate) fn budget_month(ledger: &Ledger, month: Option<&str>) -> Result<Budge
     let Some(currency) = budget_currency(&held, &ledger.options.operating_currency) else {
         return Err(NO_ENVELOPE_BUDGET.to_string());
     };
-
-    // The reported month's figures. Each account's months come in order, so a
-    // month past the requested one ends its history.
-    let mut months: BTreeSet<String> = BTreeSet::new();
-    let mut histories: BTreeMap<String, Vec<(String, EnvelopeFlow)>> = BTreeMap::new();
+    // Narrow to the reported commodity once, so a render walks one account's
+    // months without stepping over the commodities the screen never shows. Each
+    // account's months stay in order, so a month past the requested one ends
+    // its history.
+    let mut months = BTreeSet::new();
+    let mut accounts: BTreeMap<String, BTreeMap<String, EnvelopeFlow>> = BTreeMap::new();
     for ((account, entry_month, commodity), flow) in flows {
         if commodity != currency {
             continue;
         }
         months.insert(entry_month.clone());
-        histories
-            .entry(account)
-            .or_default()
-            .push((entry_month, flow));
+        accounts.entry(account).or_default().insert(entry_month, flow);
     }
-    let Some(newest) = months.iter().next_back() else {
-        return Err(NO_ENVELOPE_BUDGET.to_string());
-    };
-    let requested = month.unwrap_or(newest).to_owned();
-
-    let mut groups: BTreeMap<String, BudgetGroupTotals> = BTreeMap::new();
-    let mut to_budget = Decimal::ZERO;
-    for (account, history) in histories {
-        // `Equity:Envelope:<path>`; the namespace itself holds nothing.
-        let Some(path) = account
-            .strip_prefix(ENVELOPE_NAMESPACE)
-            .and_then(|tail| tail.strip_prefix(':'))
-        else {
-            continue;
-        };
-        let mut budgeted = Decimal::ZERO;
-        let mut spent = Decimal::ZERO;
-        let mut balance = Decimal::ZERO;
-        let mut exists = false;
-        for (entry_month, flow) in history {
-            if entry_month.as_str() > requested.as_str() {
-                break;
-            }
-            exists = true;
-            if entry_month == requested {
-                budgeted = flow.budgeted;
-                spent = flow.spent;
-            }
-            balance += flow.budgeted - flow.spent;
-        }
-        if account == ENVELOPE_POOL {
-            to_budget = balance;
-            continue;
-        }
-        // The contra of the on-budget money is not an envelope; a group for it
-        // would read as a category holding the user's whole bank balance.
-        if !exists || account == ENVELOPE_MONEY {
-            continue;
-        }
-        let (group_name, name) = match path.split_once(':') {
-            Some((group_name, name)) => (group_name.to_owned(), name.to_owned()),
-            None => (path.to_owned(), path.to_owned()),
-        };
-        let envelope = BudgetEnvelope {
-            name,
-            full_name: account,
-            budgeted: budgeted.to_string(),
-            spent: spent.to_string(),
-            balance: balance.to_string(),
-        };
-        let group = groups.entry(group_name).or_default();
-        group.budgeted += budgeted;
-        group.spent += spent;
-        group.balance += balance;
-        group.envelopes.push(envelope);
-    }
-    let groups: Vec<BudgetGroup> = groups
-        .into_iter()
-        .map(|(name, totals)| BudgetGroup {
-            name,
-            budgeted: totals.budgeted.to_string(),
-            spent: totals.spent.to_string(),
-            balance: totals.balance.to_string(),
-            envelopes: totals.envelopes,
-        })
-        .collect();
-    Ok(BudgetMonth {
-        month: requested,
-        months: months.into_iter().collect(),
-        groups,
-        to_budget: to_budget.to_string(),
+    // The currency came from a commodity total, and a commodity total only
+    // exists because a posting wrote a flow: the narrowed set has a month.
+    debug_assert!(!months.is_empty());
+    Ok(EnvelopeFlows {
         currency,
+        months,
+        accounts,
     })
+}
+
+impl EnvelopeFlows {
+    /// One month of the ledger's envelope budget, drawn from the collected
+    /// flows.
+    ///
+    /// The plugin (`plugins/rustledger-envelope`) is the only writer of the
+    /// `Equity:Envelope:` namespace and the owner of its arithmetic. For every
+    /// budget month it emits one entry per step — the backing contra
+    /// (`Equity:Envelope:Money` against `To-Be-Budgeted`), the inherited
+    /// funding, the month's mirrored activity, the
+    /// `adjust`/`zero`/`pad` reconciliation and the rollover sweep — each dated
+    /// the month's last day, tagged `#envelope` and carrying
+    /// `envelope-kind`/`envelope-month` metadata (see its `emit.rs`). Every
+    /// posting stays inside the namespace, so the budget is one prefix away
+    /// from the rest of the app.
+    ///
+    /// This is the one surface that *reads* those accounts instead of hiding
+    /// them (see [`is_envelope_account`]): a month's flows are the postings
+    /// dated inside it, an envelope's balance is every posting up to and
+    /// including the requested month — the same subtree total the plugin's
+    /// month-end assertions measure — and the pool's balance is the screen's
+    /// `to_budget`.
+    ///
+    /// `envelope-kind` decides what a posting is: activity is spending, funding,
+    /// adjustments and the sweep are everything else. Without the metadata — a
+    /// hand-written entry in the namespace — the posting's sign decides, which is
+    /// what the plugin's own funding/activity postings imply (money leaving an
+    /// envelope is spending).
+    ///
+    /// `month` is a `YYYY-MM` label the caller has validated, or `None` for the
+    /// newest month with data; a month outside the data (a gap, or before the
+    /// first month) reports what stood at its end: the carries, with nothing
+    /// moved in it.
+    fn render(&self, month: Option<&str>) -> BudgetMonth {
+        // `collect_envelope_flows` answers nothing when the namespace is empty,
+        // so a collected set always names its newest month; the fallback keeps
+        // the renderer total instead of panicking on a broken invariant.
+        let requested = month.map(str::to_owned).unwrap_or_else(|| {
+            self.months
+                .iter()
+                .next_back()
+                .cloned()
+                .unwrap_or_default()
+        });
+
+        let mut groups: BTreeMap<String, BudgetGroupTotals> = BTreeMap::new();
+        let mut to_budget = Decimal::ZERO;
+        for (account, history) in &self.accounts {
+            // `Equity:Envelope:<path>`; the namespace itself holds nothing.
+            let Some(path) = account
+                .strip_prefix(ENVELOPE_NAMESPACE)
+                .and_then(|tail| tail.strip_prefix(':'))
+            else {
+                continue;
+            };
+            let mut budgeted = Decimal::ZERO;
+            let mut spent = Decimal::ZERO;
+            let mut balance = Decimal::ZERO;
+            let mut exists = false;
+            for (entry_month, flow) in history {
+                if entry_month.as_str() > requested.as_str() {
+                    break;
+                }
+                exists = true;
+                if *entry_month == requested {
+                    budgeted = flow.budgeted;
+                    spent = flow.spent;
+                }
+                balance += flow.budgeted - flow.spent;
+            }
+            if account.as_str() == ENVELOPE_POOL {
+                to_budget = balance;
+                continue;
+            }
+            // The contra of the on-budget money is not an envelope; a group for
+            // it would read as a category holding the user's whole bank
+            // balance.
+            if !exists || account.as_str() == ENVELOPE_MONEY {
+                continue;
+            }
+            let (group_name, name) = match path.split_once(':') {
+                Some((group_name, name)) => (group_name.to_owned(), name.to_owned()),
+                None => (path.to_owned(), path.to_owned()),
+            };
+            let envelope = BudgetEnvelope {
+                name,
+                full_name: account.clone(),
+                budgeted: budgeted.to_string(),
+                spent: spent.to_string(),
+                balance: balance.to_string(),
+            };
+            let group = groups.entry(group_name).or_default();
+            group.budgeted += budgeted;
+            group.spent += spent;
+            group.balance += balance;
+            group.envelopes.push(envelope);
+        }
+        let groups: Vec<BudgetGroup> = groups
+            .into_iter()
+            .map(|(name, totals)| BudgetGroup {
+                name,
+                budgeted: totals.budgeted.to_string(),
+                spent: totals.spent.to_string(),
+                balance: totals.balance.to_string(),
+                envelopes: totals.envelopes,
+            })
+            .collect();
+        BudgetMonth {
+            month: requested,
+            months: self.months.iter().cloned().collect(),
+            groups,
+            to_budget: to_budget.to_string(),
+            currency: self.currency.clone(),
+        }
+    }
+}
+
+/// One month of the ledger's envelope budget.
+///
+/// [`EnvelopeFlows::render`] carries the payload's rules; this is the reading
+/// side's entry point: it validates the label and gives the ledger to
+/// [`collect_envelope_flows`] for the one walk a month — or a range of them —
+/// costs.
+pub(crate) fn budget_month(ledger: &Ledger, month: Option<&str>) -> Result<BudgetMonth, String> {
+    if let Some(text) = month
+        && !is_month_label(text)
+    {
+        return Err(format!("`{text}` is not a budget month in YYYY-MM form"));
+    }
+    Ok(collect_envelope_flows(ledger)?.render(month))
 }
 
 /// [`budget_month`] against the held ledger, so the command and the tests ask
@@ -290,9 +350,10 @@ const MAX_RANGE_MONTHS: usize = 120;
 /// The single-month [`BudgetMonth`] is the screen's *one* page; this is the
 /// scroll: the same figures, month by month, so a chart can draw them and the
 /// table can page without asking the backend per month. It is deliberately not
-/// a second reader of the ledger — [`budget_range_of`] asks [`budget_month`]
-/// for every month in the window and only sums what came back, so the two
-/// surfaces cannot disagree about a month they both show.
+/// a second reader of the ledger: [`budget_range_of`] renders every month of
+/// the window from the same one-walk flow set [`budget_month`] renders its
+/// month from, and only sums what came back, so the two surfaces cannot
+/// disagree about a month they both show.
 #[derive(Debug, serde::Serialize, specta::Type)]
 pub struct BudgetRange {
     /// The first month in the window, `YYYY-MM`.
@@ -371,8 +432,10 @@ fn budget_range_of(
             return Err(format!("`{label}` is not a budget month in YYYY-MM form"));
         }
     }
-    let probe = match budget_month(ledger, None) {
-        Ok(month) => month,
+    // One walk of the ledger for the whole window: the probe, the window's
+    // ends and every month below all draw on these flows.
+    let flows = match collect_envelope_flows(ledger) {
+        Ok(flows) => flows,
         Err(error) if error == NO_ENVELOPE_BUDGET => {
             // Nothing to show, but the window still names what was asked for:
             // the caller renders its empty state over that.
@@ -390,6 +453,7 @@ fn budget_range_of(
         }
         Err(error) => return Err(error),
     };
+    let probe = flows.render(None);
     let to = to.unwrap_or_else(|| probe.month.clone());
     let to_index =
         month_index(&to).ok_or_else(|| format!("`{to}` is not a budget month in YYYY-MM form"))?;
@@ -414,8 +478,9 @@ fn budget_range_of(
         return Err(format!("the budget range `{from}`–`{to}` runs backwards"));
     }
     // A window is a screen. An unbounded range — a tool call, a hand-written URL —
-    // would walk the ledger once per month of recorded history, so it is refused
-    // by name rather than clamped: a silent short answer would look like data.
+    // would render one month payload per month of recorded history, so it is
+    // refused by name rather than clamped: a silent short answer would look
+    // like data.
     let span = (to_index - from_index + 1) as usize;
     if span > MAX_RANGE_MONTHS {
         return Err(format!(
@@ -425,7 +490,9 @@ fn budget_range_of(
     let mut months = Vec::with_capacity(span);
     for index in from_index..=to_index {
         let label = month_label(index);
-        let month = budget_month(ledger, Some(&label))?;
+        // The same render the single-month payload answers with, so a month
+        // cannot differ between the two surfaces.
+        let month = flows.render(Some(&label));
         let mut budgeted = Decimal::ZERO;
         let mut spent = Decimal::ZERO;
         let mut balance = Decimal::ZERO;
@@ -937,5 +1004,71 @@ option \"operating_currency\" \"TRY\"
         assert!(empty.months.is_empty());
         assert_eq!(empty.from, "");
         assert_eq!(empty.to, "");
+    }
+
+    /// A range is the single-month payload tiled, not a second arithmetic:
+    /// every month it renders must be byte-identical to what [`budget_month`]
+    /// answers for that label, totals included. The fixture skips February, so
+    /// the month with nothing moved in it — the carries alone — is checked too.
+    #[test]
+    fn range_months_are_byte_identical_to_the_one_month_payload() {
+        let dir = TempDir::new("budget-range-parity");
+        let state = state_of(&dir, "main.bean", &monthly_fixture(&["2026-01", "2026-03"]));
+        let range = budget_range(
+            &state,
+            Some("2026-01".to_string()),
+            Some("2026-03".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            range
+                .months
+                .iter()
+                .map(|month| month.month.as_str())
+                .collect::<Vec<_>>(),
+            ["2026-01", "2026-02", "2026-03"]
+        );
+
+        for month in &range.months {
+            let single = budget_view(&state, Some(&month.month)).unwrap();
+            // The month's own payload: the groups serialize to the same bytes,
+            // and the pool is the single month's own figure.
+            assert_eq!(
+                serde_json::to_string(&month.groups).unwrap(),
+                serde_json::to_string(&single.groups).unwrap(),
+                "{}",
+                month.month
+            );
+            assert_eq!(month.to_budget, single.to_budget, "{}", month.month);
+            // The range's totals are the single month's groups re-added with
+            // the same exact decimal arithmetic — never a rerounded figure.
+            let total = |field: fn(&BudgetGroup) -> &str| {
+                single
+                    .groups
+                    .iter()
+                    .map(|group| decimal(field(group)).unwrap())
+                    .sum::<Decimal>()
+                    .to_string()
+            };
+            assert_eq!(
+                month.budgeted,
+                total(|group| &group.budgeted),
+                "{}",
+                month.month
+            );
+            assert_eq!(month.spent, total(|group| &group.spent), "{}", month.month);
+            assert_eq!(
+                month.balance,
+                total(|group| &group.balance),
+                "{}",
+                month.month
+            );
+        }
+
+        // February had no entry: nothing budgeted or spent, January's 100
+        // carried.
+        assert_eq!(range.months[1].budgeted, "0");
+        assert_eq!(range.months[1].spent, "0");
+        assert_eq!(range.months[1].balance, "100.00");
     }
 }

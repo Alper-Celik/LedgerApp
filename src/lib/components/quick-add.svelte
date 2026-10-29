@@ -8,7 +8,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { invalidateAll } from "$app/navigation";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
 	import { Add01Icon, Cancel01Icon, Delete01Icon } from "@hugeicons/core-free-icons";
-	import { commands } from "../../bindings";
+	import { commands, type AccountBalance } from "../../bindings";
 	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { Input } from "$lib/components/ui/input/index.js";
@@ -20,6 +20,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import {
 		amountOf,
 		appendKey,
+		fromAnswer,
+		requestSuggestions,
 		suggestions,
 		todayIso,
 		type QuickAddSign,
@@ -108,8 +110,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/**
 	 * Open onto a fresh draft and fill it in: the account names for the pickers,
-	 * and the presets — the pair remembered here, else the ledger's own most
-	 * recent pair, else the fallbacks in `suggestions`.
+	 * and the presets — the pair remembered here, else the backend's most recent
+	 * pair (or the register walk when that command refuses).
 	 */
 	async function openSheet() {
 		digits = "";
@@ -126,16 +128,26 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		await load();
 	}
 
+	/**
+	 * The presets for this draft: one command over the backend's loaded ledger,
+	 * falling back to a single register read only when that command refuses.
+	 */
+	async function presets(balances: AccountBalance[]): Promise<QuickAddSuggestions> {
+		try {
+			return fromAnswer(await requestSuggestions(), balances);
+		} catch (cause) {
+			console.warn("quick_add_suggestions failed; deriving from the register", cause);
+			return suggestions(await commands.accountTransactions(""), balances);
+		}
+	}
+
 	async function load() {
 		loading = true;
 		error = "";
 		try {
-			const [balances, transactions] = await Promise.all([
-				commands.accounts(),
-				commands.accountTransactions(""),
-			]);
+			const balances = await commands.accounts();
 			accounts = balances.map((balance) => balance.name);
-			const derived = suggestions(transactions, balances);
+			const derived = await presets(balances);
 			guesses = derived;
 			const known = new Set(accounts);
 			const remembered = rememberedPair();

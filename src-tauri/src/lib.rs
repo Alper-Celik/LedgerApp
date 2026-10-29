@@ -14,6 +14,7 @@
 mod accounts;
 mod ai;
 mod ai_cmd;
+mod ai_stream;
 pub mod attachments;
 mod budget;
 pub mod commands;
@@ -34,17 +35,20 @@ mod index_store;
 mod lsp;
 mod model;
 mod prices;
+mod query;
 mod repo;
 mod reports;
 mod rewrite;
 mod session;
 mod source;
 mod storage;
+mod suggest;
 mod tools;
 
 #[cfg(test)]
 mod testing;
 
+#[cfg(all(debug_assertions, not(mobile)))]
 use specta_typescript::Typescript;
 use tauri_specta::{Builder, collect_commands};
 
@@ -107,6 +111,11 @@ pub fn run() {
         ai_models,
         ai_tools,
         ai_chat,
+        query,
+        ai_stream,
+        quick_add_suggestions,
+        storage_kind,
+        sync_ledger_tree,
         index_provider_list,
         index_series,
         index_import,
@@ -166,6 +175,12 @@ pub fn run() {
     // xdg-desktop-portal backend (see Cargo.toml for why not GTK).
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_dialog::init());
+
+    // Android has no folder dialog: a directory is a SAF tree behind a content
+    // URI, and this plugin is the JNI bridge to it (`storage` mirrors the tree
+    // into app-private files, which is what the loader and git can open).
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_android_fs::init());
 
     // QtWebEngine never hands over custom-protocol POST bodies, so the Qt
     // runtime carries the invoke payload in a header instead. Without this,

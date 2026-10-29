@@ -59,6 +59,22 @@ export async function chooseLedger() {
 }
 
 /**
+ * Write the local mirror's changed files back into the SAF tree, when the ledger
+ * lives in one. Every successful edit bumps the revision, so this is the one
+ * place a phone's changes reach the folder the sync client watches; failures are
+ * logged, never surfaced as a failed edit (the edit itself did happen).
+ */
+export async function syncTree(): Promise<void> {
+	try {
+		const kind = await commands.storageKind();
+		if (kind !== "tree") return;
+		await commands.syncLedgerTree();
+	} catch (cause) {
+		console.error("tree sync failed", cause);
+	}
+}
+
+/**
  * Open the in-app folder picker. This is the fallback for runtimes whose window
  * stack cannot show a native chooser; it lists directories through
  * `list_folders` (see `folders.rs`).

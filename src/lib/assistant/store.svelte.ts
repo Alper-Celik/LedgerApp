@@ -9,9 +9,11 @@
  * One conversation is live at a time. Every message is appended to the ledger's
  * own store as it is produced (`.ledger/sessions/`, through the existing
  * `conversation_*` commands), so switching away or closing the app loses
- * nothing. A turn is non-streaming in v1: the model's answer arrives whole,
- * a busy line says which tool is running, and at most [`MAX_ROUNDS`] tool
- * rounds are run before the panel stops and says so.
+ * nothing. A turn streams: each round's prose is appended to a live bubble as
+ * its deltas arrive, the tool calls run when the round ends, and at most
+ * [`MAX_ROUNDS`] tool rounds are run before the panel stops and says so. The
+ * final answer, not the deltas, is what the bubble and the store keep — an
+ * endpoint may spell a fragment differently than the turn it ends.
  *
  * The wire history is not persisted as such. The conversation store has no
  * field for an assistant's `tool_calls` (its `data` is only read back for tool
@@ -29,10 +31,10 @@ import {
 } from "../../bindings";
 import { messageOf } from "../errors.js";
 import {
-	aiChat,
 	aiConfigure,
 	aiModels,
 	aiSettings,
+	aiStream,
 	aiTools,
 	type AiSettings,
 	type ChatMessage,
@@ -42,7 +44,7 @@ import {
 	type ToolCall,
 	type ToolSchema,
 } from "./api.js";
-import { visionOf, type Attachment } from "./media.js";
+import { mediaPartsOf, visionOf, type Attachment } from "./media.js";
 import { dispatchTool } from "./tools.js";
 
 /** How many tool rounds one turn may run before the panel stops. */
@@ -77,6 +79,8 @@ export class Assistant {
 
 	busy = $state(false);
 	busyNote = $state("");
+	/** Bumped for every streamed fragment, so the transcript follows the text as it lands. */
+	streamTick = $state(0);
 	opening = $state(false);
 	loading = $state(true);
 
@@ -290,12 +294,12 @@ export class Assistant {
 	}
 
 	/**
-	 * Ask one turn: persist the user message, call the model, run every tool it
-	 * asks for, and call again until it answers in prose or [`MAX_ROUNDS`] is
-	 * spent.
+	 * Ask one turn: persist the user message, stream the model's answer, run
+	 * every tool it asks for, and call again until it answers in prose or
+	 * [`MAX_ROUNDS`] is spent.
 	 *
 	 * Returns whether the turn started; false means nothing was sent (busy, no
-	 * key, no text and no sendable attachment).
+	 * key, no text and nothing sendable attached).
 	 */
 	async send(text: string, attachments: Attachment[]): Promise<boolean> {
 		const settings = this.settings;
@@ -307,33 +311,17 @@ export class Assistant {
 		this.chatError = "";
 		this.notice = "";
 
-		let media: MediaPart[] = [];
-		if (attachments.length) {
-			const vision = visionOf(this.models, settings.model);
-			if (vision === "yes") {
-				media = attachments.map((attachment) => ({
-					mime: attachment.mime,
-					data_base64: attachment.dataUrl,
-					detail: null,
-				}));
-			} else {
-				const files = attachments.length === 1 ? "the attachment was" : "the attachments were";
-				this.notice =
-					vision === "no"
-						? `The endpoint reports that ${settings.model || "this model"} does not accept images, so ${files} not sent.`
-						: `The endpoint did not say whether ${settings.model || "this model"} accepts images, so ${files} not sent.`;
-			}
-		}
-
-		const body = trimmed || "Please look at the attached file.";
-		if (!trimmed && media.length === 0) return false;
-
 		this.busy = true;
 		try {
+			const prepared = await this.mediaFor(attachments, settings);
+			this.notice = prepared.notice;
+			if (!trimmed && prepared.media.length === 0) return false;
+
+			const body = trimmed || "Please look at the attached file.";
 			this.entries.push({ kind: "user", text: body });
 			this.wire.push(userWire(body));
 			await this.saveMessage({ role: "user", text: body, data: null }, titleFrom(body));
-			await this.rounds(media);
+			await this.rounds(prepared.media);
 		} finally {
 			this.busy = false;
 			this.busyNote = "";
@@ -341,20 +329,81 @@ export class Assistant {
 		return true;
 	}
 
-	/** One model round plus the tool rounds it asks for. */
+	/**
+	 * The wire parts one turn's attachments contribute, and what could not be
+	 * sent.
+	 *
+	 * Only a vision-capable model gets any of it — the endpoint's model list is
+	 * the only voice on that. Images and CSVs go as the browser read them, while
+	 * a PDF the user placed in the ledger is rasterised by the backend page by
+	 * page (see `mediaPartsOf`), which is what the model can actually read. A
+	 * refusal is handed back for the notice line, verbatim, never swallowed.
+	 */
+	private async mediaFor(
+		attachments: Attachment[],
+		settings: AiSettings
+	): Promise<{ media: MediaPart[]; notice: string }> {
+		if (attachments.length === 0) return { media: [], notice: "" };
+		const vision = visionOf(this.models, settings.model);
+		if (vision !== "yes") {
+			const files = attachments.length === 1 ? "the attachment was" : "the attachments were";
+			return {
+				media: [],
+				notice:
+					vision === "no"
+						? `The endpoint reports that ${settings.model || "this model"} does not accept images, so ${files} not sent.`
+						: `The endpoint did not say whether ${settings.model || "this model"} accepts images, so ${files} not sent.`,
+			};
+		}
+
+		const media: MediaPart[] = [];
+		const errors: string[] = [];
+		for (const attachment of attachments) {
+			this.busyNote =
+				attachment.mime === "application/pdf" && attachment.path?.trim()
+					? `Rendering “${attachment.name}”…`
+					: `Reading “${attachment.name}”…`;
+			const answer = await mediaPartsOf(attachment);
+			media.push(...answer.parts);
+			if (answer.error) errors.push(answer.error);
+		}
+		return { media, notice: errors.join(" ") };
+	}
+
+	/** One model round, streamed, plus the tool rounds it asks for. */
 	private async rounds(media: MediaPart[]): Promise<void> {
 		let pendingMedia = media;
 
 		for (let round = 0; round < MAX_ROUNDS; round++) {
 			this.busyNote = "Thinking…";
+			// The bubble the prose lands in, pushed before the call so the first
+			// fragment has somewhere to go; a round that ends without prose takes
+			// it away again.
+			this.entries.push({ kind: "assistant", text: "" });
+			const entry = this.entries[this.entries.length - 1];
+
 			let response: ChatResponse;
 			try {
-				response = await aiChat({
-					messages: [systemWire(this.tools.length > 0, this.settings?.system_prompt ?? ""), ...replayable(this.wire)],
-					tools: $state.snapshot(this.tools),
-					media: pendingMedia,
-				});
+				response = await aiStream(
+					{
+						messages: [
+							systemWire(this.tools.length > 0, this.settings?.system_prompt ?? ""),
+							...replayable(this.wire),
+						],
+						tools: $state.snapshot(this.tools),
+						media: pendingMedia,
+					},
+					(chunk) => {
+						if (entry.kind !== "assistant") return;
+						if (entry.text === "") this.busyNote = "Answering…";
+						entry.text += chunk;
+						this.streamTick += 1;
+					}
+				);
 			} catch (cause) {
+				// What streamed stays on screen and the refusal is shown in the
+				// backend's own words; the wire history never learned of the turn.
+				if (!entry.text.trim()) this.dropEntry(entry);
 				this.chatError = messageOf(cause);
 				return;
 			}
@@ -363,26 +412,32 @@ export class Assistant {
 			const answer = response.text ?? "";
 			const calls = Array.isArray(response.tool_calls) ? response.tool_calls : [];
 
-			if (answer.trim() || calls.length) {
-				this.entries.push({ kind: "assistant", text: answer });
-				this.wire.push({
-					role: "assistant",
-					text: answer,
-					tool_calls: calls,
-					tool_call_id: null,
-				});
-				// An assistant turn that only calls tools has no prose; the call
-				// itself lives on each tool message, so there is nothing worth a
-				// section of its own in the ledger's file.
-				if (answer.trim()) {
-					await this.saveMessage({ role: "assistant", text: answer, data: null });
-				}
+			if (!answer.trim() && !calls.length) {
+				this.dropEntry(entry);
+				this.notice = "The model returned no text and no tool calls.";
+				return;
+			}
+
+			// The answer, not the deltas, is what the transcript keeps: an
+			// endpoint may stream fragments in a different spelling than it ends.
+			if (entry.kind === "assistant") entry.text = answer;
+			this.wire.push({
+				role: "assistant",
+				text: answer,
+				tool_calls: calls,
+				tool_call_id: null,
+			});
+			// An assistant turn that only calls tools has no prose; the call
+			// itself lives on each tool message, so there is nothing worth a
+			// section of its own in the ledger's file — or in a bubble.
+			if (answer.trim()) {
+				await this.saveMessage({ role: "assistant", text: answer, data: null });
+			} else {
+				this.dropEntry(entry);
 			}
 
 			if (!calls.length) {
-				if (!answer.trim()) {
-					this.notice = "The model returned no text and no tool calls.";
-				} else if (response.finish_reason === "length") {
+				if (response.finish_reason === "length") {
 					this.notice = "The answer was cut off: the endpoint reported finish_reason `length`.";
 				}
 				return;
@@ -418,6 +473,12 @@ export class Assistant {
 		}
 
 		this.notice = `Stopped after ${MAX_ROUNDS} tool rounds; send another message to continue.`;
+	}
+
+	/** Remove a placeholder bubble a turn never filled. */
+	private dropEntry(entry: Entry): void {
+		const at = this.entries.indexOf(entry);
+		if (at >= 0) this.entries.splice(at, 1);
 	}
 
 	/** Append one message to the open conversation, creating it when this is the first. */

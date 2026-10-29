@@ -21,8 +21,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 - **Edits** — `editing.rs` (write → reload → roll back on a *new* loader error → stage), `rewrite.rs` (pure
   byte-range surgery), `conflict.rs` (directive-level three-way merge), `conflict_cmd.rs` (compare/resolve
   over the operation log), `conflict_names.rs` (every sync client's conflict-copy naming).
-- **Storage, git and history** — `storage.rs` (local vs Android SAF tree; the mirror is implemented and
-  unit-tested but no command wires it yet), `repo.rs` (repo state/init/identity), `git.rs` (working-tree
+- **Storage, git and history** — `storage.rs` (local vs Android SAF tree: `pick_ledger_folder` picks a
+  tree on Android, mirrors it privately, and `sync_ledger_tree` writes changes back — the mirror is what
+  the loader and git open, so git is off in tree mode), `repo.rs` (repo state/init/identity), `git.rs` (working-tree
   detection, diff, commit), `git_ops.rs` (branches, log, stage, merge, revert; not yet exposed as commands),
   `history.rs` (the operation log inside the ledger: per-device jsonl + pre-image blobs + `state.json`,
   which serves undo *and* merge bases without git).
@@ -31,8 +32,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `dashboards.rs` (the saved
   dashboard store).
 - **Assistant** — `ai.rs` (OpenAI-compatible transport, settings that never leak the key), `ai_cmd.rs`
-  (IPC surface, system prompt, tool table), `tools/` (hashline read/edit, grep, glob, one registry
-  rendered twice: OpenAI tools and a Python stub), `attachments.rs` (MuPDF pages, calamine sheets, CSV),
+  (IPC surface, system prompt, tool table), `ai_stream.rs` (streaming reads forwarded as `ai://delta`),
+  `query.rs` (BQL → text cells, the assistant's one aggregate tool), `suggest.rs` (quick-add's last pair
+  and ranked categories), `tools/` (hashline read/edit, grep, glob, one registry rendered twice: OpenAI
+  tools and a Python stub), `attachments.rs` (MuPDF pages, calamine sheets, CSV),
   `conversations.rs` (markdown conversations inside the ledger, so they sync with it).
 - `lsp.rs` — the embedded language server; `model.rs` — the original register/session payload types
   (newer payload types live beside their module); `folders.rs` — the in-app picker's listing;

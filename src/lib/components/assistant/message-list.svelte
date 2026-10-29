@@ -30,11 +30,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		const failure = assistant.chatError;
 		const saveFailure = assistant.saveError;
 		const note = assistant.notice;
+		// Text that arrives a fragment at a time does not change the row count,
+		// so the store bumps a tick for each one and the transcript follows it.
+		const streamed = assistant.streamTick;
 		void count;
 		void busy;
 		void failure;
 		void saveFailure;
 		void note;
+		void streamed;
 		if (!stick || !scroller) return;
 		const node = scroller;
 		requestAnimationFrame(() => {

@@ -10,6 +10,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import FolderPicker from "$lib/components/folder-picker.svelte";
 	import QuickAdd from "$lib/components/quick-add.svelte";
 	import { sidebarWidth } from "$lib/sidebar-width.svelte.js";
+	import { syncTree } from "$lib/ledger.svelte.js";
+	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { load as loadTheme } from "$lib/theme/store.svelte.js";
 	import "../app.css";
 	import { ModeWatcher } from "mode-watcher";
@@ -18,6 +20,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	// Before the first paint: re-apply the saved token overrides, if any.
 	loadTheme();
+
+	// A ledger in a SAF tree is edited through a mirror; every revision bump is a
+	// successful write, so that is when the tree gets its copy back. On desktop
+	// this is one cheap command call that answers "local" and returns.
+	$effect(() => {
+		void ledgerRevision.value;
+		void syncTree();
+	});
 </script>
 
 <!-- The passed style lands after the component's default `--sidebar-width`, so it wins. -->

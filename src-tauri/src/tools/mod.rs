@@ -468,149 +468,6 @@ fn build() -> Vec<ToolDef> {
 /// stub module, both generated from the same definitions.
 ///
 /// A later layer can put either in front of the model; a test fails if the two
-/// renderings drift from the registry.
-#[derive(Debug, Clone)]
-pub struct Parity {
-    /// `[{"type": "function", "function": {"name", "description", "parameters"}}]`
-    pub openai: Value,
-    /// The same tools as `def name(args) -> dict` stubs, one per tool.
-    pub python: String,
-}
-
-/// Render the registry both ways.
-pub fn parity() -> Parity {
-    let mut tools = Vec::new();
-    let mut python = String::from(
-        "# The ledger app's file tools. Generated from `tools::registry()`; edit\n\
-         # the Rust definitions, not this file.\n\
-         from typing import Any\n\n",
-    );
-    for definition in registry() {
-        tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": definition.name,
-                "description": definition.description,
-                "parameters": definition.schema.clone(),
-            }
-        }));
-        python.push_str(&python_stub(definition));
-    }
-    Parity {
-        openai: Value::Array(tools),
-        python,
-    }
-}
-
-fn python_stub(definition: &ToolDef) -> String {
-    let empty = Map::new();
-    let properties = definition
-        .schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let required: Vec<&str> = definition
-        .schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|names| names.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-
-    // Required arguments first, in the order the schema lists them; then the
-    // optional ones, each with the default the schema gives it.
-    let mut signature: Vec<String> = Vec::new();
-    for name in &required {
-        if let Some(property) = properties.get(*name) {
-            signature.push(format!("{name}: {}", python_type(property)));
-        }
-    }
-    for (name, property) in properties {
-        if required.contains(&name.as_str()) {
-            continue;
-        }
-        match property.get("default") {
-            Some(default) => signature.push(format!(
-                "{name}: {} = {}",
-                python_type(property),
-                python_default(default)
-            )),
-            // Optional and no default in the schema: a caller may leave it out,
-            // which is `None` in Python whatever the argument's type is.
-            None => signature.push(format!(
-                "{name}: {} | None = None",
-                python_type(property)
-            )),
-        }
-    }
-
-    let mut out = format!(
-        "def {}({}) -> dict[str, Any]:\n",
-        definition.name,
-        signature.join(", ")
-    );
-    out.push_str("    \"\"\"\n");
-    for line in wrap(&python_text(definition.description), 76) {
-        out.push_str("    ");
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.push_str("    \"\"\"\n    ...\n\n");
-    out
-}
-
-/// The description as it can sit inside a triple-quoted string.
-fn python_text(text: &str) -> String {
-    text.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"")
-}
-
-fn python_type(schema: &Value) -> &'static str {
-    match schema.get("type").and_then(Value::as_str) {
-        Some("string") => "str",
-        Some("integer") => "int",
-        Some("number") => "float",
-        Some("boolean") => "bool",
-        Some("array") => "list",
-        Some("object") => "dict",
-        _ => "Any",
-    }
-}
-
-fn python_default(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_string(),
-        Value::Bool(flag) => {
-            if *flag {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            }
-        }
-        Value::Number(number) => number.to_string(),
-        Value::String(text) => format!("{text:?}"),
-        _ => "None".to_string(),
-    }
-}
-
-/// `text` broken into lines of at most `width` characters.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
 
 #[cfg(test)]
 mod tests {
@@ -619,7 +476,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{ToolError, expected_args, invoke, parity, registry};
+    use super::{ToolError, expected_args, invoke, registry};
 
     fn scratch() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -855,82 +712,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parity_renders_the_same_tools() {
-        let parity = parity();
-        let tools = parity.openai.as_array().unwrap();
-        assert_eq!(tools.len(), registry().len());
-
-        for (definition, entry) in registry().iter().zip(tools) {
-            assert_eq!(entry["type"], "function");
-            assert_eq!(entry["function"]["name"], definition.name);
-            assert_eq!(entry["function"]["description"], definition.description);
-            assert_eq!(entry["function"]["parameters"], definition.schema);
-        }
-
-        // The Python module declares one function per tool, with the same
-        // parameters, the same required/optional split and the same defaults.
-        let python = parity.python;
-        for definition in registry() {
-            let signature = python
-                .lines()
-                .find(|line| line.starts_with(&format!("def {}(", definition.name)))
-                .unwrap_or_else(|| panic!("no Python stub for {}", definition.name));
-            assert!(signature.ends_with("-> dict[str, Any]:"), "{signature}");
-            let (parameters, description) = parse_stub(&python, definition.name);
-            let schema = definition.schema.as_object().unwrap();
-            let properties = schema["properties"].as_object().unwrap();
-            let required: Vec<&str> = schema["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(Value::as_str)
-                .collect();
-
-            let declared: BTreeSet<&str> = parameters.keys().map(String::as_str).collect();
-            let expected: BTreeSet<&str> = properties.keys().map(String::as_str).collect();
-            assert_eq!(declared, expected, "{}: parameters", definition.name);
-
-            for (name, parameter) in &parameters {
-                let property = &properties[name.as_str()];
-                // An argument with neither a required mark nor a default in
-                // the schema may be left out, so it is `None` too.
-                let annotation = if required.contains(&name.as_str())
-                    || property.get("default").is_some()
-                {
-                    python_type(property).to_string()
-                } else {
-                    format!("{} | None", python_type(property))
-                };
-                assert_eq!(
-                    parameter.annotation, annotation,
-                    "{}: `{name}` type",
-                    definition.name
-                );
-                if required.contains(&name.as_str()) {
-                    assert!(!parameter.has_default, "{}: `{name}` must be required", definition.name);
-                } else {
-                    assert!(parameter.has_default, "{}: `{name}` must have a default", definition.name);
-                    let expected = property
-                        .get("default")
-                        .map(python_default)
-                        .unwrap_or_else(|| "None".to_string());
-                    assert_eq!(parameter.default, expected, "{}: `{name}` default", definition.name);
-                }
-            }
-            assert_eq!(description, definition.description, "{}: docstring", definition.name);
-        }
-    }
-
-    #[test]
-    fn python_stubs_are_balanced() {
-        let python = parity().python;
-        assert_eq!(python.matches("\"\"\"").count() % 2, 0, "docstrings are balanced");
-        for definition in registry() {
-            assert!(python.contains(&format!("def {}(", definition.name)));
-        }
-    }
-
     /// The `properties` of a schema, each with a value its type accepts.
     fn dummy(schema: &Value) -> Value {
         let mut object = serde_json::Map::new();
@@ -1135,11 +916,5 @@ mod tests {
         Ok(())
     }
 
-    fn python_type(schema: &Value) -> &'static str {
-        super::python_type(schema)
-    }
 
-    fn python_default(value: &Value) -> String {
-        super::python_default(value)
-    }
 }

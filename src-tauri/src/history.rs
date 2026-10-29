@@ -20,7 +20,8 @@
 //!   device                 this device's stable random id, created on first use
 //!   <device>.jsonl         one JSON line per operation, appended, never rewritten
 //!   blobs/<hash>           pre- and post-images by BLAKE3 hash (dedupe is free)
-//!   state.json             what each device last saw per path, for conflicts
+//!   state.json             what each device last saw per path (a sync detector's
+//!                          comparison map; conflict bases read the blobs instead)
 //!   .lock-<device>         held while one line is appended, or the log prunes
 //! ```
 //!
@@ -45,13 +46,14 @@
 //! the operation left there, so an undo cannot clobber a later edit — ours or a
 //! peer's.
 
-use std::collections::{BTreeMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::fs;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -122,7 +124,10 @@ impl Change {
         }
     }
 
-    /// The same change with the line hunks the writer worked out.
+    /// The same change with the line hunks the writer worked out. Nothing calls
+    /// this yet: the line tools attach hunks once they edit through the pipeline,
+    /// and the log already carries the field for them.
+    #[allow(dead_code)]
     pub fn with_hunks(mut self, hunks: Vec<Hunk>) -> Self {
         self.hunks = Some(hunks);
         self
@@ -168,6 +173,23 @@ pub struct Filter {
     pub path: Option<PathBuf>,
     /// The newest `limit` matching operations; `0` means no limit.
     pub limit: usize,
+}
+
+impl Filter {
+    /// Whether `operation` is one this filter shows: its origin, when named,
+    /// and one of its files, when a path is named.
+    ///
+    /// The limit is deliberately not part of this test — it says how many
+    /// matches to keep, not which operations match — so a reader can apply the
+    /// filter while it reads and keep only the newest `limit` of the matches.
+    fn accepts(&self, operation: &Operation) -> bool {
+        self.origin
+            .is_none_or(|origin| operation.origin == origin)
+            && self
+                .path
+                .as_ref()
+                .is_none_or(|path| operation.ops.iter().any(|file| &file.path == path))
+    }
 }
 
 /// How much of the log's images to keep.
@@ -229,6 +251,12 @@ pub struct RevertEntry {
 /// Changes whose two sides are byte-identical are dropped: the edit funnel can
 /// reach here with text equal to what is on disk, and that is not an operation.
 /// An operation left with nothing to say is refused rather than recorded.
+///
+/// A recorded write also gives retention its production caller: once the image
+/// store has outgrown [`Retention::default`] by the margin [`over_retention`]
+/// describes, the write prunes it back. The check is a directory listing, so an
+/// ordinary edit stays cheap; a prune that fails is reported on stderr and never
+/// fails the write that already landed.
 pub fn record(
     root: &Path,
     origin: Origin,
@@ -256,7 +284,7 @@ pub fn record(
     let device = device_id(root)?;
     // The lock covers the images as well as the line: `prune` holds it too, so
     // it cannot delete an image this write is about to name.
-    let _lock = Lock::acquire(root, &device)?;
+    let lock = Lock::acquire(root, &device)?;
     let blobs = root.join(BLOB_DIR);
     fs::create_dir_all(&blobs).map_err(|error| format!("{}: {error}", blobs.display()))?;
 
@@ -293,6 +321,22 @@ pub fn record(
 
     append_line(root, &operation)?;
     remember(root, &operation)?;
+    // The write is on disk; the lock is only needed for it — `prune` takes the
+    // lock itself, so it could not run while this one is held.
+    drop(lock);
+
+    // Retention runs here, where writes actually happen: the log has no other
+    // production caller, and images are what fill the disk. It is skipped while
+    // the store is inside its ceiling — reading the directory is the whole
+    // check — so an ordinary edit pays for a directory listing, not for the
+    // parse, sort and blob walk a prune costs. A prune that fails must not fail
+    // a write that already landed.
+    let retention = Retention::default();
+    if over_retention(root, retention)
+        && let Err(error) = prune(root, retention)
+    {
+        eprintln!("history: prune skipped: {error}");
+    }
     Ok(operation)
 }
 
@@ -312,21 +356,21 @@ pub fn list(root: &Path, filter: Filter) -> Result<Vec<Operation>, String> {
 }
 
 /// [`list`], with the skipped lines returned instead of printed.
+///
+/// The filter is applied while the log is read, and each device's log lends at
+/// most the newest `limit` matches to the answer — a bounded selection, kept in
+/// the log's own order, so a page of a log holding years of writes costs the
+/// reads plus `limit · log limit` comparisons rather than a sort of every
+/// operation ever recorded. Devices are merged before the final truncation, so
+/// the answer is the same newest `limit` matches across the whole log.
 pub fn list_with_issues(
     root: &Path,
     filter: Filter,
 ) -> Result<(Vec<Operation>, Vec<String>), String> {
-    let (mut operations, issues, _torn) = read_operations(root)?;
+    let (mut operations, issues, _torn) = read_operations(root, Some(&filter))?;
+    // Each device's candidates are already newest first; sorting the merged
+    // (at most devices × limit) list puts the devices' clocks in one order.
     sort_newest_first(&mut operations);
-    operations.retain(|operation| {
-        filter
-            .origin
-            .is_none_or(|origin| operation.origin == origin)
-            && filter
-                .path
-                .as_ref()
-                .is_none_or(|path| operation.ops.iter().any(|file| &file.path == path))
-    });
     if filter.limit > 0 {
         operations.truncate(filter.limit);
     }
@@ -342,6 +386,7 @@ pub fn list_with_issues(
 /// <id>"`, so an undo cannot clobber an edit made after it, local or synced. A
 /// file the operation deleted is expected to be absent, and any file that
 /// reappeared in its place is the same refusal.
+#[cfg(test)]
 pub fn revert(root: &Path, id: &str) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     Ok(revert_plan(root, id)?
         .into_iter()
@@ -500,7 +545,7 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
         return Ok(0);
     }
     let _lock = Lock::acquire(root, &device_id(root)?)?;
-    let (mut operations, _issues, torn) = read_operations(root)?;
+    let (mut operations, _issues, torn) = read_operations(root, None)?;
     sort_newest_first(&mut operations);
     let blobs = root.join(BLOB_DIR);
 
@@ -599,6 +644,53 @@ pub fn prune(root: &Path, retention: Retention) -> Result<u64, String> {
     Ok(freed)
 }
 
+/// How far past [`Retention::max_operations`] the log may grow before a write
+/// pays for a prune: a quarter over, so a burst of writes is cleaned in one
+/// pass instead of every write cleaning up after itself.
+const PRUNE_MARGIN: (u64, u64) = (5, 4);
+
+/// How many images one operation can name: its before and its after. The
+/// retention counts operations; the store it prunes counts images.
+const IMAGES_PER_OPERATION: u64 = 2;
+
+/// Whether the log's images have outgrown what `retention` keeps, by the margin
+/// a write lets them run over before it prunes.
+///
+/// The measure is the image store, not the log's lines. A prune never deletes a
+/// line — they are the record of what happened — so a line count would sit over
+/// the ceiling for the rest of the ledger's life and make every write parse the
+/// whole log, which is the scan this check exists to avoid. Images are what
+/// pruning reclaims, and they fall back under the ceiling once it has run, so
+/// the writes that follow it stay cheap. Each operation names up to two of them
+/// (the file's before and its after), which is how the retention's ceiling in
+/// operations becomes one in images; the listing stops as soon as the ceiling
+/// is crossed, so its cost is bounded by that ceiling, not by the store.
+fn over_retention(root: &Path, retention: Retention) -> bool {
+    let (numerator, denominator) = PRUNE_MARGIN;
+    let ceiling = (retention.max_operations as u64)
+        .saturating_mul(numerator)
+        .saturating_mul(IMAGES_PER_OPERATION)
+        / denominator;
+    if ceiling == 0 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(root.join(BLOB_DIR)) else {
+        return false;
+    };
+    let mut images = 0u64;
+    for entry in entries.flatten() {
+        // Dot files are this module's bookkeeping, never an image.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        images += 1;
+        if images > ceiling {
+            return true;
+        }
+    }
+    false
+}
+
 /// This device's id, creating it on first use.
 ///
 /// Stable and random rather than a hostname: two machines can share a name, and
@@ -675,6 +767,7 @@ pub fn device_id(root: &Path) -> Result<String, String> {
 /// neither what we last saw nor what our newest operation left there. A state
 /// file that cannot be parsed reads as empty: it is a cache, and the log lines
 /// are the record.
+#[cfg(test)]
 pub fn last_seen(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let device = device_id(root)?;
     let state = read_state(root);
@@ -693,7 +786,7 @@ pub fn last_seen(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> 
 
 /// One operation, by id, from whichever device's log holds it.
 fn find(root: &Path, id: &str) -> Result<Operation, String> {
-    let (operations, _issues, _torn) = read_operations(root)?;
+    let (operations, _issues, _torn) = read_operations(root, None)?;
     let mut matches = operations.into_iter().filter(|operation| operation.id == id);
     let Some(operation) = matches.next() else {
         return Err(format!("no operation {id} under {}", root.display()));
@@ -709,9 +802,18 @@ fn find(root: &Path, id: &str) -> Result<Operation, String> {
 /// Every operation in every device's log, with one report per unparseable line
 /// and the raw bytes of those lines: their hashes still name images that must
 /// not be pruned while the rest of the line is on its way from a peer.
+///
+/// `filter` narrows what is kept, and its limit bounds each device's share: a
+/// device's log contributes at most its newest `limit` matches, held in a heap
+/// of that size rather than in a copy of the log. `None` keeps everything, which
+/// is what [`find`] and [`prune`] need. Every line is still parsed — the origin
+/// and path a filter matches on live inside the operation, and a torn line has
+/// to be reported wherever it falls — but nothing past the bound is retained.
 fn read_operations(
     root: &Path,
+    filter: Option<&Filter>,
 ) -> Result<(Vec<Operation>, Vec<String>, Vec<Vec<u8>>), String> {
+    let limit = filter.and_then(|filter| (filter.limit > 0).then_some(filter.limit));
     let mut operations = Vec::new();
     let mut issues = Vec::new();
     let mut torn = Vec::new();
@@ -725,6 +827,9 @@ fn read_operations(
                 continue;
             }
         };
+        // This device's newest matches, oldest at the top of the heap so the
+        // one a bounded selection must drop is the one `pop` reaches.
+        let mut newest: BinaryHeap<Oldest> = BinaryHeap::new();
         // Split on bytes, not lines of a `String`: a torn sync can leave one
         // line that is not UTF-8, and that line alone should be skipped.
         for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
@@ -733,7 +838,26 @@ fn read_operations(
                 continue;
             }
             match serde_json::from_slice::<Operation>(line) {
-                Ok(operation) => operations.push(operation),
+                Ok(operation) => {
+                    if filter.is_some_and(|filter| !filter.accepts(&operation)) {
+                        continue;
+                    }
+                    match limit {
+                        // A full selection: the newcomer takes the oldest
+                        // slot only when it is newer than what holds it.
+                        Some(limit) if newest.len() >= limit => {
+                            let newer = newest
+                                .peek()
+                                .is_some_and(|oldest| compare_newest_first(&operation, &oldest.0).is_lt());
+                            if newer {
+                                newest.pop();
+                                newest.push(Oldest(operation));
+                            }
+                        }
+                        Some(_) => newest.push(Oldest(operation)),
+                        None => operations.push(operation),
+                    }
+                }
                 Err(error) => {
                     issues.push(format!(
                         "skipped {}:{}: {error}",
@@ -744,6 +868,9 @@ fn read_operations(
                 }
             }
         }
+        // Ascending in the log's order is newest first, which is how the
+        // candidates join the answer.
+        operations.extend(newest.into_sorted_vec().into_iter().map(|entry| entry.0));
     }
     Ok((operations, issues, torn))
 }
@@ -785,12 +912,45 @@ fn log_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 /// approximate between two — which is all a list needs; revert decides on
 /// hashes, not on this order.
 fn sort_newest_first(operations: &mut [Operation]) {
-    operations.sort_by(|a, b| {
-        b.at
-            .cmp(&a.at)
-            .then_with(|| b.id.cmp(&a.id))
-            .then_with(|| b.device.cmp(&a.device))
-    });
+    operations.sort_by(compare_newest_first);
+}
+
+/// The log's newest-first order, as a comparison: the key [`sort_newest_first`]
+/// sorts by, shared so a bounded selection and the final list cannot disagree
+/// about which operation is the newest.
+fn compare_newest_first(a: &Operation, b: &Operation) -> Ordering {
+    b.at
+        .cmp(&a.at)
+        .then_with(|| b.id.cmp(&a.id))
+        .then_with(|| b.device.cmp(&a.device))
+}
+
+/// [`Operation`] under [`compare_newest_first`], for a bounded selection.
+///
+/// `Ord` is the log's own comparison — newer sorts lower — so a max-heap's top
+/// is the *oldest* operation it holds: exactly the one a selection over
+/// `limit` slots drops when a newer write arrives. Equality is "sorts the
+/// same", which is all a heap asks of it.
+struct Oldest(Operation);
+
+impl PartialEq for Oldest {
+    fn eq(&self, other: &Self) -> bool {
+        compare_newest_first(&self.0, &other.0) == Ordering::Equal
+    }
+}
+
+impl Eq for Oldest {}
+
+impl PartialOrd for Oldest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Oldest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_newest_first(&self.0, &other.0)
+    }
 }
 
 /// Append one operation to this device's log as a single whole line.
@@ -1038,7 +1198,7 @@ fn next_id_part() -> u16 {
         seeded.write_u32(std::process::id());
         AtomicU32::new(seeded.finish() as u32)
     });
-    (COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF) as u16
+    (COUNTER.fetch_add(1, AtomicOrdering::Relaxed) & 0xFFFF) as u16
 }
 
 fn device_short(device: &str) -> &str {
@@ -2052,6 +2212,86 @@ mod tests {
         );
     }
 
+    /// A limit is a window over the merged log, not one per device: each
+    /// device's log lends its own newest candidates, the merge puts them in one
+    /// order, and the cut takes the newest matches — after the filter, never
+    /// before it.
+    #[test]
+    fn a_limit_window_is_the_newest_across_devices() {
+        let dir = TempDir::new("history-limit-devices");
+        let path = ledger_file(&dir, "main.bean", "v0\n");
+        let root = log_of(&dir);
+
+        let first = record(
+            &root,
+            Origin::User,
+            "here 1",
+            &[Change::new(path.clone(), Some(b"v0\n"), Some(b"v1\n"))],
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let second = record(
+            &root,
+            Origin::User,
+            "here 2",
+            &[Change::new(path.clone(), Some(b"v1\n"), Some(b"v2\n"))],
+        )
+        .unwrap();
+
+        // A peer's line, newer than both writes here and touching the same
+        // path.
+        let peer = Operation {
+            id: "2100-01-01T00-00-00Z-ffff-0000".to_string(),
+            at: "2100-01-01T00:00:00.000000000Z".to_string(),
+            device: "ffffffffffffffff".to_string(),
+            origin: Origin::Ai,
+            summary: "peer".to_string(),
+            ops: vec![FileOp {
+                path: path.clone(),
+                before_hash: Some(hash_of(b"v2\n")),
+                after_hash: Some(hash_of(b"v3\n")),
+                hunks: None,
+            }],
+        };
+        fs::write(
+            root.join("ffffffffffffffff.jsonl"),
+            [serde_json::to_vec(&peer).unwrap(), b"\n".to_vec()].concat(),
+        )
+        .unwrap();
+
+        // The newest two of the merged log: the peer's line, then the newest
+        // write here — whichever device's file they live in.
+        let newest = list(
+            &root,
+            Filter {
+                limit: 2,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            newest
+                .iter()
+                .map(|operation| operation.id.as_str())
+                .collect::<Vec<_>>(),
+            [peer.id.as_str(), second.id.as_str()]
+        );
+        // The filter runs before the cut: a user-only window holds the newest
+        // user write, though the peer's newer line would win an unfiltered one.
+        let user = list(
+            &root,
+            Filter {
+                origin: Some(Origin::User),
+                limit: 1,
+                ..Filter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].id, second.id);
+    }
+
     #[test]
     fn timestamp_and_id_parts() {
         let (at, stem) =
@@ -2069,5 +2309,117 @@ mod tests {
         // Random ids are 16 hex characters, and two are different.
         assert_eq!(random_id().len(), 16);
         assert_ne!(random_id(), random_id());
+    }
+
+    /// How many images the store holds, as the retention counts them.
+    fn images(root: &Path) -> usize {
+        fs::read_dir(root.join(BLOB_DIR))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// The margin is a quarter over the retention, counted in images: at 1.25 ×
+    /// `max_operations` operations' worth — 500 images for the default — the
+    /// check is still quiet, one image past it is not, and a retention with no
+    /// operation ceiling never asks for a prune.
+    #[test]
+    fn the_prune_margin_is_a_quarter_over_the_retention() {
+        let dir = TempDir::new("history-margin");
+        let root = log_of(&dir);
+        let blobs = root.join(BLOB_DIR);
+        fs::create_dir_all(&blobs).unwrap();
+        for index in 0..500 {
+            fs::write(blobs.join(format!("{index:064x}")), b"x").unwrap();
+        }
+        let retention = Retention::default();
+        assert!(!over_retention(&root, retention));
+        fs::write(blobs.join(format!("{:064x}", 500)), b"x").unwrap();
+        assert!(over_retention(&root, retention));
+        assert!(!over_retention(
+            &root,
+            Retention {
+                max_operations: 0,
+                ..retention
+            }
+        ));
+    }
+
+    /// A write that leaves the log past the default retention's margin pays for
+    /// the prune itself, since no caller ever asks for one: the crossing write
+    /// trims the store back to the versions the retention's operations name.
+    #[test]
+    fn a_write_past_the_retention_margin_prunes() {
+        let dir = TempDir::new("history-auto-prune");
+        let first = ledger_file(&dir, "a.bean", "a0\n");
+        let second = ledger_file(&dir, "b.bean", "b0\n");
+        let root = log_of(&dir);
+
+        // Two new images a write, so the 250th record is the one that leaves
+        // 502 images — past the 500 the margin allows for 200 operations.
+        let mut newest = None;
+        for index in 1..=250u32 {
+            let before_a = format!("a{}\n", index - 1);
+            let after_a = format!("a{index}\n");
+            let before_b = format!("b{}\n", index - 1);
+            let after_b = format!("b{index}\n");
+            newest = Some(
+                record(
+                    &root,
+                    Origin::User,
+                    "write",
+                    &[
+                        Change::new(
+                            first.clone(),
+                            Some(before_a.as_bytes()),
+                            Some(after_a.as_bytes()),
+                        ),
+                        Change::new(
+                            second.clone(),
+                            Some(before_b.as_bytes()),
+                            Some(after_b.as_bytes()),
+                        ),
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        let newest = newest.unwrap();
+
+        // The store kept what the newest 200 operations name — `a50`/`b50` on,
+        // their versions shared — and gave back everything older.
+        assert!(blob(&root, b"a50\n").exists());
+        assert!(blob(&root, b"b50\n").exists());
+        assert!(blob(&root, b"a250\n").exists());
+        assert!(!blob(&root, b"a49\n").exists());
+        assert!(!blob(&root, b"b0\n").exists());
+        assert_eq!(images(&root), 402);
+
+        // The lines are all still there, and the newest write still undoes.
+        fs::write(&first, b"a250\n").unwrap();
+        fs::write(&second, b"b250\n").unwrap();
+        assert_eq!(list(&root, Filter::default()).unwrap().len(), 250);
+        assert_eq!(revert(&root, &newest.id).unwrap()[0].1, b"a249\n".to_vec());
+
+        // Prune is only paid for at the crossing: the next write sits well
+        // inside the ceiling again.
+        assert!(!over_retention(&root, Retention::default()));
+        let next = record(
+            &root,
+            Origin::User,
+            "write",
+            &[Change::new(
+                first.clone(),
+                Some(b"a250\n"),
+                Some(b"a251\n"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(list(&root, Filter::default()).unwrap().len(), 251);
+        assert_eq!(list(&root, Filter::default()).unwrap()[0].id, next.id);
     }
 }

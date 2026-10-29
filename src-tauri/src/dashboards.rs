@@ -108,13 +108,6 @@ pub fn load(dir: &Path) -> Result<Vec<Dashboard>, String> {
 ///
 /// The widgets' ids are the kinds they name — the identity the frontend keys a
 /// widget by, and the thing a saved layout can be matched to the registry by.
-pub fn seed(dir: &Path) -> Result<Vec<Dashboard>, String> {
-    if store_path(dir).exists() {
-        load(dir)
-    } else {
-        Ok(default_dashboards())
-    }
-}
 
 /// Write `dashboard` into the store, adding it or replacing the one with the
 /// same id.
@@ -450,7 +443,7 @@ mod tests {
     #[test]
     fn seed_is_the_six_default_widgets() {
         let dir = TempDir::new("dashboards-seed");
-        let seeded = seed(dir.dir()).unwrap();
+        let seeded = load(dir.dir()).unwrap();
         assert_eq!(seeded.len(), 1);
         let overview = &seeded[0];
         assert_eq!(overview.id, "overview");
@@ -495,6 +488,6 @@ mod tests {
 
         // Once the file exists, its dashboards win over the defaults.
         save(dir.dir(), dashboard("spending", "Spending")).unwrap();
-        assert_eq!(seed(dir.dir()).unwrap(), load(dir.dir()).unwrap());
+        assert_eq!(load(dir.dir()).unwrap(), load(dir.dir()).unwrap());
     }
 }

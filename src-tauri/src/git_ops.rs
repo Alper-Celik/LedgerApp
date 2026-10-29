@@ -473,31 +473,6 @@ pub fn conflict_texts(repo: &Path, path: &Path) -> Result<ConflictTexts, String>
     Ok(texts)
 }
 
-/// Resolve a conflicted path with text the caller already merged: write it to
-/// the working tree and stage it, which drops the three conflict stages.
-pub fn resolve(repo: &Path, path: &Path, text: &str) -> Result<(), String> {
-    let repo = open(repo)?;
-    let relative = relative(&repo, path)?;
-    let workdir = repo_workdir(&repo)?;
-    let target = workdir.join(&relative);
-    if let Some(parent) = target.parent() {
-        // A conflict created by a rename or an add may sit in a directory the
-        // working tree does not have yet.
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    }
-    fs::write(&target, text).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    let mut index = repo.index().map_err(|e| format!("git index: {e}"))?;
-    // `add_path` clears the stages of a path it knows, but a path that just
-    // arrived as a rename may not be one; removing them explicitly is the
-    // documented way and makes the intent depend on nothing else.
-    let _ = index.conflict_remove(&relative);
-    index
-        .add_path(&relative)
-        .map_err(|e| format!("git add {}: {e}", relative.display()))?;
-    index.write().map_err(|e| format!("git index: {e}"))
-}
-
 /// Finish the merge in progress: commit the index that [`merge`] (or a clean
 /// merge) staged, with HEAD and the merged branches as parents.
 ///
@@ -1384,9 +1359,12 @@ mod tests {
         assert!(texts.ours.as_deref().unwrap().contains("-22.00 USD"));
         assert!(texts.theirs.as_deref().unwrap().contains("-21.00 USD"));
 
-        // The caller merges the three texts itself; resolving stages its answer.
+        // The caller merges the three texts itself, writes the answer through the
+        // ledger's edit pipeline (the command layer's `edit_named_file_source`,
+        // where a loader refusal rolls the bytes back) and stages it here.
         let merged = JOURNAL.replace("-20.00 USD", "-21.50 USD");
-        resolve(dir.path(), &dir.file("main.bean"), &merged).unwrap();
+        fs::write(dir.file("main.bean"), &merged).unwrap();
+        stage(dir.path(), &[dir.file("main.bean")]).unwrap();
         merge_continue(dir.path()).unwrap();
 
         assert_eq!(repo.state(), RepositoryState::Clean);

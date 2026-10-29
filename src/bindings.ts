@@ -251,6 +251,35 @@ export const commands = {
 	 *  thread; tool calls come back for the panel to execute and answer.
 	 */
 	aiChat: (request: ChatRequest) => typedError<ChatResponse, string>(__TAURI_INVOKE("ai_chat", { request })),
+	/**
+	 *  Run one BQL statement against the loaded ledger. Every cell is text, so
+	 *  amounts reach the caller exactly as the ledger holds them.
+	 */
+	query: (bql: string, maxRows: number) => typedError<QueryTable, string>(__TAURI_INVOKE("query", { bql, maxRows })),
+	/**
+	 *  One streamed completion turn. Deltas go out as `ai://delta` events while the
+	 *  request is in flight; the resolved value is the assembled answer, so a caller
+	 *  that missed events still gets the text and the tool calls.
+	 */
+	aiStream: (request: ChatRequest) => typedError<ChatResponse, string>(__TAURI_INVOKE("ai_stream", { request })),
+	/**
+	 *  What the phone's quick-add sheet opens with: the last pair used and the most
+	 *  frequent categories/payees over a window of days. One pass over the ledger,
+	 *  instead of shipping the whole register to the browser.
+	 */
+	quickAddSuggestions: (days: number) => typedError<QuickAdd, string>(__TAURI_INVOKE("quick_add_suggestions", { days })),
+	/**
+	 *  Which storage the ledger lives in: a directory this process reads directly,
+	 *  or an Android SAF tree behind a private mirror. The sidebar reads this to
+	 *  decide whether the git views can exist at all.
+	 */
+	storageKind: () => __TAURI_INVOKE<StorageKind>("storage_kind"),
+	/**
+	 *  Android: write the mirror's changed files back into the SAF tree. Called after
+	 *  a successful edit (and by the UI's explicit sync action); returns the paths
+	 *  that were written.
+	 */
+	syncLedgerTree: () => typedError<string[], string>(__TAURI_INVOKE("sync_ledger_tree")),
 	/**  Every index series this build knows how to build. */
 	indexProviderList: () => __TAURI_INVOKE<IndexProviderInfo[]>("index_provider_list"),
 	/**
@@ -548,9 +577,10 @@ export type BudgetMonth = {
  *  The single-month [`BudgetMonth`] is the screen's *one* page; this is the
  *  scroll: the same figures, month by month, so a chart can draw them and the
  *  table can page without asking the backend per month. It is deliberately not
- *  a second reader of the ledger — [`budget_range_of`] asks [`budget_month`]
- *  for every month in the window and only sums what came back, so the two
- *  surfaces cannot disagree about a month they both show.
+ *  a second reader of the ledger: [`budget_range_of`] renders every month of
+ *  the window from the same one-walk flow set [`budget_month`] renders its
+ *  month from, and only sums what came back, so the two surfaces cannot
+ *  disagree about a month they both show.
  */
 export type BudgetRange = {
 	/**  The first month in the window, `YYYY-MM`. */
@@ -1490,6 +1520,47 @@ export type PriceTarget = {
 };
 
 /**
+ *  One query answer: the header, the rows, and whether the cap cut them off.
+ * 
+ *  `rows` are rectangular with `columns`: every row has exactly one cell per
+ *  column. `truncated` is true only when the executor produced more rows than
+ *  the caller's cap allowed, so an empty table and a cut one never look alike.
+ */
+export type QueryTable = {
+	/**  The header, in the statement's target order. */
+	columns: string[],
+	/**  One string per cell, row-major. */
+	rows: string[][],
+	/**  Whether more rows existed than [`run`] returned. */
+	truncated: boolean,
+};
+
+/**
+ *  The sheet's opening guesses: the remembered pair, the categories, the
+ *  payees.
+ * 
+ *  `Default` is the empty book's answer — no pair, no lists — so a ledger with
+ *  no entries needs no special case at the caller.
+ */
+export type QuickAdd = {
+	/**
+	 *  The most recent funding/category pair, as `(from, to)`: the account the
+	 *  money came from and the category it went to.
+	 */
+	last_pair: [string, string] | null,
+	/**
+	 *  Category accounts by recent use, most used first; at most
+	 *  [`MAX_SUGGESTIONS`].
+	 */
+	categories: string[],
+	/**
+	 *  Payees (or narrations) by recent use, most used first; at most
+	 *  [`MAX_SUGGESTIONS`].
+	 */
+	payees: string[],
+};
+
+/**
  *  One fetch: a commodity, the currency to quote it in, and the source to ask,
  *  with an optional date for a source that serves history.
  * 
@@ -1543,6 +1614,25 @@ export type Report = {
 
 /**  Who said a message. */
 export type Role = "user" | "assistant" | "tool";
+
+/**
+ *  Which storage the ledger lives in.
+ * 
+ *  Serialized as `"local"`/`"tree"` so it can cross IPC once the frontend has a
+ *  command to read it: today the SAF path is implemented and unit-tested but no
+ *  command opens a tree or reports this kind, so the app is always `Local`.
+ */
+export type StorageKind = 
+/**
+ *  A directory this process reads and writes directly — every desktop
+ *  platform.
+ */
+"local" | 
+/**
+ *  An Android SAF tree, reached through a local mirror (see the module
+ *  docs). Never the case off Android.
+ */
+"tree";
 
 /**
  *  A conversation as the list shows it: enough to draw a row and to find the

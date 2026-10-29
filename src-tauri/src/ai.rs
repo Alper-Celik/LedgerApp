@@ -663,7 +663,12 @@ pub struct ChatResponse {
 }
 
 /// One delta of a streamed turn, as the command layer forwards it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Carries [`specta::Type`] so the command that emits these as `ai://delta`
+/// can be typed end to end: the frontend's listener gets the same internally
+/// tagged shape the wire sends, and a variant added here fails the bindings
+/// export until the client catches up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// More prose.

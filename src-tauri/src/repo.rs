@@ -52,7 +52,10 @@ fn state_in(storage: StorageKind, ledger_dir: &Path) -> RepoState {
     if storage == StorageKind::Tree {
         return none;
     }
-    let Ok(repo) = git2::Repository::discover(ledger_dir) else {
+    // `open`, not `discover`: the git commands open the ledger's directory
+    // itself, and a ledger that merely sits under someone else's repository must
+    // not be reported as one (see `git_ops`).
+    let Ok(repo) = git2::Repository::open(ledger_dir) else {
         return none;
     };
     let config = local_config(&repo);
@@ -95,7 +98,7 @@ fn init_in(storage: StorageKind, ledger_dir: &Path) -> Result<(), String> {
     if storage == StorageKind::Tree {
         return Err(tree_refusal());
     }
-    if git2::Repository::discover(ledger_dir).is_ok() {
+    if git2::Repository::open(ledger_dir).is_ok() {
         return Ok(());
     }
     git2::Repository::init(ledger_dir)
@@ -121,7 +124,7 @@ fn set_identity_in(
     if storage == StorageKind::Tree {
         return Err(tree_refusal());
     }
-    let repo = git2::Repository::discover(ledger_dir).map_err(|_| {
+    let repo = git2::Repository::open(ledger_dir).map_err(|_| {
         format!(
             "{} is not in a git repository — initialise one first",
             ledger_dir.display()
@@ -220,27 +223,32 @@ mod tests {
     }
 
     #[test]
-    fn init_inside_an_existing_repository_adds_no_nested_one() {
+    fn a_ledger_under_another_repository_is_not_that_repository() {
+        let dir = TempDir::new("repo-above");
+        empty_repo(&dir);
+        fs::create_dir(dir.file("beancount")).unwrap();
+
+        // Deliberate: the repo is opened, never discovered upward. A ledger that
+        // merely sits inside someone else's repository must not inherit its
+        // history — `git_ops` refuses to open it for the same reason, and a
+        // merge or a revert there would touch files the ledger knows nothing
+        // about.
+        let nested = state(&dir.file("beancount"));
+
+        assert!(!nested.repo);
+        assert_eq!(nested.root, None);
+    }
+
+    #[test]
+    fn init_inside_another_repository_creates_the_ledgers_own() {
         let dir = TempDir::new("repo-init-nested");
         empty_repo(&dir);
         fs::create_dir(dir.file("beancount")).unwrap();
 
         init(&dir.file("beancount")).unwrap();
 
-        assert!(!dir.file("beancount/.git").exists());
-        assert_eq!(state(&dir.file("beancount")).root, state(dir.dir()).root);
-    }
-
-    #[test]
-    fn state_finds_the_repository_above_the_ledger_directory() {
-        let dir = TempDir::new("repo-above");
-        empty_repo(&dir);
-        fs::create_dir(dir.file("beancount")).unwrap();
-
-        let nested = state(&dir.file("beancount"));
-
-        assert!(nested.repo);
-        assert_eq!(nested.root, state(dir.dir()).root);
+        assert!(dir.file("beancount/.git").exists());
+        assert_eq!(state(&dir.file("beancount")).root, state(dir.dir()).root.as_deref().map(|_| dir.file("beancount").display().to_string()));
     }
 
     #[test]

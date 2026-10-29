@@ -266,6 +266,16 @@ struct ToolSpec {
 /// reads are the figures the user sees.
 const TOOLS: &[ToolSpec] = &[
     ToolSpec {
+        name: "query",
+        description: "Run one BQL (Beancount Query Language) statement against the loaded ledger and return its columns and rows, e.g. `SELECT account, sum(position) GROUP BY account`. Amounts arrive as exact decimal strings; use this for any total instead of adding figures yourself. At most 200 rows come back.",
+        args: &[ToolArg {
+            name: "query",
+            kind: ArgKind::Text,
+            description: "One BQL statement, e.g. `SELECT payee, sum(position) WHERE account ~ \"^Expenses:Food\" GROUP BY payee`.",
+            required: true,
+        }],
+    },
+    ToolSpec {
         name: "accounts",
         description: "Every account with its exact balance as a decimal string, its commodity, and whether its subtree has uncommitted changes. Balances follow beancount `bal` semantics: a parent is already the sum of its whole subtree, so never add a parent to its children.",
         args: &[],
@@ -583,6 +593,7 @@ mod tests {
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
             [
+                "query",
                 "accounts",
                 "transactions",
                 "files",

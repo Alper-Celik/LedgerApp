@@ -203,7 +203,41 @@ pub async fn pick_ledger_folder(
             .map(|folder| folder.to_string_lossy().into_owned()))
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        // A phone has no folder dialog: a directory is a SAF tree behind a
+        // content URI. Pick it, mirror it into app-private files (what the
+        // loader, git and the editor can open), persist the grant, and hand the
+        // mirror back as if it were a folder.
+        let _ = start;
+        let handle = app.clone();
+        let picked =
+            tauri::async_runtime::spawn_blocking(move || crate::storage::AndroidTree::pick(&handle))
+                .await
+                .map_err(|error| error.to_string())??;
+        let Some(tree) = picked else {
+            return Ok(None);
+        };
+        let mirror = app_config_dir(&app)?.join("tree");
+        crate::storage::mirror_into(&tree, &mirror)?;
+        crate::storage::set_tree_active(true);
+        let settings = app_config_dir(&app)?.join("storage.json");
+        if let Some(parent) = settings.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // The URI is the only thing that has to outlive the process: the mirror
+        // is rebuilt from it on the next open.
+        std::fs::write(&settings, tree.to_json()?)
+            .map_err(|error| format!("{}: {error}", settings.display()))?;
+        Ok(Some(mirror.display().to_string()))
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    )))]
     {
         let _ = (&app, start);
         Err("this platform has no folder chooser yet".to_owned())
@@ -591,6 +625,120 @@ pub async fn ai_chat(
     tauri::async_runtime::spawn_blocking(move || crate::ai_cmd::chat(&ai_dir(&app)?, request))
         .await
         .map_err(|error| error.to_string())?
+}
+
+// ----------------------------------------------------------------- storage ---
+
+/// Which storage the ledger lives in: a directory this process reads directly,
+/// or an Android SAF tree behind a private mirror. The sidebar reads this to
+/// decide whether the git views can exist at all.
+#[tauri::command]
+#[specta::specta]
+pub fn storage_kind() -> crate::storage::StorageKind {
+    crate::storage::kind()
+}
+
+/// Where a SAF tree is mirrored: app-private data, per install. The mirror is
+/// what the loader, the editor and git see; the tree is only the source and the
+/// sink.
+#[cfg(target_os = "android")]
+fn tree_mirror(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
+    Ok(app_config_dir(app)?.join("tree"))
+}
+
+/// Android: write the mirror's changed files back into the SAF tree. Called after
+/// a successful edit (and by the UI's explicit sync action); returns the paths
+/// that were written.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_ledger_tree(
+    app: tauri::AppHandle<AppRuntime>,
+) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let handle = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let settings = app_config_dir(&handle)?.join("storage.json");
+            let json = std::fs::read_to_string(&settings)
+                .map_err(|error| format!("{}: {error}", settings.display()))?;
+            let tree = crate::storage::AndroidTree::from_json(&handle, json.trim())?;
+            let mirror = tree_mirror(&handle)?;
+            crate::storage::sync_back(&tree, &mirror)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("a SAF tree exists only on Android".to_owned())
+    }
+}
+
+// ------------------------------------------------------------------ query ---
+
+/// Run one BQL statement against the loaded ledger. Every cell is text, so
+/// amounts reach the caller exactly as the ledger holds them.
+#[tauri::command]
+#[specta::specta]
+pub fn query(
+    bql: String,
+    max_rows: u32,
+    state: State<'_, AppState>,
+) -> Result<crate::query::QueryTable, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    let cap = if max_rows == 0 {
+        crate::query::TOOL_MAX_ROWS
+    } else {
+        max_rows
+    };
+    crate::query::run(&loaded.ledger, &bql, cap)
+}
+
+// -------------------------------------------------------------- assistant ---
+
+/// One streamed completion turn. Deltas go out as `ai://delta` events while the
+/// request is in flight; the resolved value is the assembled answer, so a caller
+/// that missed events still gets the text and the tool calls.
+#[tauri::command]
+#[specta::specta]
+pub async fn ai_stream(
+    request: crate::ai_cmd::ChatRequest,
+    app: tauri::AppHandle<AppRuntime>,
+) -> Result<crate::ai_cmd::ChatResponse, String> {
+    let dir = ai_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let emitter = app.clone();
+        crate::ai_stream::chat_stream(&dir, request, move |event| {
+            // A listener that cannot be reached is the panel's problem, not the
+            // request's: keep reading the stream and let the return value carry
+            // the answer.
+            let _ = emitter.emit("ai://delta", event);
+            std::ops::ControlFlow::Continue(())
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// What the phone's quick-add sheet opens with: the last pair used and the most
+/// frequent categories/payees over a window of days. One pass over the ledger,
+/// instead of shipping the whole register to the browser.
+#[tauri::command]
+#[specta::specta]
+pub fn quick_add_suggestions(
+    days: u32,
+    state: State<'_, AppState>,
+) -> Result<crate::suggest::QuickAdd, String> {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let loaded = guard.as_ref().ok_or("no ledger is open")?;
+    let accounts = account_balances(
+        &loaded.ledger,
+        &modified_accounts(&loaded.ledger, &loaded.baseline),
+    );
+    Ok(crate::suggest::quick_add(&loaded.ledger, &accounts, days))
 }
 
 // ---------------------------------------------------------------- indexes ---
@@ -1236,6 +1384,11 @@ mod tests {
                 ai_models,
                 ai_tools,
                 ai_chat,
+                query,
+                ai_stream,
+                quick_add_suggestions,
+                storage_kind,
+                sync_ledger_tree,
                 index_provider_list,
                 index_series,
                 index_import,

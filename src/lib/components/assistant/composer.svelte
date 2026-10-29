@@ -8,6 +8,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Attachment01Icon, ArrowUp01Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
 	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
+	import { Input } from "$lib/components/ui/input/index.js";
 	import { Textarea } from "$lib/components/ui/textarea/index.js";
 	import {
 		ATTACHMENT_ACCEPT,
@@ -87,22 +88,42 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 >
 	<div class="mx-auto flex w-full max-w-3xl flex-col gap-1.5">
 		{#if attachments.length > 0}
-			<div class="flex flex-wrap gap-1">
+			<div class="flex flex-wrap items-start gap-1">
 				{#each attachments as attachment, index (attachment.name + index)}
-					<span
-						class="bg-muted flex max-w-full items-center gap-1 rounded-md py-0.5 pr-0.5 pl-1.5 text-[0.6875rem]"
+					<div
+						class="bg-muted flex max-w-full flex-col gap-0.5 rounded-md px-1.5 py-0.5 text-[0.6875rem]"
 					>
-						<span class="max-w-40 truncate" title={attachment.name}>{attachment.name}</span>
-						<span class="text-muted-foreground">{formatBytes(attachment.size)}</span>
-						<Button
-							size="icon-xs"
-							variant="ghost"
-							aria-label="Remove {attachment.name}"
-							onclick={() => removeAttachment(index)}
-						>
-							<HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
-						</Button>
-					</span>
+						<span class="flex items-center gap-1">
+							<span class="max-w-40 truncate" title={attachment.name}>{attachment.name}</span>
+							<span class="text-muted-foreground">{formatBytes(attachment.size)}</span>
+							<Button
+								size="icon-xs"
+								variant="ghost"
+								aria-label="Remove {attachment.name}"
+								onclick={() => removeAttachment(index)}
+							>
+								<HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
+							</Button>
+						</span>
+						{#if attachment.mime === "application/pdf"}
+							<!--
+								Where the PDF sits in the ledger: the page router only needs a
+								path inside the ledger's own directory, and the picker never
+								says which folder the file came from. Empty means "send the
+								browser's bytes instead", the only route a PDF outside the
+								ledger has.
+							-->
+							<Input
+								class="h-6 w-52 max-w-full px-1 text-[0.6875rem]"
+								value={attachment.path ?? ""}
+								placeholder="path in the ledger (empty: send as is)"
+								aria-label="Path of {attachment.name} relative to the ledger"
+								oninput={(event) => {
+									attachment.path = event.currentTarget.value;
+								}}
+							/>
+						{/if}
+					</div>
 				{/each}
 			</div>
 		{/if}

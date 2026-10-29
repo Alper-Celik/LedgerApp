@@ -212,6 +212,12 @@ pub(crate) fn working_tree_changes(
 ) -> HashMap<u16, Vec<(u32, u32)>> {
     let mut changed: HashMap<u16, Vec<(u32, u32)>> = HashMap::new();
     for file in ledger.source_map.files() {
+        // `.ledger/` is the app's own state (conversations, the operation log),
+        // not ledger content: it must neither light up as a change nor be
+        // counted as one if a file in it ever gets loaded by accident.
+        if crate::conversations::is_session_path(&file.path) {
+            continue;
+        }
         let Some(id) = u16::try_from(file.id).ok() else {
             continue;
         };

@@ -10,14 +10,16 @@
  * goes back as JSON text. Nothing here computes a ledger figure — every number
  * in an answer is one of these results, verbatim.
  *
- * `commands.query` does not exist yet, so the backend's tool names are mapped
- * onto the commands the app already has: accounts, the register, the journal's
- * files, a file's text, the budget, the stored index series, the lifestyle
- * report and the price targets. Names are accepted in the endpoint's own
+ * The names map onto the commands the app has: accounts, the register, the
+ * journal's files, a file's text, the budget, the stored index series, the
+ * lifestyle report, the price targets and BQL. `query` is called through
+ * `invoke` by its Tauri name until it reaches `src/bindings.ts`, the way
+ * `api.ts` calls the `ai_*` commands. Names are accepted in the endpoint's own
  * spelling: snake_case, camelCase, or with a `ledger`/namespace prefix. An
  * unknown name is answered as an error the model can read and correct, never
  * thrown.
  */
+import { invoke } from "@tauri-apps/api/core";
 import { commands } from "../../bindings";
 import { messageOf } from "../errors.js";
 import type { ToolCall } from "./api.js";
@@ -55,6 +57,9 @@ const ALIASES: Record<string, string> = {
 	index: "index_series",
 	lifestyle: "lifestyle_report",
 	prices: "price_targets",
+	bql: "query",
+	sql: "query",
+	run_query: "query",
 };
 
 /** The tool names this panel can answer, for the unknown-name error. */
@@ -67,7 +72,34 @@ const NAMES = [
 	"index_series",
 	"lifestyle_report",
 	"price_targets",
+	"query",
 ];
+
+/**
+ * How many rows a `query` asks for when the model does not say. The answer says
+ * whether the cap cut anything, so a wider read is one explicit call away.
+ */
+const DEFAULT_QUERY_ROWS = 200;
+
+/** A BQL answer: the column names and every row as the strings the engine produced. */
+type QueryAnswer = {
+	columns: string[];
+	rows: string[][];
+	truncated: boolean;
+};
+
+/**
+ * One BQL statement through the backend's query engine.
+ *
+ * `query` is not in `src/bindings.ts` yet — the command layer that registers it
+ * is being added separately — so the call goes through `invoke` by its Tauri
+ * name; the row cap is camelCased from the Rust `max_rows` argument. A refused
+ * statement rejects with the engine's own message, which the dispatcher hands
+ * to the model as it came.
+ */
+function queryRows(bql: string, maxRows: number): Promise<QueryAnswer> {
+	return invoke<QueryAnswer>("query", { bql, maxRows });
+}
 
 /** Run one call from the model. */
 export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
@@ -118,6 +150,20 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 
 			case "price_targets":
 				return success(await commands.priceTargets());
+
+			case "query": {
+				const bql = stringArg(args, "bql", "query").trim();
+				if (!bql) {
+					throw new Error(
+						"`bql` must be a statement, e.g. `SELECT account, sum(position) WHERE account ~ 'Expenses'`"
+					);
+				}
+				const maxRows =
+					optionalPositiveInt(args, "max_rows") ??
+					optionalPositiveInt(args, "maxRows") ??
+					DEFAULT_QUERY_ROWS;
+				return success(await queryRows(bql, maxRows));
+			}
 
 			default:
 				throw new Error(

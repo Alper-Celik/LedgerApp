@@ -155,6 +155,7 @@ pub struct NameMatch {
 ///
 /// The rest of the answer — copies whose original is gone — is
 /// [`scan_report`]; this is the shorthand for the common case.
+#[cfg(test)]
 pub fn scan(root: &Path) -> Result<Vec<Candidate>, String> {
     Ok(scan_report(root)?.candidates)
 }

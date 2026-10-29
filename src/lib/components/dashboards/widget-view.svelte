@@ -17,6 +17,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		cashFlowSeries,
 		categoryShare,
 		isWidgetKind,
+		netWorthSeries,
 		spendingSeries,
 		type BalanceRow,
 		type DashboardData,
@@ -27,7 +28,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * One widget, drawn by its kind.
 	 *
 	 * Every kind reads the data the route fetched once; the widget never asks a
-	 * command of its own, so a page of six widgets costs one read of the ledger.
+	 * command of its own, so a page of six widgets costs one read per report.
 	 * A missing source or a kind with no implementation is answered inside this
 	 * card, never by failing the page around it.
 	 */
@@ -40,18 +41,23 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * still run on the empty fallback, so the template can branch on the error
 	 * without touching the union in markup.
 	 */
-	const transactionsError = $derived(data.transactions.ok ? "" : data.transactions.error);
 	const accountsError = $derived(data.accounts.ok ? "" : data.accounts.error);
+	const netWorthError = $derived(data.netWorth.ok ? "" : data.netWorth.error);
+	const cashflowError = $derived(data.cashflow.ok ? "" : data.cashflow.error);
+	const categoriesError = $derived(data.categories.ok ? "" : data.categories.error);
 	const budgetError = $derived(data.budget.ok ? "" : data.budget.error);
 
+	const netWorth: ChartSeries[] = $derived(
+		data.netWorth.ok ? netWorthSeries(data.netWorth.data, widget.config) : []
+	);
 	const cashFlow: ChartSeries[] = $derived(
-		data.transactions.ok ? cashFlowSeries(data.transactions.data, widget.config) : []
+		data.cashflow.ok ? cashFlowSeries(data.cashflow.data, widget.config) : []
 	);
 	const spending: ChartSeries[] = $derived(
-		data.transactions.ok ? spendingSeries(data.transactions.data, widget.config) : []
+		data.categories.ok ? spendingSeries(data.categories.data, widget.config) : []
 	);
 	const share: ChartDatum[] = $derived(
-		data.transactions.ok ? categoryShare(data.transactions.data, widget.config) : []
+		data.categories.ok ? categoryShare(data.categories.data, widget.config) : []
 	);
 	const balances: BalanceRow[] = $derived(
 		data.accounts.ok ? balanceRows(data.accounts.data, widget.config) : []
@@ -71,26 +77,32 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</WidgetCard>
 {:else if widget.kind === "net-worth"}
 	<WidgetCard title={definition.title} hint={definition.description}>
-		<WidgetEmpty
-			title="Waiting on the reports endpoint"
-			detail="This widget needs the reports endpoint: net worth is valued month by month, and dashboards are not given those valuations yet."
-		/>
+		{#if netWorthError}
+			<Alert variant="destructive">{netWorthError}</Alert>
+		{:else if netWorth.length === 0}
+			<WidgetEmpty
+				title="No net worth to draw in this window"
+				detail="The net-worth report answered no months for this dashboard's window, or none in the configured commodity."
+			/>
+		{:else}
+			<WidgetChart name="area" series={netWorth} />
+		{/if}
 	</WidgetCard>
 {:else if widget.kind === "lifestyle-inflation"}
 	<WidgetCard title={definition.title} hint={definition.description}>
 		<WidgetEmpty
-			title="Waiting on the reports endpoint"
-			detail="This widget needs the reports endpoint: restating spending in older money needs a stored index series and the lifestyle report."
+			title="Not drawn from a dashboard source yet"
+			detail="This widget needs the lifestyle report's own index series, which dashboards are not given yet."
 		/>
 	</WidgetCard>
 {:else if widget.kind === "cash-flow"}
 	<WidgetCard title={definition.title} hint={definition.description}>
-		{#if transactionsError}
-			<Alert variant="destructive">{transactionsError}</Alert>
+		{#if cashflowError}
+			<Alert variant="destructive">{cashflowError}</Alert>
 		{:else if cashFlow.length === 0}
 			<WidgetEmpty
 				title="No income or expense entries in this window"
-				detail="Cash flow is read from the ledger's Income and Expenses postings."
+				detail="Cash flow is read from the ledger's Income and Expenses postings, month by month."
 			/>
 		{:else}
 			<WidgetChart name="bar" series={cashFlow} />
@@ -98,12 +110,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</WidgetCard>
 {:else if widget.kind === "spending-by-month"}
 	<WidgetCard title={definition.title} hint={definition.description}>
-		{#if transactionsError}
-			<Alert variant="destructive">{transactionsError}</Alert>
+		{#if categoriesError}
+			<Alert variant="destructive">{categoriesError}</Alert>
 		{:else if spending.length === 0}
 			<WidgetEmpty
 				title="No spending in this window"
-				detail="Every month the ledger covers gets a bar, and months without Expenses postings stay at zero."
+				detail="Every month the report covers gets a bar, and months without Expenses postings stay at zero."
 			/>
 		{:else}
 			<WidgetChart name="bar" series={spending} />
@@ -124,12 +136,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</WidgetCard>
 {:else if widget.kind === "category-share"}
 	<WidgetCard title={definition.title} hint={definition.description}>
-		{#if transactionsError}
-			<Alert variant="destructive">{transactionsError}</Alert>
+		{#if categoriesError}
+			<Alert variant="destructive">{categoriesError}</Alert>
 		{:else if share.length === 0}
 			<WidgetEmpty
 				title="Nothing to divide up"
-				detail="No expense category in the last few months has a positive total to show as a share."
+				detail="No expense branch in the last few months has a positive total to show as a share."
 			/>
 		{:else}
 			<WidgetChart name="donut" data={share} />

@@ -97,8 +97,6 @@ pub(crate) fn account_transaction_views(
     baseline: &HashMap<PathBuf, Arc<str>>,
     account: &str,
 ) -> Vec<TransactionView> {
-    let prefix = format!("{account}:");
-    let root = account.is_empty();
     let view = ledger.balance_view();
     // Flagging rows costs a git diff plus a walk of the directive stream; both
     // are skipped when the working tree has nothing to report — no repository,
@@ -106,6 +104,46 @@ pub(crate) fn account_transaction_views(
     // as unmodified.
     let changed = working_tree_changes(ledger, baseline);
     let sources = (!changed.is_empty()).then(|| source_directive_index(ledger, &view));
+    collect_transaction_views(ledger, &view, sources.as_deref(), &changed, account, None)
+}
+
+/// The register rows one journal file wrote: the same rows and ids
+/// [`account_transaction_views`] gives the virtual root, narrowed to the
+/// transactions whose source directive belongs to `file`.
+///
+/// The caller brings its own `view` and `sources` — the pair
+/// [`source_directive_index`] builds for `ledger.balance_view()` — so the file
+/// view, which needs both to answer which entries the file holds, pays for
+/// neither a second `balance_view` clone nor a second source index. Only the
+/// matching transactions are materialised: the rest are rejected by their file
+/// id before a row is built.
+pub(crate) fn account_transaction_views_in_file(
+    ledger: &Ledger,
+    baseline: &HashMap<PathBuf, Arc<str>>,
+    view: &[Directive],
+    sources: &[Option<usize>],
+    file: usize,
+) -> Vec<TransactionView> {
+    let changed = working_tree_changes(ledger, baseline);
+    collect_transaction_views(ledger, view, Some(sources), &changed, "", Some(file))
+}
+
+/// The register's rows for one account and, when `file` is named, for the
+/// transactions that file holds — the one collector behind
+/// [`account_transaction_views`] and [`account_transaction_views_in_file`].
+///
+/// `sources` may be absent when the caller flags nothing (a clean working
+/// tree); a file filter always needs it, or no row could be placed in a file.
+fn collect_transaction_views(
+    ledger: &Ledger,
+    view: &[Directive],
+    sources: Option<&[Option<usize>]>,
+    changed: &HashMap<u16, Vec<(u32, u32)>>,
+    account: &str,
+    file: Option<usize>,
+) -> Vec<TransactionView> {
+    let prefix = format!("{account}:");
+    let root = account.is_empty();
     let mut line_starts: HashMap<u16, Vec<usize>> = HashMap::new();
     let mut views: Vec<TransactionView> = view
         .iter()
@@ -132,6 +170,15 @@ pub(crate) fn account_transaction_views(
             if !touches {
                 return None;
             }
+            // A file filter reads the same source index the `modified` flag
+            // does: the directive's own file id, not the file's path, decides
+            // the row — a synthesized entry belongs to no file.
+            if let Some(file) = file {
+                let source = sources?.get(id).copied().flatten()?;
+                if usize::from(ledger.directives[source].file_id) != file {
+                    return None;
+                }
+            }
             let postings: Vec<PostingView> = tx
                 .postings
                 .iter()
@@ -148,12 +195,11 @@ pub(crate) fn account_transaction_views(
                 })
                 .collect();
             let modified = sources
-                .as_ref()
                 .and_then(|sources| sources.get(id).copied().flatten())
                 .is_some_and(|index| {
                     touches_changes(
                         ledger,
-                        &changed,
+                        changed,
                         &mut line_starts,
                         &ledger.directives[index],
                     )

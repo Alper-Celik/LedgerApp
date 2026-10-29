@@ -16,25 +16,44 @@ import { signOf, sumDecimals } from "$lib/money.js";
 import type {
 	AccountBalance,
 	BudgetRange,
+	CashflowMonth,
+	CategoryMonths,
 	Dashboard,
 	DashboardWidget,
-	PostingView,
-	TransactionView,
+	NetWorthMonth,
 } from "../../../bindings";
 
 /**
  * One command's answer, kept apart from the others.
  *
- * A dashboard reads three sources, and a failure in one is not a failure of the
- * page: the widget that needed it says what went wrong while every other
+ * A dashboard reads several sources, and a failure in one is not a failure of
+ * the page: the widget that needed it says what went wrong while every other
  * widget still draws. Routes therefore carry these values instead of throwing.
  */
 export type Loaded<T> = { ok: true; data: T } | { ok: false; error: string };
 
-/** What the dashboard route fetches once and hands to every widget. */
+/**
+ * What the dashboard route fetches once and hands to every widget.
+ *
+ * Each source is one command, read once for the widest window any widget on
+ * the page asks for ([`reportWindow`]); a widget slices its own window off the
+ * end rather than asking again:
+ *
+ * - `netWorth` — `reportNetWorth`, read by the **net-worth** widget.
+ * - `cashflow` — `reportCashflow`, read by the **cash-flow** widget.
+ * - `categories` — `reportCategories`, read by **spending-by-month** and
+ *   **category-share**.
+ * - `accounts` — `accounts`, read by the **balances-table** widget.
+ * - `budget` — `budgetRange`, read by **budget-vs-actual**.
+ *
+ * Every figure inside these sources is the backend's exact decimal string; no
+ * widget sums a ledger it fetched itself.
+ */
 export type DashboardData = {
 	accounts: Loaded<AccountBalance[]>;
-	transactions: Loaded<TransactionView[]>;
+	netWorth: Loaded<NetWorthMonth[]>;
+	cashflow: Loaded<CashflowMonth[]>;
+	categories: Loaded<CategoryMonths[]>;
 	budget: Loaded<BudgetRange>;
 };
 
@@ -151,29 +170,32 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.min(max, Math.max(min, Math.round(value)));
 }
 
-const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
-
-/** The `YYYY-MM` a date falls in, or `null` for a date the ledger cannot have written. */
-function monthOf(date: string): string | null {
-	const month = date.slice(0, 7);
-	return MONTH.test(month) ? month : null;
-}
+/** Whether a widget kind reads one of the backend's month reports. */
+const READS_REPORT: Record<WidgetKind, boolean> = {
+	"net-worth": true,
+	"cash-flow": true,
+	"spending-by-month": true,
+	"category-share": true,
+	"budget-vs-actual": false,
+	"balances-table": false,
+	"lifestyle-inflation": false,
+};
 
 /**
- * The newest `count` months any transaction touches, ascending.
+ * The widest month window this dashboard's widgets ask a report for.
  *
- * Only months the ledger actually has entries in become labels; a widget with a
- * gap in its range draws no bar for the missing month rather than inventing a
- * zero for a month the ledger was not read over.
+ * The route reads each report once for the page, so the window has to cover
+ * every widget on it; a widget then takes its own, shorter window off the end
+ * of what arrived. Zero means no widget on the page reads a report, and the
+ * route asks for none at all.
  */
-function windowMonths(transactions: readonly TransactionView[], count: number): string[] {
-	const wanted = Math.max(1, Math.round(count));
-	const months = new Set<string>();
-	for (const transaction of transactions) {
-		const month = monthOf(transaction.date);
-		if (month) months.add(month);
+export function reportWindow(widgets: readonly PlacedWidget[]): number {
+	let months = 0;
+	for (const widget of widgets) {
+		if (!isWidgetKind(widget.kind) || !READS_REPORT[widget.kind]) continue;
+		months = Math.max(months, Math.round(numberSetting(widget.config, "months", 12)));
 	}
-	return [...months].sort().slice(-wanted);
+	return months;
 }
 
 /**
@@ -192,142 +214,114 @@ function withinCategories(account: string, categories: readonly string[]): boole
 }
 
 /**
- * The commodity a widget works in: the configured one when there is one, else
- * the commodity most of the candidate postings are written in.
+ * The report rows a widget works with: the newest `months` of them, and only
+ * those in the configured commodity when one is set.
  *
- * A sum of mixed commodities would not be money, so every series below filters
- * to this one currency before adding anything up.
+ * The page reads each report once over the widest window any widget asks for,
+ * so a widget narrows its own window here instead of asking again. The report
+ * already uses one commodity throughout; a configured one filters it to that
+ * commodity (and to nothing when the report is written in another).
  */
-function pickCurrency(postings: readonly PostingView[], wanted: string | null): string | null {
-	if (wanted !== null) {
-		return postings.some((posting) => posting.currency === wanted) ? wanted : null;
-	}
-	const counts = new Map<string, number>();
-	for (const posting of postings) {
-		counts.set(posting.currency, (counts.get(posting.currency) ?? 0) + 1);
-	}
-	let best: string | null = null;
-	let bestCount = 0;
-	for (const [currency, count] of counts) {
-		if (count > bestCount) {
-			best = currency;
-			bestCount = count;
-		}
-	}
-	return best;
-}
-
-/** The negation of an exact decimal string, without a `-0`. */
-function negate(units: string): string {
-	const text = units.trim();
-	if (signOf(text) === 0) return "0";
-	return text.startsWith("-") ? text.slice(1) : `-${text}`;
+function reportedWindow<T extends { month: string; currency: string }>(
+	rows: readonly T[],
+	config: WidgetConfig
+): T[] {
+	const wanted = Math.max(1, Math.round(numberSetting(config, "months", 12)));
+	const currency = stringSetting(config, "currency");
+	return rows.filter((row) => currency === null || row.currency === currency).slice(-wanted);
 }
 
 /**
- * Money in against money out, month by month.
+ * The net-worth widget's one series: the ledger's month-end net worth.
  *
- * With an account configured, the widget reads that account's own legs: what
- * arrived is positive, what left is negative. Without one it reads the ledger's
- * Income and Expenses accounts, which is the whole household's cash flow.
+ * Read from `reportNetWorth` — the dashboard's `netWorth` source — so the
+ * figure is the backend's own valuation of assets plus liabilities for each
+ * month, an exact decimal string per point.
  */
-export function cashFlowSeries(
-	transactions: readonly TransactionView[],
+export function netWorthSeries(
+	months: readonly NetWorthMonth[],
 	config: WidgetConfig
 ): ChartSeries[] {
-	const account = stringSetting(config, "account");
-	const wantedCurrency = stringSetting(config, "currency");
-	const months = windowMonths(transactions, numberSetting(config, "months", 12));
-	if (months.length === 0) return [];
-
-	const window = new Set(months);
-	const byMonth = new Map<string, PostingView[]>(months.map((month) => [month, []]));
-	for (const transaction of transactions) {
-		const month = monthOf(transaction.date);
-		if (!month || !window.has(month)) continue;
-		const target = byMonth.get(month);
-		if (!target) continue;
-		for (const posting of transaction.postings) {
-			const candidate = account
-				? isSubAccountOf(posting.account, account)
-				: isSubAccountOf(posting.account, "Income") || isSubAccountOf(posting.account, "Expenses");
-			if (candidate) target.push(posting);
-		}
-	}
-
-	const candidates = [...byMonth.values()].flat();
-	const currency = pickCurrency(candidates, wantedCurrency);
-	if (currency === null) return [];
-
-	const incoming: ChartDatum[] = [];
-	const outgoing: ChartDatum[] = [];
-	for (const month of months) {
-		const postings = (byMonth.get(month) ?? []).filter(
-			(posting) => posting.currency === currency
-		);
-		const inUnits = account
-			? postings.filter((posting) => signOf(posting.units) > 0).map((posting) => posting.units)
-			: postings
-					.filter((posting) => isSubAccountOf(posting.account, "Income"))
-					.map((posting) => negate(posting.units));
-		const outUnits = account
-			? postings.filter((posting) => signOf(posting.units) < 0).map((posting) => posting.units)
-			: postings
-					.filter((posting) => isSubAccountOf(posting.account, "Expenses"))
-					.map((posting) => negate(posting.units));
-		incoming.push({ label: month, value: sumDecimals(inUnits), currency });
-		outgoing.push({ label: month, value: sumDecimals(outUnits), currency });
-	}
-
+	const rows = reportedWindow(months, config);
+	if (rows.length === 0) return [];
 	return [
-		{ name: account ? "In" : "Income", points: incoming },
-		{ name: account ? "Out" : "Expenses", points: outgoing },
+		{
+			name: "Net worth",
+			points: rows.map((row) => ({ label: row.month, value: row.value, currency: row.currency })),
+		},
 	];
 }
 
 /**
- * What was spent each month, as a positive figure.
+ * Money in against money out, month by month, as the backend's cash-flow
+ * report draws it (`reportCashflow` — the dashboard's `cashflow` source).
  *
- * Every month in the window gets a point, zero included: a month without
- * spending is a fact about the ledger, not a gap in the chart. Refunds stay
- * negative and pull their month down — the exact sum is the ledger's, not a
- * rounded reading of it.
+ * Both series are the report's own positive decimal strings: `inflow` is
+ * income signed to read positive, `outflow` is expenses. The registry's
+ * `account` setting is not applied — the report is the ledger's Income/Expenses
+ * split, and narrowing it to one account is not part of that command.
  */
-export function spendingSeries(
-	transactions: readonly TransactionView[],
+export function cashFlowSeries(
+	months: readonly CashflowMonth[],
 	config: WidgetConfig
 ): ChartSeries[] {
-	const months = windowMonths(transactions, numberSetting(config, "months", 12));
-	if (months.length === 0) return [];
+	const rows = reportedWindow(months, config);
+	if (rows.length === 0) return [];
+	return [
+		{
+			name: "Income",
+			points: rows.map((row) => ({ label: row.month, value: row.inflow, currency: row.currency })),
+		},
+		{
+			name: "Expenses",
+			points: rows.map((row) => ({ label: row.month, value: row.outflow, currency: row.currency })),
+		},
+	];
+}
 
+/**
+ * What was spent each month, as a positive figure: the backend's per-branch
+ * spending added up across the branches the widget includes
+ * (`reportCategories` — the dashboard's `categories` source).
+ *
+ * The report carries every month of its range for every branch, zero
+ * included, so a month without spending stays a zero point rather than a gap.
+ * The sum is exact: `sumDecimals` adds the strings without a float, and a
+ * branch's refunds keep their sign and pull their month down.
+ */
+export function spendingSeries(
+	branches: readonly CategoryMonths[],
+	config: WidgetConfig
+): ChartSeries[] {
+	const wanted = Math.max(1, Math.round(numberSetting(config, "months", 12)));
+	const wantedCurrency = stringSetting(config, "currency");
 	const categories = stringListSetting(config, "categories");
-	const window = new Set(months);
-	const byMonth = new Map<string, PostingView[]>(months.map((month) => [month, []]));
-	for (const transaction of transactions) {
-		const month = monthOf(transaction.date);
-		if (!month || !window.has(month)) continue;
-		const target = byMonth.get(month);
-		if (!target) continue;
-		for (const posting of transaction.postings) {
-			if (isSubAccountOf(posting.account, "Expenses") && withinCategories(posting.account, categories)) {
-				target.push(posting);
-			}
+	const included = branches.filter(
+		(branch) =>
+			(wantedCurrency === null || branch.currency === wantedCurrency) &&
+			withinCategories(branch.account, categories)
+	);
+	const months = (included[0]?.months ?? []).slice(-wanted).map((month) => month.month);
+	if (included.length === 0 || months.length === 0) return [];
+
+	const byMonth = new Map<string, string[]>(months.map((month) => [month, []]));
+	for (const branch of included) {
+		for (const month of branch.months) {
+			const target = byMonth.get(month.month);
+			if (target) target.push(month.spent);
 		}
 	}
 
-	const currency = pickCurrency([...byMonth.values()].flat(), stringSetting(config, "currency"));
-	if (currency === null) return [];
-
-	const points = months.map((month) => ({
-		label: month,
-		value: sumDecimals(
-			(byMonth.get(month) ?? [])
-				.filter((posting) => posting.currency === currency)
-				.map((posting) => posting.units)
-		),
-		currency,
-	}));
-	return [{ name: "Spent", points }];
+	return [
+		{
+			name: "Spent",
+			points: months.map((month) => ({
+				label: month,
+				value: sumDecimals(byMonth.get(month) ?? []),
+				currency: included[0]?.currency ?? "",
+			})),
+		},
+	];
 }
 
 /** An exact comparison of two decimal strings, by magnitude — no float involved. */
@@ -351,52 +345,33 @@ function magnitudeParts(units: string): { whole: string; fraction: string } {
 }
 
 /**
- * Where the spending went over the newest few months, one slice per top-level
- * expense category, biggest first.
+ * Where the spending went over the newest few months, one slice per reported
+ * branch, biggest first.
  *
- * Only positive sums become slices: a category whose refunds outweigh its
- * spending has no share of a total to show. The limit is applied after sorting,
- * so it keeps the categories that matter rather than the first ones saved.
+ * Read from the same `reportCategories` source as [`spendingSeries`]: each
+ * branch's `spent` totals over the widget's own window, added as exact decimal
+ * strings. Only positive sums become slices — a branch whose refunds outweigh
+ * its spending has no share of a total to show — and the limit is applied
+ * after sorting, so it keeps the branches that matter.
  */
 export function categoryShare(
-	transactions: readonly TransactionView[],
+	branches: readonly CategoryMonths[],
 	config: WidgetConfig
 ): ChartDatum[] {
-	const months = windowMonths(transactions, numberSetting(config, "months", 3));
-	if (months.length === 0) return [];
-
+	const wanted = Math.max(1, Math.round(numberSetting(config, "months", 3)));
+	const wantedCurrency = stringSetting(config, "currency");
 	const categories = stringListSetting(config, "categories");
-	const window = new Set(months);
-	const byCategory = new Map<string, PostingView[]>();
-	for (const transaction of transactions) {
-		const month = monthOf(transaction.date);
-		if (!month || !window.has(month)) continue;
-		for (const posting of transaction.postings) {
-			if (!isSubAccountOf(posting.account, "Expenses") || !withinCategories(posting.account, categories)) continue;
-			const parts = posting.account.split(":");
-			const label = parts[1] ?? "Uncategorised";
-			const target = byCategory.get(label);
-			if (target) target.push(posting);
-			else byCategory.set(label, [posting]);
-		}
-	}
-
-	const currency = pickCurrency(
-		[...byCategory.values()].flat(),
-		stringSetting(config, "currency")
-	);
-	if (currency === null) return [];
-
 	const limit = clamp(numberSetting(config, "limit", 8), 1, 12);
-	return [...byCategory.entries()]
-		.map(([label, postings]) => ({
-			label,
-			value: sumDecimals(
-				postings
-					.filter((posting) => posting.currency === currency)
-					.map((posting) => posting.units)
-			),
-			currency,
+	return branches
+		.filter(
+			(branch) =>
+				(wantedCurrency === null || branch.currency === wantedCurrency) &&
+				withinCategories(branch.account, categories)
+		)
+		.map((branch) => ({
+			label: branch.label,
+			value: sumDecimals(branch.months.slice(-wanted).map((month) => month.spent)),
+			currency: branch.currency,
 		}))
 		.filter((point) => signOf(point.value) > 0)
 		.sort((left, right) => compareMagnitude(right.value, left.value))

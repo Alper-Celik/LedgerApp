@@ -5,7 +5,7 @@
 //! The journal's files: what each one holds, how it stands in git, and the
 //! transactions one of them writes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use rustledger_core::Directive;
 use rustledger_loader::{Ledger, SourceFile};
 
-use crate::accounts::account_transaction_views;
+use crate::accounts::account_transaction_views_in_file;
 use crate::git::working_tree_changes;
 use crate::model::{Change, JournalFile, TransactionView};
 use crate::session::Loaded;
@@ -114,6 +114,11 @@ fn repository_of(path: &Path) -> Option<(git2::Repository, std::path::PathBuf)> 
 /// edits and stages exactly as it does from an account page. An entry belongs to
 /// a file only through the directive it came from; synthesized entries — a
 /// `pad`'s transaction, a plugin's — belong to no file.
+///
+/// The `balance_view` and the source index are this function's own, computed
+/// once and handed to [`account_transaction_views_in_file`]: the file view needs
+/// both to know which entries are the file's, so the register must not rebuild
+/// them — one ledger clone per request, not two.
 pub(crate) fn file_transaction_views(
     ledger: &Ledger,
     baseline: &HashMap<std::path::PathBuf, Arc<str>>,
@@ -122,22 +127,13 @@ pub(crate) fn file_transaction_views(
     let found = source_of_file(ledger, file)?;
     let view = ledger.balance_view();
     let sources = source_directive_index(ledger, &view);
-    let mut in_file: HashSet<u32> = HashSet::new();
-    for (id, directive) in view.iter().enumerate() {
-        if !matches!(directive, Directive::Transaction(_)) {
-            continue;
-        }
-        let Some(index) = sources.get(id).copied().flatten() else {
-            continue;
-        };
-        if usize::from(ledger.directives[index].file_id) == found.id {
-            in_file.insert(u32::try_from(id).unwrap_or(u32::MAX));
-        }
-    }
-    Ok(account_transaction_views(ledger, baseline, "")
-        .into_iter()
-        .filter(|row| in_file.contains(&row.id))
-        .collect())
+    Ok(account_transaction_views_in_file(
+        ledger,
+        baseline,
+        &view,
+        &sources,
+        found.id,
+    ))
 }
 
 /// The journal file the loader holds under the path `file` — the one lookup
@@ -407,6 +403,103 @@ include \"2026.bean\"
                     .contains("not a file of this journal")
             );
         }
+    }
+
+    /// A file's rows are materialised from the caller's own `balance_view` and
+    /// source index: the two files' rows tile the register exactly — same ids,
+    /// same payload bytes — and a view that stops before an entry has no row to
+    /// give for it, whatever the ledger holds.
+    #[test]
+    fn a_files_rows_come_from_the_callers_view_and_source_index() {
+        use crate::accounts::account_transaction_views;
+
+        let dir = TempDir::new("file-rows-view");
+        let root = dir.file("main.bean");
+        let entries = dir.file("2026.bean");
+        fs::write(
+            &root,
+            "\
+option \"operating_currency\" \"USD\"
+
+include \"2026.bean\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+2026-01-01 open Expenses:Coffee
+
+2026-01-05 * \"Root entry\"
+  Assets:Bank:Checking             -2.00 USD
+  Expenses:Coffee                   2.00 USD
+",
+        )
+        .unwrap();
+        fs::write(
+            &entries,
+            "\
+2026-01-10 * \"Included entry\"
+  Assets:Bank:Checking            -20.00 USD
+  Expenses:Food                    20.00 USD
+",
+        )
+        .unwrap();
+        let state = loaded_state(&root);
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().unwrap();
+        let ledger = &loaded.ledger;
+        let included_id = source_of_file(ledger, &entries.display().to_string())
+            .unwrap()
+            .id;
+        let root_id = source_of_file(ledger, &root.display().to_string())
+            .unwrap()
+            .id;
+
+        let view = ledger.balance_view();
+        let sources = source_directive_index(ledger, &view);
+        let rows = |file| {
+            account_transaction_views_in_file(ledger, &loaded.baseline, &view, &sources, file)
+        };
+        let narrations = |file| {
+            rows(file)
+                .into_iter()
+                .map(|row| row.narration)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(narrations(included_id), ["Included entry"]);
+        assert_eq!(narrations(root_id), ["Root entry"]);
+
+        // The files' rows tile the register: the ids and the payloads are the
+        // register's own, only split by the file that wrote them.
+        let mut split = rows(root_id)
+            .into_iter()
+            .chain(rows(included_id))
+            .collect::<Vec<_>>();
+        split.sort_by_key(|row| row.id);
+        let mut register = account_transaction_views(ledger, &loaded.baseline, "");
+        register.sort_by_key(|row| row.id);
+        assert_eq!(
+            serde_json::to_string(&split).unwrap(),
+            serde_json::to_string(&register).unwrap()
+        );
+
+        // Cut the caller's view before the included entry: the same file id
+        // finds nothing, because the view, not the ledger, is what was walked.
+        let cut = view
+            .iter()
+            .position(|directive| {
+                matches!(directive, Directive::Transaction(tx) if tx.narration.as_str() == "Included entry")
+            })
+            .expect("the included entry is in the view");
+        assert!(cut > 0);
+        assert!(
+            account_transaction_views_in_file(
+                ledger,
+                &loaded.baseline,
+                &view[..cut],
+                &sources[..cut],
+                included_id,
+            )
+            .is_empty()
+        );
     }
 
     /// The default file for a new entry follows the accounts: the file of the
