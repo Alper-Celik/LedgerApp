@@ -291,6 +291,36 @@ const TOOLS: &[ToolSpec] = &[
         }],
     },
     ToolSpec {
+        name: "grep",
+        description: "Search the ledger's own directory for a regular expression, honouring .gitignore. Returns matching paths with line numbers and the line text. Use it to find a payee, an account spelling or a directive; it never edits.",
+        args: &[
+            ToolArg {
+                name: "pattern",
+                kind: ArgKind::Text,
+                description: "A regular expression, e.g. `^2026-.*Migros`.",
+                required: true,
+            },
+            ToolArg {
+                name: "glob",
+                kind: ArgKind::Text,
+                description: "Restrict to paths matching this glob, e.g. `**/*.bean`.",
+                required: false,
+            },
+        ],
+    },
+    ToolSpec {
+        name: "read_lines",
+        description: "Read a journal file as numbered lines, each with a short content hash. Use `edit_lines` with those hashes to change the file; reading the same file again after an edit gives fresh hashes.",
+        args: &[
+            ToolArg {
+                name: "path",
+                kind: ArgKind::Text,
+                description: "A path from the `files` tool, relative to the ledger's directory.",
+                required: true,
+            },
+        ],
+    },
+    ToolSpec {
         name: "files",
         description: "The journal files the loaded ledger includes, each with the path as loaded, the label to show, how many transactions it writes and how it stands in git. Use a path from here when pointing at where an entry lives.",
         args: &[],
@@ -596,6 +626,8 @@ mod tests {
                 "query",
                 "accounts",
                 "transactions",
+                "grep",
+                "read_lines",
                 "files",
                 "budget_range",
                 "index_series",

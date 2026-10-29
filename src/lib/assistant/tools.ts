@@ -315,6 +315,24 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 			case "price_targets":
 				return success(await commands.priceTargets());
 
+			case "grep": {
+				// The read-only file tools live in the backend's `tools` module
+				// (hash-anchored reads, an ignore-aware search); they are run by
+				// name so a change there needs no change here.
+				const pattern = stringArg(args, "pattern");
+				const glob = optionalStringArg(args, "glob");
+				const json = await unwrap(
+					commands.toolInvoke("grep", JSON.stringify({ pattern, glob: glob ?? undefined }))
+				);
+				return success(JSON.parse(json) as unknown);
+			}
+
+			case "read_lines": {
+				const path = stringArg(args, "path");
+				const json = await unwrap(commands.toolInvoke("read", JSON.stringify({ path })));
+				return success(JSON.parse(json) as unknown);
+			}
+
 			case "query": {
 				const bql = stringArg(args, "bql", "query").trim();
 				if (!bql) {
