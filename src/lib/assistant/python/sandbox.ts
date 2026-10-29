@@ -21,7 +21,6 @@
  * executor passed in by `tools.ts`; that keeps the Tauri bridge on this side
  * and the sandbox unable to reach anything but those reads.
  */
-import { base } from "$app/paths";
 import { pythonRunOf, type PythonRun } from "../artifacts/types.js";
 import { messageOf } from "../../errors.js";
 import type {
@@ -244,6 +243,10 @@ class PythonSandbox {
  * Tauri's custom protocol.
  */
 function pyodideIndexURL(): string {
+	// `import.meta.env.BASE_URL` is Vite's answer (SvelteKit's is the same string):
+	// reading it here keeps the sandbox runner free of any `$app/*` import, so it
+	// can be loaded (and tested) outside a route.
+	const base = import.meta.env.BASE_URL;
 	const root = base.endsWith("/") ? base.slice(0, -1) : base;
 	return new URL(`${root}/pyodide/`, location.href).href;
 }

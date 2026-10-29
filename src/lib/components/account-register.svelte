@@ -98,7 +98,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * 360px viewport), so the component renders one shape or the other, never
 	 * both: `isMobile.current` decides which.
 	 */
-	const isMobile = new IsMobile();
+	// The register's table needs ~44rem of columns beside the sidebar, so the
+	// card list takes over below `lg`, not below `md`: at the default 800×600
+	// window the sidebar leaves 544px, and a table there is a clipped table.
+	const isMobile = new IsMobile(1024);
 
 	/** The style choice sticks across accounts and reloads. */
 	let view = $state<ViewId>(

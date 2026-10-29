@@ -237,8 +237,10 @@ export class Assistant {
 				this.sessionsError = result.error;
 				return;
 			}
-			this.sessions = result.data.sessions;
-			this.malformed = result.data.errors;
+			// A bridge that answers nothing at all must leave the list empty, not
+			// crash the panel: this is the one place the listing is read.
+			this.sessions = result.data?.sessions ?? [];
+			this.malformed = result.data?.errors ?? [];
 			this.sessionsError = "";
 			if (this.activeId && !this.sessions.some((session) => session.id === this.activeId)) {
 				this.newConversation();

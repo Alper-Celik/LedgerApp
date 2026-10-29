@@ -194,6 +194,9 @@ test("a commit in the branches screen opens its patch", async ({ page }) => {
 });
 
 test("the python sandbox boots in the app's origin and runs a script", async ({ page }) => {
+	// Pyodide's first boot downloads the runtime into the worker (app assets, ~20 MB
+	// with the vendored wheels) and parses it: minutes, not seconds, on a cold cache.
+	test.setTimeout(180_000);
 	// The sandbox is exercised directly rather than through a model turn: what
 	// this proves is that Pyodide's assets resolve from the app itself, the
 	// worker runs under this origin, and the `ledger` bridge is reachable.

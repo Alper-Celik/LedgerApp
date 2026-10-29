@@ -119,7 +119,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			</div>
 		{/if}
 
-		{#if assistant.sessions.length === 0 && !assistant.sessionsError}
+		{#if (assistant.sessions?.length ?? 0) === 0 && !assistant.sessionsError}
 			<p class="text-muted-foreground px-1 py-2 text-[0.6875rem]">
 				No conversations yet. The first message starts one inside the ledger
 				(<code class="font-mono">.ledger/sessions/</code>).
