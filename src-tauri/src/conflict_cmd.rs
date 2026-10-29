@@ -77,6 +77,14 @@ struct Compared {
 static COMPARED: LazyLock<Mutex<HashMap<PathBuf, Compared>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Forget a comparison once it has been resolved.
+fn forget(original: &Path) {
+    COMPARED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&canonical(original));
+}
+
 /// One conflicted copy as the merge UI shows it: the three texts, where the
 /// base came from, and the decisions to answer.
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -238,6 +246,7 @@ pub fn resolve(
         ));
     }
     drop_copy(&compared)?;
+    forget(&file);
     Ok(file.display().to_string())
 }
 
@@ -307,6 +316,11 @@ fn compared(original: &Path) -> Result<Compared, String> {
 
 /// Remember what a comparison read, under the original's canonical path so the
 /// two calls agree however the caller spelled it.
+///
+/// One entry per original: a second comparison replaces the first, which is why
+/// `compare` refuses to overwrite one that has not been resolved. The entry is
+/// dropped by the resolve that uses it, so a panel left open and closed costs
+/// nothing and no copy path outlives the session.
 fn remember(original: &Path, copy: &Path, bytes: Vec<u8>) {
     let key = canonical(original);
     COMPARED

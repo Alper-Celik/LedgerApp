@@ -43,7 +43,11 @@
 //! assertion dated on the month's own last day would be evaluated before that
 //! day's transactions. Dated a day later it sees the whole month, including the
 //! sweep, which makes rustledger's own Late validation a check on the plugin's
-//! arithmetic.
+//! arithmetic. Hand-written postings inside the namespace are part of that
+//! arithmetic — the plugin keeps every input directive — so they are folded
+//! into the model's balances before the month they are dated in
+//! ([`fold_handwritten`]); an assertion that ignored them would contradict the
+//! ledger it was emitted into.
 //!
 //! # Currency
 //!
@@ -244,9 +248,31 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     // every posting per category.
     let mut per_month_activity: BTreeMap<i32, BTreeMap<String, Inventory>> = BTreeMap::new();
     let mut per_month_locations: BTreeMap<i32, BTreeMap<String, SourceLocation>> = BTreeMap::new();
+    // Hand-written postings inside the plugin's namespace, per month, and the
+    // ones dated before the horizon. The plugin keeps every input directive, so
+    // a transfer the user wrote between envelope accounts is part of the
+    // ledger's inventory even though the model did not generate it; the
+    // assertions must include it or rustledger's own check fails (see
+    // [`fold_handwritten`]).
+    let mut per_month_postings: BTreeMap<i32, BTreeMap<String, Inventory>> = BTreeMap::new();
+    let mut before_horizon: BTreeMap<String, Inventory> = BTreeMap::new();
 
     for movement in &movements {
         if accounts::is_generated(&movement.account) {
+            let units = &movement.units;
+            if movement.month < config.start {
+                before_horizon
+                    .entry(movement.account.clone())
+                    .or_default()
+                    .add(&units.currency, units.value);
+            } else if movement.month <= *horizon.last().expect("horizon is never empty") {
+                per_month_postings
+                    .entry(movement.month.index())
+                    .or_default()
+                    .entry(movement.account.clone())
+                    .or_default()
+                    .add(&units.currency, units.value);
+            }
             continue;
         }
         if let Some(category) = category_for(config, &mappings, &movement.account) {
@@ -284,6 +310,11 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
 
     let mut tbb = Inventory::new();
     let mut categories: BTreeMap<String, Inventory> = BTreeMap::new();
+    // A posting before the horizon is already in every month's inventory, so it
+    // is folded once, before the first month.
+    for (account, balance) in &before_horizon {
+        fold_handwritten(account, balance, &mut categories, &mut tbb);
+    }
     let mut generated: BTreeSet<String> = BTreeSet::new();
     generated.insert(MONEY.to_string());
     generated.insert(TO_BE_BUDGETED.to_string());
@@ -304,6 +335,15 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
             entries: Vec::new(),
             assertions: Vec::new(),
         };
+
+        // The month's hand-written namespace postings join the balances the
+        // month starts from: the assertion at its end sees them, and so do its
+        // sweeps and `pad`s.
+        if let Some(postings) = per_month_postings.get(&month.index()) {
+            for (account, balance) in postings {
+                fold_handwritten(account, balance, &mut categories, &mut tbb);
+            }
+        }
 
         // 1. The month's change in on-budget money, mirrored as the contra the
         //    pool is backed by. The first month also carries what was held
@@ -819,6 +859,50 @@ fn subtree_of(categories: &BTreeMap<String, Inventory>, account: &str) -> Invent
     total
 }
 
+/// Fold a hand-written balance inside the plugin's namespace into the model's
+/// own balances.
+///
+/// The plugin keeps every input directive, so a posting the user wrote between
+/// envelope accounts — or against an envelope account from outside — is part of
+/// the ledger's inventory even though the model did not generate it. A
+/// `balance` is checked against the account *and its subaccounts*, so an
+/// assertion built only from generated postings would disagree with rustledger
+/// and make the saved ledger refuse to load. `balance` is what the account
+/// holds (its units), which is exactly what a balance assertion measures.
+///
+/// `Money` is never asserted, and the namespace root is *above* every asserted
+/// account, so rustledger's account+subaccounts check cannot see a posting on
+/// either: folding one would invent a figure nothing verifies. Everything else
+/// in the namespace is either the pool — whose assertion is also a subtree
+/// assertion, so its subaccounts belong in the same figure — or a category,
+/// whose balance is its subtree sum.
+fn fold_handwritten(
+    account: &str,
+    balance: &Inventory,
+    categories: &mut BTreeMap<String, Inventory>,
+    tbb: &mut Inventory,
+) {
+    if accounts::is_under(account, MONEY) || account == accounts::NAMESPACE {
+        // `Money` is never asserted, and the namespace root is *above* every
+        // asserted account, so rustledger's account+subaccounts check cannot
+        // see a posting there: folding it would invent a figure nothing
+        // verifies.
+        return;
+    }
+    if accounts::is_under(account, TO_BE_BUDGETED) {
+        // The pool's assertion is a subtree assertion too, so a hand-written
+        // posting below it belongs in the same figure.
+        tbb.add_inventory(balance);
+    } else {
+        // Every other namespace account is a category: its balance is its
+        // subtree sum, which is what the assertion measures.
+        categories
+            .entry(account.to_string())
+            .or_default()
+            .add_inventory(balance);
+    }
+}
+
 /// The rollover policy in force for `node` in `month`: the newest declaration at
 /// or before it, else carrying everything.
 fn rollover_for(config: &Config, node: &str, month: Month) -> Rollover {
@@ -934,7 +1018,6 @@ mod tests {
             end: Some(Month::from_index(start.index() + months as i32 - 1)),
             months_ahead: 0,
             budget_accounts: vec![r"^Assets:Bank".to_string()],
-            income_accounts: vec![r"^Income:".to_string()],
             funds: Vec::new(),
             adjustments: Vec::new(),
             targets: Vec::new(),
@@ -944,7 +1027,6 @@ mod tests {
             assert_balances: true,
             strict: false,
             expense_root: "Expenses".to_string(),
-            income_root: "Income".to_string(),
             warnings: Vec::new(),
         }
     }
@@ -1400,6 +1482,156 @@ mod tests {
     }
 
     #[test]
+    fn hand_written_namespace_postings_are_part_of_the_assertions() {
+        // The plugin keeps every input directive, so a transfer the user wrote
+        // between envelope accounts is real money the month-end assertion must
+        // account for — rustledger checks it against the ledger as a whole.
+        let config = {
+            let mut config = config("2026-01", 1);
+            config.funds.push(Fund {
+                month: Month::new(2026, 1),
+                node: "Expenses:Food".to_string(),
+                amount: money("100.00", "TRY"),
+            });
+            config
+        };
+        let directives = vec![
+            txn(
+                "2026-01-05",
+                &[
+                    ("Assets:Bank", "1000.00", "TRY"),
+                    ("Income:Salary", "-1000.00", "TRY"),
+                ],
+            ),
+            txn(
+                "2026-01-20",
+                &[
+                    ("Equity:Envelope:To-Be-Budgeted", "-50.00", "TRY"),
+                    ("Equity:Envelope:Food", "50.00", "TRY"),
+                ],
+            ),
+        ];
+
+        let plan = plan(&config, &directives);
+        // Nothing generated repeats the transfer: it is already in the ledger.
+        assert!(legs(&plan, EntryKind::Activity).is_empty());
+        assert_entries_balance(&plan);
+        assert_eq!(
+            assertions(&plan),
+            vec![
+                // 100.00 assigned + 50.00 moved in by hand…
+                "2026-02-01 Equity:Envelope:Food 150.00 TRY",
+                // …and the pool: 1000.00 earned − 100.00 assigned − 50.00 moved.
+                "2026-02-01 Equity:Envelope:To-Be-Budgeted 850.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hand_written_posting_below_a_category_reaches_its_assertion() {
+        // rustledger checks a `balance` against the account *and its
+        // subaccounts*, so a hand-written posting on a child belongs in the
+        // parent's asserted subtree, whatever account it happens to be.
+        let config = {
+            let mut config = config("2026-01", 1);
+            config.funds.push(Fund {
+                month: Month::new(2026, 1),
+                node: "Expenses:Food".to_string(),
+                amount: money("100.00", "TRY"),
+            });
+            config
+        };
+        let directives = vec![txn(
+            "2026-01-20",
+            &[
+                ("Equity:Envelope:Food:Snacks", "40.00", "TRY"),
+                ("Equity:Envelope:To-Be-Budgeted", "-40.00", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_eq!(
+            assertions(&plan),
+            vec![
+                "2026-02-01 Equity:Envelope:Food 140.00 TRY",
+                "2026-02-01 Equity:Envelope:Food:Snacks 40.00 TRY",
+                "2026-02-01 Equity:Envelope:To-Be-Budgeted -140.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_namespace_posting_before_the_horizon_carries_into_the_first_month() {
+        let config = {
+            let mut config = config("2026-02", 1);
+            config.funds.push(Fund {
+                month: Month::new(2026, 2),
+                node: "Expenses:Food".to_string(),
+                amount: money("100.00", "TRY"),
+            });
+            config
+        };
+        let directives = vec![txn(
+            "2026-01-20",
+            &[
+                ("Equity:Envelope:Food", "40.00", "TRY"),
+                ("Equity:Envelope:To-Be-Budgeted", "-40.00", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_eq!(
+            assertions(&plan),
+            vec![
+                "2026-03-01 Equity:Envelope:Food 140.00 TRY",
+                "2026-03-01 Equity:Envelope:To-Be-Budgeted -140.00 TRY",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hand_written_posting_is_swept_by_a_reset_rollover() {
+        // The fold happens before the month's own entries, so a hand-written
+        // deposit is part of the subtree a `zero`/`pad`/rollover reconciles —
+        // not money the budget forgets at the boundary.
+        let config = {
+            let mut config = config("2026-01", 1);
+            config.funds.push(Fund {
+                month: Month::new(2026, 1),
+                node: "Expenses:Food".to_string(),
+                amount: money("100.00", "TRY"),
+            });
+            config.rollovers.push(RolloverDecl {
+                month: Month::new(2026, 1),
+                node: "Expenses:Food".to_string(),
+                policy: Rollover::Reset,
+            });
+            config
+        };
+        let directives = vec![txn(
+            "2026-01-20",
+            &[
+                ("Equity:Envelope:Food", "40.00", "TRY"),
+                ("Equity:Envelope:To-Be-Budgeted", "-40.00", "TRY"),
+            ],
+        )];
+
+        let plan = plan(&config, &directives);
+        assert_entries_balance(&plan);
+        assert_eq!(
+            rendered(&plan, EntryKind::Sweep),
+            vec![
+                // 100.00 assigned + 40.00 moved in by hand, all swept back.
+                "Equity:Envelope:Food -140.00 TRY",
+                "Equity:Envelope:To-Be-Budgeted 140.00 TRY",
+            ]
+        );
+        // Both accounts end at zero, which holds nothing to assert.
+        let asserted = assertions(&plan);
+        assert!(asserted.is_empty(), "{asserted:?}");
+    }
+
+    #[test]
     fn zero_releases_a_whole_subtree_and_pad_sets_a_balance() {
         let config = {
             let mut config = config("2026-01", 2);
@@ -1770,9 +2002,9 @@ mod tests {
     }
 
     #[test]
-    fn unused_income_configuration_is_accepted() {
-        // The ledger's income patterns are read for fava-envelope compatibility;
-        // availability comes from on-budget balances, so they change nothing.
+    fn income_postings_are_backing_money_not_activity() {
+        // Availability comes from the on-budget accounts' balances, per
+        // commodity: an income posting only shows up as the money it moved.
         let config = config("2026-01", 1);
         let directives = vec![txn(
             "2026-01-05",

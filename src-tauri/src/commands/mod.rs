@@ -66,9 +66,7 @@ pub fn load_ledger(
 
 /// Whether `root` is inside the app's private SAF mirror.
 fn is_mirror_ledger(app: &tauri::AppHandle<AppRuntime>, root: &Path) -> bool {
-    app_config_dir(app)
-        .map(|config| config.join("tree"))
-        .is_ok_and(|mirror| root.starts_with(mirror))
+    app_config_dir(app).is_ok_and(|config| root.starts_with(tree_mirror(&config)))
 }
 
 /// The ledger currently open — its root journal and what the load found — or
@@ -88,6 +86,16 @@ pub(crate) fn app_config_dir(app: &tauri::AppHandle<AppRuntime>) -> Result<PathB
     app.path()
         .app_config_dir()
         .map_err(|error| format!("no config directory: {error}"))
+}
+
+/// Where an Android SAF tree is mirrored: app-private data, per install. The
+/// mirror is what the loader, the editor and git see; the tree is only the
+/// source and the sink. One definition, because every caller that names the
+/// mirror by hand (`is_mirror_ledger`, the picker, the restore) has to agree
+/// with the others on where it is or tree mode is decided by a path nobody
+/// wrote to.
+pub(crate) fn tree_mirror(config: &Path) -> PathBuf {
+    config.join("tree")
 }
 
 /// The folder the chooser and the repository work from: the open ledger's own

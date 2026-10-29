@@ -15,12 +15,17 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
 	testDir: "e2e",
-	timeout: 30_000,
 	// \`vite dev\` compiles a page's modules on first request, and the first page of a
 	// cold suite can take longer than an assertion should: the app is a large
 	// module graph (Monaco included). Nobody is waiting on a frame here, so the
 	// budget covers compilation rather than speed of interaction.
-	expect: { timeout: 15_000 },
+	//
+	// Measured, not guessed: the first test of a file takes ~22 s when several
+	// files start together and ~1–2 s afterwards, which is what made a 15 s
+	// budget fail on whichever spec ran first — three different specs, every run
+	// a different one. These are the slowest honest numbers with headroom.
+	timeout: 60_000,
+	expect: { timeout: 30_000 },
 	reporter: [["list"]],
 	use: {
 		baseURL: "http://127.0.0.1:5199",

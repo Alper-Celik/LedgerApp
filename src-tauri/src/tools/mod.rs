@@ -11,24 +11,33 @@
 //! passes the directory to confine the tools to, and `edit` writes the file
 //! the caller named. There is deliberately no shell.
 //!
+//! A file over [`hashline::MAX_FILE_BYTES`] is refused before it is read, so
+//! an attachment in the ledger directory cannot be loaded only to be called
+//! non-text. A whole-file `write` is the exception: it needs no old text.
+//!
 //! # The edit protocol
 //!
-//! 1. `read` returns lines as `{"n": 12, "hash": "9f2a", "text": "..."}`. The
-//!    hash is four hex characters of that line's *content*, so it survives
-//!    edits to other lines.
+//! 1. `read` returns lines as `{"n": 12, "hash": "9f2a4c01", "text": "..."}`.
+//!    The hash is eight hex characters of that line's *content* — the whole
+//!    32-bit FNV value, not the top half alone — so it survives edits to other
+//!    lines, and two lines that shared the old 16-bit prefix stay distinct.
 //! 2. `edit` takes a batch of operations that name lines by those hashes:
 //!
-//!    - `{"op": "replace", "at": "9f2a", "lines": ["new text"]}` — replace the
-//!      line with `lines` (an empty `lines` deletes it);
-//!    - `{"op": "insert_after", "after": "9f2a", "lines": ["new text"]}` —
+//!    - `{"op": "replace", "at": "9f2a4c01", "lines": ["new text"]}` — replace
+//!      the line with `lines` (an empty `lines` deletes it);
+//!    - `{"op": "insert_after", "after": "9f2a4c01", "lines": ["new text"]}` —
 //!      insert after that line;
-//!    - `{"op": "delete", "from": "9f2a", "to": "1c7d"}` — remove the
+//!    - `{"op": "delete", "from": "9f2a4c01", "to": "1c7d8e02"}` — remove the
 //!      inclusive range;
 //!    - `{"op": "write", "content": "..."}` — replace the whole file, creating
 //!      it if needed; it must be the only operation.
 //!
-//!    An anchor may also be written `hash@line` (e.g. `9f2a@12`), which is how
-//!    two identical lines — two blank lines, say — are told apart.
+//!    Every entry of `lines` is one physical line: a line break inside an
+//!    entry is refused, because the file would gain lines the echo does not
+//!    count. A `write` carries the file's own breaks.
+//!
+//!    An anchor may also be written `hash@line` (e.g. `9f2a4c01@12`), which is
+//!    how two identical lines — two blank lines, say — are told apart.
 //! 3. The batch is atomic: every anchor is checked against the file as it is
 //!    on disk first, and one that no longer matches refuses the whole edit
 //!    with `line changed at N`, leaving the file byte-identical. Operations
@@ -349,7 +358,11 @@ fn build() -> Vec<ToolDef> {
                             "properties": {
                                 "op": {"const": "replace"},
                                 "at": {"type": "string"},
-                                "lines": {"type": "array", "items": {"type": "string"}}
+                                "lines": {
+                                    "type": "array",
+                                    "description": "Each entry is one physical line; a line break inside an entry is refused.",
+                                    "items": {"type": "string"}
+                                }
                             },
                             "required": ["op", "at", "lines"],
                             "additionalProperties": false
@@ -360,7 +373,11 @@ fn build() -> Vec<ToolDef> {
                             "properties": {
                                 "op": {"const": "insert_after"},
                                 "after": {"type": "string"},
-                                "lines": {"type": "array", "items": {"type": "string"}}
+                                "lines": {
+                                    "type": "array",
+                                    "description": "Each entry is one physical line; a line break inside an entry is refused.",
+                                    "items": {"type": "string"}
+                                }
                             },
                             "required": ["op", "after", "lines"],
                             "additionalProperties": false
@@ -439,13 +456,13 @@ fn build() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read",
-            description: "Read a text file under the ledger directory. Returns numbered lines, each with a four-hex-character hash of its content; an edit anchors to those hashes, optionally as hash@line. offset is 1-based.",
+            description: "Read a text file under the ledger directory. Returns numbered lines, each with an eight-hex-character hash of its content; an edit anchors to those hashes, optionally as hash@line. offset is 1-based. A file too large to be text is refused, not read.",
             schema: read,
             read_only: true,
         },
         ToolDef {
             name: "edit",
-            description: "Edit a file by line hash, all or nothing. Operations: replace {at, lines}; insert_after {after, lines}; delete {from, to} (inclusive); write {content} for the whole file. Anchors are the hashes read returned, as hash or hash@line; if one no longer matches the file, nothing is written and the error names the line. To put lines above the first line, replace it with those lines and its own text. The result echoes the touched region with fresh hashes for chaining.",
+            description: "Edit a file by line hash of eight hex characters, all or nothing. Operations: replace {at, lines}; insert_after {after, lines}; delete {from, to} (inclusive); write {content} for the whole file. Anchors are the hashes read returned, as hash or hash@line; if one no longer matches the file, nothing is written and the error names the line. Every entry of lines is one physical line; a line break inside an entry is refused. To put lines above the first line, replace it with those lines and its own text. The result echoes the touched region with fresh hashes for chaining.",
             schema: edit,
             read_only: false,
         },
@@ -658,7 +675,7 @@ mod tests {
             "edit",
             &json!({
                 "path": "main.bean",
-                "ops": [{"op": "modify", "at": "0000"}]
+                "ops": [{"op": "modify", "at": "00000000"}]
             }),
         )
         .unwrap_err();

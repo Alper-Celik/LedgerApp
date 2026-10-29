@@ -782,3 +782,146 @@ fn the_emitted_budget_passes_rustledgers_own_validation() {
         );
     }
 }
+
+/// A hand-written entry inside `Equity:Envelope:` is kept by the plugin, and
+/// rustledger checks every emitted assertion against the ledger as a whole. An
+/// assertion built from generated postings alone would disagree with this
+/// transfer and fail `E2001` — and the app, which rolls back an edit that
+/// introduces a new error, would refuse to save the entry. It must reach
+/// `finalize` clean, with the assertion figures including the transfer.
+#[test]
+fn a_hand_written_envelope_transfer_keeps_the_assertions_true() {
+    let food = category_account("Expenses:Food", "Expenses").expect("Food is a category");
+    let directives = vec![
+        open("2026-01-01", "Assets:Bank"),
+        open("2026-01-01", "Income:Salary"),
+        custom("2026-01-01", vec![text("start date"), text("2026-01")]),
+        custom("2026-01-01", vec![text("end date"), text("2026-01")]),
+        custom(
+            "2026-01-01",
+            vec![text("budget account"), text("^Assets:Bank")],
+        ),
+        custom(
+            "2026-01-01",
+            vec![
+                text("fund"),
+                account_value("Expenses:Food"),
+                amount_value("100.00", "TRY"),
+            ],
+        ),
+        txn(
+            "2026-01-05",
+            "salary",
+            &[
+                ("Assets:Bank", "1000.00", "TRY"),
+                ("Income:Salary", "-1000.00", "TRY"),
+            ],
+        ),
+        // The transfer the user wrote by hand: money from the pool into an
+        // envelope, with none of the plugin's tags or metadata.
+        txn(
+            "2026-01-20",
+            "move budget",
+            &[
+                (TO_BE_BUDGETED, "-50.00", "TRY"),
+                (food.as_str(), "50.00", "TRY"),
+            ],
+        ),
+    ];
+
+    let output = process(PluginInput {
+        directives: directives.clone(),
+        options: options(),
+        config: None,
+    });
+    assert!(
+        output.errors.is_empty(),
+        "the plugin reported diagnostics: {:?}",
+        output.errors
+    );
+    validate_op_coverage(directives.len(), &output.ops)
+        .expect("the op list is a cover of the fixture");
+
+    // Materialise the op list the way the host does.
+    let mut materialised: Vec<Directive> = Vec::with_capacity(output.ops.len());
+    for (position, op) in output.ops.iter().enumerate() {
+        match op {
+            PluginOp::Keep(index) => materialised.push(convert(
+                &directives[*index],
+                &format!("fixture directive {index}"),
+            )),
+            PluginOp::Insert(wrapper) => {
+                materialised.push(convert(wrapper, &format!("plugin insert {position}")));
+            }
+            other => panic!("a directive plugin may only keep and insert, got {other:?}"),
+        }
+    }
+    sort_directives(&mut materialised);
+
+    // The loader's order: sort, run early, book/run plugins, run late, finalize.
+    let today = parse_date("2026-12-31", "the test's today");
+    let (session, early) =
+        ValidationSession::new(ValidationOptions::default()).run_early(&materialised, today);
+    let (session, late) = session.run_late(&materialised, today);
+    let actuals = session.balance_actuals().to_vec();
+    let deferred = session.finalize();
+
+    let failures: Vec<String> = early
+        .iter()
+        .chain(&late)
+        .chain(&deferred)
+        .filter(|error| error.code.severity() == Severity::Error)
+        .map(|error| format!("[{}] {} {}", error.code.code(), error.date, error.message))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "rustledger rejects the ledger around a hand-written envelope transfer (E2001 \
+         would roll the edit back):\n{}",
+        failures.join("\n")
+    );
+
+    let balances = materialised
+        .iter()
+        .filter(|directive| matches!(directive, Directive::Balance(_)))
+        .count();
+    assert_eq!(
+        actuals.len(),
+        balances,
+        "every emitted balance assertion must reach the validator's check"
+    );
+    let checked: Vec<String> = actuals
+        .iter()
+        .map(|actual| {
+            format!(
+                "{} {} {} asserted, off by {}",
+                actual.date, actual.account, actual.currency, actual.diff
+            )
+        })
+        .collect();
+    assert!(
+        actuals.iter().all(|actual| !actual.exceeds_tolerance),
+        "the plugin's assertions do not match the validator's inventories:\n{}",
+        checked.join("\n")
+    );
+
+    // 100.00 assigned + 50.00 moved in by hand…
+    assert!(
+        actuals.iter().any(|actual| {
+            actual.account == food
+                && actual.currency == "TRY"
+                && actual.asserted == decimal("150.00", "the Food assertion")
+        }),
+        "Food must be asserted as 150.00 TRY, transfer included:\n{}",
+        checked.join("\n")
+    );
+    // …and the pool: 1000.00 earned − 100.00 assigned − 50.00 moved.
+    assert!(
+        actuals.iter().any(|actual| {
+            actual.account == TO_BE_BUDGETED
+                && actual.currency == "TRY"
+                && actual.asserted == decimal("850.00", "the pool assertion")
+        }),
+        "the pool must be asserted as 850.00 TRY, transfer included:\n{}",
+        checked.join("\n")
+    );
+}

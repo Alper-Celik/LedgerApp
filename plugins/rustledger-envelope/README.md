@@ -166,7 +166,7 @@ directive at or before a month is the one in force for it.
 | `end date` | `"YYYY-MM"` | last budget month; default: `months ahead` past the ledger's newest directive |
 | `months ahead` | number | months to budget past the newest directive (default 0) |
 | `budget account` | regex | an account holding spendable money (**required**, repeatable) |
-| `income account` | regex | read and validated for fava-envelope compatibility; availability comes from on-budget balances (default `^Income:`) |
+| `income account` | regex | accepted and validated for fava-envelope compatibility; not read — availability comes from on-budget balances |
 | `fund` | account, amount | assign this month and every later month until replaced (`0.00` stops it for that commodity) |
 | `adjust` | account, amount | one-off signed change for that month only |
 | `zero` | account | release the category subtree's whole balance to `To-Be-Budgeted` |
@@ -187,6 +187,13 @@ own. A value of the wrong kind, a malformed month or a missing argument is an
 error, as are two `rollover` declarations on the same category's ancestor or
 descendant line, a bare `pad` without a following `balance`, and two bare `pad`s
 before one `balance` — the last two mirroring beancount's `E2003` / `E2004`.
+A category (or a `map`/`rollover` target) that resolves into the plugin's own
+`To-Be-Budgeted` or `Money` accounts is an error too: those subtrees are
+asserted as a whole, so the plugin could never keep such an assertion true.
+
+Hand-written postings inside `Equity:Envelope:` are kept and counted: the
+month-end assertions include them, exactly as the validator does, so an entry
+you write there never makes a saved ledger fail its own `E2001` check.
 
 ## Currencies are never converted
 

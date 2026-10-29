@@ -330,7 +330,7 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "read_lines",
-        description: "Read a journal file as numbered lines, each with a short content hash. A file longer than one answer allows is read a page at a time with `offset`/`limit`: read the next page until `truncated` is false. To change the file, propose the new text with `write_file`; reading it again gives fresh hashes.",
+        description: "Read a journal file as numbered lines, each with an eight-hex-character content hash. A file longer than one answer allows is read a page at a time with `offset`/`limit`: read the next page until `truncated` is false. To change the file, propose the new text with `write_file`; reading it again gives fresh hashes.",
         args: &[
             ToolArg {
                 name: "path",

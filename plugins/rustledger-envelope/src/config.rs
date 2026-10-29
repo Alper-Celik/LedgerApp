@@ -17,7 +17,7 @@
 //! | `end date` | STRING `YYYY-MM` | Last budget month (inclusive). Default: `months ahead` past the newest directive date in the ledger. |
 //! | `months ahead` | NUMBER | How many months past the newest ledger directive to budget. Default 0. |
 //! | `budget account` | STRING regex | An on-budget account: assets and liabilities holding spendable money. Repeatable; at least one is required. |
-//! | `income account` | STRING regex | Accepted and validated (its regex must compile) so a file shared with fava-envelope keeps working. The budget's availability comes from the on-budget accounts, per commodity, so this changes no number. Repeatable; default `^Income:`. |
+//! | `income account` | STRING regex | Accepted and validated (its regex must compile) so a file shared with fava-envelope keeps working. Deliberately not read: the budget's availability comes from the on-budget accounts, per commodity, so this changes no number. Repeatable. |
 //! | `fund` | ACCOUNT, AMOUNT | Assign `AMOUNT` to the category at ACCOUNT in the directive's month. **Inherited**: every later month keeps assigning it until a `fund` for the same category replaces it (`0.00` stops it for that commodity). |
 //! | `adjust` | ACCOUNT, AMOUNT | One-off, month-scoped signed change to the category's balance (moving money to/from `To-Be-Budgeted`). Never inherited. |
 //! | `zero` | ACCOUNT | One-off: release the category subtree's whole balance (every commodity) to `To-Be-Budgeted`. |
@@ -46,6 +46,12 @@
 //!   `adjust`, `zero`, `pad`, `balance`) the account must be under
 //!   [`Config::expense_root`]; an account elsewhere is an error naming the key
 //!   and the account.
+//! * A category may not resolve into the plugin's own plumbing: an account that
+//!   maps to (or above) `Equity:Envelope:To-Be-Budgeted` /
+//!   `Equity:Envelope:Money` is an error naming the key and the account. Those
+//!   subtrees are asserted as a whole, so a category inside one would put legs
+//!   the model does not generate into an assertion's subtree — a figure the
+//!   plugin could never keep right, even with nothing hand-written.
 //! * `rollover` and `map` take an ACCOUNT but accept any account path: only
 //!   expense accounts have a category to resolve to, so a `rollover` outside
 //!   the expense tree never applies, and a `map` pointing outside it leaves the
@@ -65,7 +71,7 @@ use rustledger_plugin_types::{
     DirectiveData, DirectiveWrapper, MetaValueData, PluginError, PluginOptions,
 };
 
-use crate::accounts::is_under;
+use crate::accounts::{MONEY, TO_BE_BUDGETED, category_account, is_under};
 use crate::money::Money;
 use crate::month::Month;
 
@@ -81,10 +87,6 @@ pub struct Config {
     pub months_ahead: u32,
     /// On-budget account patterns.
     pub budget_accounts: Vec<String>,
-    /// Income account patterns: validated for fava-envelope compatibility, and
-    /// deliberately not read by the budget, whose availability is the on-budget
-    /// accounts' balances per commodity.
-    pub income_accounts: Vec<String>,
     /// Assignments, in directive order, each effective from its month.
     pub funds: Vec<Fund>,
     /// One-off month-scoped balance changes.
@@ -103,8 +105,6 @@ pub struct Config {
     pub strict: bool,
     /// The ledger's expense root (`option "name_expenses"`, default `Expenses`).
     pub expense_root: String,
-    /// The ledger's income root (`option "name_income"`, default `Income`).
-    pub income_root: String,
     /// Non-fatal diagnostics: keys this plugin does not implement (the same
     /// directives are read by fava-envelope, which has its own keys) and other
     /// warnings. They do not stop the budget; the rest of the configuration
@@ -206,16 +206,17 @@ impl Config {
     /// Parse the ledger's `custom "envelope"` directives.
     ///
     /// `options` supplies the ledger's configured roots
-    /// ([`PluginOptions::account_types`]) and is the only place the expense and
-    /// income roots come from.
+    /// ([`PluginOptions::account_types`]) and is the only place the expense
+    /// root comes from.
     ///
     /// # Errors
     ///
     /// Returns the hard errors — diagnostics that make the configuration
     /// unusable: no `start date`, no `budget account`, a malformed month, a
     /// wrong value kind or missing argument for a key the plugin implements, a
-    /// category account that is not under the expense root, a pattern that does
-    /// not compile, a bare `pad` with no `balance` (or two before one), or
+    /// category account that is not under the expense root or that resolves
+    /// into the plugin's own `To-Be-Budgeted`/`Money` plumbing, a pattern that
+    /// does not compile, a bare `pad` with no `balance` (or two before one), or
     /// overlapping `rollover` declarations. The caller then passes the
     /// directive stream through untouched and reports these.
     ///
@@ -239,7 +240,7 @@ impl Config {
 /// The parser never resolves a month: it records every declaration with the
 /// month of its directive and leaves "newest wins over time" to the model.
 struct Parser<'a> {
-    /// The ledger's options, for the expense and income roots.
+    /// The ledger's options, for the expense root.
     options: &'a PluginOptions,
     /// Location of the directive being handled, attached to diagnostics.
     location: Option<(String, u32)>,
@@ -247,7 +248,6 @@ struct Parser<'a> {
     end: Option<Month>,
     months_ahead: u32,
     budget_accounts: Vec<String>,
-    income_accounts: Vec<String>,
     funds: Vec<Fund>,
     adjustments: Vec<Adjustment>,
     targets: Vec<Target>,
@@ -271,7 +271,6 @@ impl<'a> Parser<'a> {
             end: None,
             months_ahead: 0,
             budget_accounts: Vec::new(),
-            income_accounts: Vec::new(),
             funds: Vec::new(),
             adjustments: Vec::new(),
             targets: Vec::new(),
@@ -332,9 +331,10 @@ impl<'a> Parser<'a> {
                 }
             }
             "income account" => {
-                if let Some(pattern) = self.pattern_arg(key, args, 0) {
-                    self.income_accounts.push(pattern);
-                }
+                // fava-envelope compatibility: the pattern is checked so a
+                // broken regex in a shared file is still reported, but it is
+                // never read — availability is the on-budget accounts' money.
+                let _ = self.pattern_arg(key, args, 0);
             }
             "fund" => {
                 if let (Some(node), Some(amount), Some(month)) = (
@@ -407,6 +407,9 @@ impl<'a> Parser<'a> {
                 let Some(node) = self.account_arg(key, args, 0) else {
                     return;
                 };
+                if self.refuse_plumbing(key, &node) {
+                    return;
+                }
                 let Some(second) = args.get(1) else {
                     self.error(key, "expected a BOOL or an AMOUNT as argument 2");
                     return;
@@ -436,6 +439,9 @@ impl<'a> Parser<'a> {
                     self.pattern_arg(key, args, 0),
                     self.account_arg(key, args, 1),
                 ) {
+                    if self.refuse_plumbing(key, &node) {
+                        return;
+                    }
                     self.mappings.push(Mapping { pattern, node });
                 }
             }
@@ -477,12 +483,11 @@ impl<'a> Parser<'a> {
         if !self.errors.is_empty() {
             return Err(self.errors);
         }
-        let mut config = Config {
+        let config = Config {
             start: self.start.expect("a start date was checked above"),
             end: self.end,
             months_ahead: self.months_ahead,
             budget_accounts: self.budget_accounts,
-            income_accounts: self.income_accounts,
             funds: self.funds,
             adjustments: self.adjustments,
             targets: self.targets,
@@ -492,16 +497,8 @@ impl<'a> Parser<'a> {
             assert_balances: self.assert_balances,
             strict: self.strict,
             expense_root: self.options.account_types.expenses.clone(),
-            income_root: self.options.account_types.income.clone(),
             warnings: self.warnings,
         };
-        if config.income_accounts.is_empty() {
-            // No `income account` declared: default to the ledger's configured
-            // income root, which is `Income` unless the ledger renames it, so a
-            // renamed income tree still classifies its income.
-            let default_income = format!("^{}:", config.income_root);
-            config.income_accounts.push(default_income);
-        }
         Ok(config)
     }
 
@@ -668,7 +665,42 @@ impl<'a> Parser<'a> {
             );
             return None;
         }
+        if self.refuse_plumbing(key, &account) {
+            return None;
+        }
         Some(account)
+    }
+
+    /// Refuse an account that resolves into the plugin's own plumbing.
+    ///
+    /// The category keys name a category; `map` and `rollover` accept any
+    /// account path but only an expense account resolves to one. An account
+    /// that resolves to `To-Be-Budgeted`, `Money`, something below them, or an
+    /// account containing them (the namespace root) is not a category: the
+    /// assertions over those subtrees must be the pool's and the contra's own
+    /// figures, and a category inside one would put legs the model does not
+    /// generate into an assertion rustledger checks as a whole subtree.
+    ///
+    /// The diagnostic names both the account as written and the account it
+    /// resolves to, so the typo is visible in the ledger text.
+    ///
+    /// Returns `true` when the account was refused (an error was recorded).
+    fn refuse_plumbing(&mut self, key: &str, account: &str) -> bool {
+        let root = self.options.account_types.expenses.clone();
+        let Some(category) = category_account(account, &root) else {
+            return false;
+        };
+        if !is_plumbing(&category) {
+            return false;
+        }
+        self.error(
+            key,
+            &format!(
+                "{account:?} resolves to {category:?}, which is the plugin's own bookkeeping, \
+                 not a category; no category may live under {TO_BE_BUDGETED} or {MONEY}"
+            ),
+        );
+        true
     }
 
     fn number_arg(&mut self, key: &str, args: &[MetaValueData], index: usize) -> Option<Decimal> {
@@ -706,6 +738,24 @@ impl<'a> Parser<'a> {
             }
         }
     }
+}
+
+/// Whether `category` is (or contains) one of the plugin's own bookkeeping
+/// accounts rather than a category.
+///
+/// `To-Be-Budgeted` and `Money` are asserted as whole subtrees — rustledger
+/// checks a `balance` against the account and every subaccount — so a category
+/// inside one would add legs the model never generated to an assertion the
+/// plugin emits, and no local arithmetic could keep that assertion right. An
+/// account that *contains* them (the namespace root, or a renamed expense tree
+/// that mirrors a category above them) does the same from above.
+fn is_plumbing(category: &str) -> bool {
+    // The pool, the contra, and anything below either…
+    is_under(category, TO_BE_BUDGETED)
+        || is_under(category, MONEY)
+        // …and anything that contains them.
+        || is_under(TO_BE_BUDGETED, category)
+        || is_under(MONEY, category)
 }
 
 /// Value-kind accessors, so argument checking reads the same everywhere.
@@ -893,12 +943,10 @@ mod tests {
         assert_eq!(config.end, Some(Month::new(2027, 3)));
         assert_eq!(config.months_ahead, 2);
         assert_eq!(config.budget_accounts, vec!["^Assets:Cash$".to_string()]);
-        assert_eq!(config.income_accounts, vec!["^Income:".to_string()]);
         assert!(config.include_starting_balance);
         assert!(!config.assert_balances);
         assert!(config.strict);
         assert_eq!(config.expense_root, "Expenses");
-        assert_eq!(config.income_root, "Income");
         assert_eq!(config.funds.len(), 1);
         assert_eq!(config.funds[0].month, Month::new(2026, 10));
         assert_eq!(config.funds[0].node, "Expenses:Groceries");
@@ -1001,6 +1049,62 @@ mod tests {
                 && diagnostic.message.contains("Liabilities:CreditCard")
                 && diagnostic.message.contains("Expenses")
         }));
+    }
+
+    #[test]
+    fn a_fund_under_the_plugins_own_plumbing_is_refused() {
+        // The pool and the contra are asserted as whole subtrees, so a
+        // category inside one would make those assertions unkeepable: the
+        // plugin refuses the declaration and names the account.
+        for reserved in [
+            "Expenses:To-Be-Budgeted",
+            "Expenses:To-Be-Budgeted:Groceries",
+            "Expenses:Money",
+            "Expenses:Money:Backing",
+        ] {
+            let mut directives = required();
+            directives.push(envelope(
+                "2026-10-01",
+                vec![text("fund"), account(reserved), amount("100.00", "TRY")],
+            ));
+            let diagnostics =
+                parse(&directives).expect_err("a category may not live in the plugin's plumbing");
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == PluginErrorSeverity::Error
+                        && diagnostic.message.contains("fund")
+                        && diagnostic.message.contains(reserved)
+                }),
+                "{reserved}: the refusal must name the account: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_and_rollover_may_not_target_the_plugins_own_plumbing() {
+        // `map` and `rollover` accept any account path, but an expense account
+        // under the plumbing still resolves to a category there, which is what
+        // makes the declaration unsafe rather than merely inert.
+        for declaration in [
+            vec![
+                text("map"),
+                text("^Expenses:Dining"),
+                account("Expenses:To-Be-Budgeted"),
+            ],
+            vec![text("rollover"), account("Expenses:Money"), flag(true)],
+        ] {
+            let mut directives = required();
+            directives.push(envelope("2026-10-01", declaration));
+            let diagnostics =
+                parse(&directives).expect_err("the plugin's own accounts are not categories");
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.severity == PluginErrorSeverity::Error
+                        && diagnostic.message.contains("bookkeeping")
+                }),
+                "the refusal must explain itself: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]
@@ -1193,11 +1297,6 @@ mod tests {
             Rollover::Cap(Money::new(Decimal::new(50000, 2), "TRY"))
         );
         assert!(config.assert_balances, "assert defaults to TRUE");
-        assert_eq!(
-            config.income_accounts,
-            vec!["^Income:".to_string()],
-            "income account defaults to ^Income:"
-        );
     }
 
     #[test]
@@ -1349,6 +1448,24 @@ mod tests {
                 && diagnostic
                     .message
                     .contains("expected a STRING as argument 1")
+        }));
+    }
+
+    #[test]
+    fn income_account_pattern_is_still_validated() {
+        // The key is accepted for fava-envelope compatibility and never read,
+        // so its regex is the only thing left to check — and a shared file's
+        // malformed pattern must still be reported.
+        let mut directives = required();
+        directives.push(envelope(
+            "2026-10-01",
+            vec![text("income account"), text("^Income(:[")],
+        ));
+        let diagnostics = parse(&directives).expect_err("the pattern does not compile");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == PluginErrorSeverity::Error
+                && diagnostic.message.contains("income account")
+                && diagnostic.message.contains("pattern")
         }));
     }
 

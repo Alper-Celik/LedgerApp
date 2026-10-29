@@ -2,9 +2,14 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Hashline editing: `read` hands out a short hash of each line's own content,
-//! and every edit names the lines it touches by those hashes instead of by
+//! Hashline editing: `read` hands out a hash of each line's own content, and
+//! every edit names the lines it touches by those hashes instead of by
 //! position.
+//!
+//! The hash is eight hex characters — the full 32-bit FNV-1a value — so the
+//! top half alone no longer decides identity. The narrower hash this replaced
+//! kept just that half, and a stale anchor for a deleted line could resolve
+//! to another line that shared it, rewriting text the caller never named.
 //!
 //! A hash is derived from one line's text alone, so it survives edits
 //! elsewhere in the file: the anchor a caller holds for line 12 keeps working
@@ -32,6 +37,12 @@ pub const DEFAULT_OFFSET: usize = 1;
 pub const DEFAULT_READ_LIMIT: usize = 2_000;
 /// The most lines `read` returns, and the most an edit echoes back.
 pub const MAX_READ_LIMIT: usize = 2_000;
+/// Files larger than this are refused before a byte of them is read: a ledger
+/// directory can hold a scan or a spreadsheet that is not text at all, and
+/// loading two hundred megabytes in only to reject it as non-text is an
+/// out-of-memory kill on a phone rather than an error. The same ceiling
+/// `grep` walks under, so the two tools agree on what is readable.
+pub const MAX_FILE_BYTES: u64 = super::search::MAX_FILE_BYTES;
 
 /// One line as the tools see it: its number, the hash an edit anchors to, and
 /// the text itself.
@@ -39,7 +50,7 @@ pub const MAX_READ_LIMIT: usize = 2_000;
 pub struct LineView {
     /// 1-based line number.
     pub n: usize,
-    /// Four hex characters of the line's content.
+    /// Eight hex characters of the line's content.
     pub hash: String,
     pub text: String,
 }
@@ -85,11 +96,15 @@ pub struct EditOutcome {
 /// the model sends:
 ///
 /// ```json
-/// {"op": "replace", "at": "9f2a", "lines": ["new text"]}
-/// {"op": "insert_after", "after": "9f2a@12", "lines": ["new text"]}
-/// {"op": "delete", "from": "9f2a", "to": "1c7d"}
+/// {"op": "replace", "at": "9f2a4c01", "lines": ["new text"]}
+/// {"op": "insert_after", "after": "9f2a4c01@12", "lines": ["new text"]}
+/// {"op": "delete", "from": "9f2a4c01", "to": "1c7d8e02"}
 /// {"op": "write", "content": "the whole file\n"}
 /// ```
+///
+/// Every entry of `lines` is one physical line. A `write` is the whole file
+/// and holds its breaks; the anchored operations refuse a break inside an
+/// entry, because the file would gain lines the echo does not count.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EditOp {
@@ -104,25 +119,30 @@ pub enum EditOp {
     Delete { from: String, to: String },
 }
 
-/// The four hex characters a line's content hashes to.
+/// The eight hex characters a line's content hashes to.
 ///
-/// FNV-1a over the line's bytes, keeping the high half: deterministic across
-/// runs, machines and Rust versions, so an anchor minted by one `read` still
-/// names the same line after an unrelated edit. Four hex characters are not a
-/// checksum — the `hash@line` form and the ambiguity check below are what make
-/// a collision harmless. This rule is an edit anchor and nothing else: no
-/// value, amount or file identity is hashed this way, and a caller must not
-/// read the result as one.
+/// FNV-1a over the line's bytes, keeping the whole 32-bit value: deterministic
+/// across runs, machines and Rust versions, so an anchor minted by one `read`
+/// still names the same line after an unrelated edit. Half the value is not
+/// enough — two unrelated lines share a 16-bit prefix about once in 65 536
+/// tries, and a stale anchor whose line was deleted would then resolve to the
+/// line that happened to collide, editing text the caller never named. Eight
+/// hex characters are still not a checksum: the `hash@line` form and the
+/// ambiguity check below are what make a full-value collision harmless. This
+/// rule is an edit anchor and nothing else: no value, amount or file identity
+/// is hashed this way, and a caller must not read the result as one.
 pub fn hash_line(text: &str) -> String {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in text.as_bytes() {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    format!("{:04x}", hash >> 16)
+    format!("{hash:08x}")
 }
 
 /// The lines of `path`, from `offset`, at most `limit` of them.
+///
+/// A file over [`MAX_FILE_BYTES`] is refused before it is read, not after.
 pub fn read_file(
     path: &Path,
     offset: Option<usize>,
@@ -138,12 +158,9 @@ pub fn read_file(
     }
     let limit = limit.min(MAX_READ_LIMIT);
 
-    let bytes = fs::read(path).map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => format!("no such file: {}", path.display()),
-        io::ErrorKind::IsADirectory => format!("{} is a directory", path.display()),
-        _ => format!("cannot read {}: {error}", path.display()),
-    })?;
-    let text = decode(path, &bytes)?;
+    let Some(text) = read_text(path)? else {
+        return Err(format!("no such file: {}", path.display()));
+    };
 
     let document = Document::parse(&text);
     let total = document.lines.len();
@@ -166,16 +183,14 @@ pub fn read_file(
 /// are read in the coordinates of that same text and must be written in
 /// ascending, non-overlapping order, which is how a `replace` and an
 /// `insert_after` of the same line compose predictably.
+///
+/// A file over [`MAX_FILE_BYTES`] is refused before it is read. A `write` is
+/// settled first, without reading the old text at all, so the one operation
+/// that replaces a file whole still works on a file too large to read.
 pub fn apply_edits(path: &Path, ops: &[EditOp]) -> Result<EditOutcome, String> {
     if ops.is_empty() {
         return Err("an edit needs at least one operation".to_string());
     }
-
-    let existing = match fs::read(path) {
-        Ok(bytes) => Some(decode(path, &bytes)?),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-    };
 
     // `write` is the whole file by definition: nothing else can be in the
     // batch, because there would be no text for the other anchors to name.
@@ -198,7 +213,7 @@ pub fn apply_edits(path: &Path, ops: &[EditOp]) -> Result<EditOutcome, String> {
         });
     }
 
-    let Some(previous) = existing else {
+    let Some(previous) = read_text(path)? else {
         return Err(format!(
             "no such file: {} (a `write` operation creates it)",
             path.display()
@@ -275,6 +290,7 @@ fn plan(document: &Document, ops: &[EditOp]) -> Result<Vec<Planned>, String> {
             }
             EditOp::Replace { at, lines } => {
                 let line = resolve(document, at).map_err(|error| operation(index, &error))?;
+                one_physical_line(index, lines)?;
                 Planned {
                     start: line,
                     end: line + 1,
@@ -283,6 +299,7 @@ fn plan(document: &Document, ops: &[EditOp]) -> Result<Vec<Planned>, String> {
             }
             EditOp::InsertAfter { after, lines } => {
                 let line = resolve(document, after).map_err(|error| operation(index, &error))?;
+                one_physical_line(index, lines)?;
                 Planned {
                     start: line + 1,
                     end: line + 1,
@@ -328,6 +345,26 @@ fn operation(index: usize, message: &str) -> String {
     format!("operation {}: {message}", index + 1)
 }
 
+/// Refuse a `lines` entry that holds a line break.
+///
+/// The echo hashes one [`LineView`] per entry, but a `\n` inside one writes
+/// several physical lines: the file grows by lines the echo does not count,
+/// every `n` after it is wrong, and a chained edit against the echoed hash
+/// can never match. A `\r` is refused for the same reason in a file whose
+/// lines end in CRLF — it would be stripped on the way back — so one entry is
+/// exactly one physical line.
+fn one_physical_line(index: usize, lines: &[String]) -> Result<(), String> {
+    let Some(position) = lines.iter().position(|line| line.contains(['\n', '\r'])) else {
+        return Ok(());
+    };
+    Err(operation(
+        index,
+        &format!(
+            "`lines[{position}]` contains a line break; one entry is one physical line, so give each line as its own entry"
+        ),
+    ))
+}
+
 /// An anchor as the caller wrote it: `hash`, or `hash@line`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Anchor {
@@ -350,9 +387,9 @@ fn parse_anchor(raw: &str) -> Result<Anchor, String> {
         }
         None => (trimmed, None),
     };
-    if hash.len() != 4 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hash.len() != 8 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
-            "anchor `{raw}`: a hash is four hex characters, as `read` returned it"
+            "anchor `{raw}`: a hash is eight hex characters, as `read` returned it"
         ));
     }
     Ok(Anchor {
@@ -479,10 +516,43 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<String, String> {
     })
 }
 
+/// The text `path` holds, or `None` when it does not exist.
+///
+/// The size check comes before the read, not after it. `fs::read` allocates
+/// the whole file, and a caller that would then reject it as non-text has
+/// already paid for the bytes once and would pay again for the decoded text
+/// and a third time for the lines; on a phone a scanned receipt in the ledger
+/// directory is an out-of-memory kill rather than an error message. Asking
+/// the metadata first costs one syscall and no memory.
+fn read_text(path: &Path) -> Result<Option<String>, String> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "{} is {} bytes, over the {MAX_FILE_BYTES}-byte limit for a file these tools read",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| match error.kind() {
+        io::ErrorKind::IsADirectory => format!("{} is a directory", path.display()),
+        _ => format!("cannot read {}: {error}", path.display()),
+    })?;
+    decode(path, &bytes).map(Some)
+}
+
 /// A whole-file write, reporting whether the bytes on disk actually changed:
 /// a file already holding the same text keeps its mtime.
+///
+/// The old text is read only when its size already matches — different
+/// lengths cannot be the same bytes — so replacing an oversized file costs no
+/// read of it at all.
 fn write_whole(path: &Path, text: &str) -> Result<bool, String> {
-    if fs::read(path).is_ok_and(|existing| existing == text.as_bytes()) {
+    let same_length = fs::metadata(path).is_ok_and(|metadata| metadata.len() == text.len() as u64);
+    if same_length && fs::read(path).is_ok_and(|existing| existing == text.as_bytes()) {
         return Ok(false);
     }
     crate::fsutil::write_atomic(path, text.as_bytes(), None)?;
@@ -495,7 +565,7 @@ mod tests {
 
     use crate::testing::TempDir;
 
-    use super::{Document, EditOp, LineView, apply_edits, hash_line, read_file};
+    use super::{Document, EditOp, LineView, MAX_FILE_BYTES, apply_edits, hash_line, read_file};
 
     fn anchor(line: &LineView) -> String {
         format!("{}@{}", line.hash, line.n)
@@ -529,7 +599,8 @@ mod tests {
             hash_line("2026-01-01 * \"Groceries\"")
         );
         assert_ne!(hash_line("Assets:Bank"), hash_line("Assets:Cash"));
-        assert_eq!(hash_line("").len(), 4);
+        assert_eq!(hash_line(""), "811c9dc5", "the whole 32-bit FNV value");
+        assert_eq!(hash_line("").len(), 8);
     }
 
     #[test]
@@ -715,7 +786,7 @@ mod tests {
                 EditOp::Write {
                     content: "x".into(),
                 },
-                replace("0000", &["y"]),
+                replace("00000000", &["y"]),
             ],
         )
         .unwrap_err();
@@ -723,7 +794,7 @@ mod tests {
 
         // Anchor edits on a file that does not exist point at `write`.
         let missing = dir.dir().join("missing.bean");
-        let error = apply_edits(&missing, &[replace("0000", &["y"])]).unwrap_err();
+        let error = apply_edits(&missing, &[replace("00000000", &["y"])]).unwrap_err();
         assert!(error.contains("no such file"), "{error}");
         assert!(!missing.exists());
     }
@@ -801,7 +872,17 @@ mod tests {
     fn malformed_anchors_are_explained() {
         let dir = TempDir::new("tool-hashline");
         let path = dir.seed("main.bean", "a\n");
-        for raw in ["zz", "abc", "abcd:x", "abcd@0", "abcd@x", ""] {
+        for raw in [
+            "zz",
+            "abc",
+            "9f2a",
+            "9f2a4c0",
+            "zzzzzzzz",
+            "9f2a4c01:x",
+            "9f2a4c01@0",
+            "9f2a4c01@x",
+            "",
+        ] {
             let error = apply_edits(&path, &[replace(raw, &["b"])]).unwrap_err();
             assert!(error.contains("operation 1"), "{raw}: {error}");
         }
@@ -868,6 +949,117 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.total_lines, 1);
+    }
+
+    #[test]
+    fn a_four_hex_collision_does_not_retarget_a_stale_anchor() {
+        // Measured: both lines' high 16 bits are `45b4`, which is all the old
+        // four-character hash kept. With that anchor, a stale hash whose line
+        // was deleted resolved to the other line and rewrote it silently.
+        let first = "  Assets:Bank  16.00 USD";
+        let second = "  Assets:Bank  -100.00 USD";
+        assert_eq!(
+            &hash_line(first)[..4],
+            &hash_line(second)[..4],
+            "the 16-bit prefix still collides, or this test proves nothing"
+        );
+        assert_ne!(hash_line(first), hash_line(second));
+        assert_eq!(hash_line(first), "45b4c1e3");
+        assert_eq!(hash_line(second), "45b4b45c");
+
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", &format!("{first}\n{second}\n"));
+        let read = read_file(&path, None, None).unwrap();
+        assert_eq!(read.lines[0].hash, hash_line(first));
+        assert_eq!(read.lines[1].hash, hash_line(second));
+
+        // The first line disappears behind the tool's back. Its anchor must
+        // name nothing, not the line that shared its prefix.
+        fs::write(&path, format!("{second}\n")).unwrap();
+        let error = apply_edits(&path, &[replace(&read.lines[0].hash, &["x"])]).unwrap_err();
+        assert!(error.contains("line changed"), "{error}");
+        assert!(error.contains(&read.lines[0].hash), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), format!("{second}\n"));
+
+        // The surviving line's own anchor names exactly it.
+        let outcome = apply_edits(&path, &[replace(&read.lines[1].hash, &["x"])]).unwrap();
+        assert_eq!(outcome.first, 1);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "x\n");
+    }
+
+    #[test]
+    fn an_oversized_file_is_refused_before_it_is_read() {
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("scan.bin", "");
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(MAX_FILE_BYTES + 1).unwrap();
+        drop(file);
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_FILE_BYTES + 1);
+
+        let error = read_file(&path, None, None).unwrap_err();
+        assert!(error.contains("scan.bin"), "{error}");
+        assert!(error.contains(&MAX_FILE_BYTES.to_string()), "{error}");
+        // The file is all zeroes, so a read would have called it non-text.
+        // The size refusal coming first is the whole point: nothing was read.
+        assert!(!error.contains("not a text file"), "{error}");
+
+        // An anchor edit never reads it either.
+        let error = apply_edits(&path, &[replace("00000000", &["x"])]).unwrap_err();
+        assert!(error.contains(&MAX_FILE_BYTES.to_string()), "{error}");
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_FILE_BYTES + 1);
+
+        // A whole-file `write` needs no old text, so it still replaces it.
+        let outcome = apply_edits(
+            &path,
+            &[EditOp::Write {
+                content: "small\n".into(),
+            }],
+        )
+        .unwrap();
+        assert!(outcome.written);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "small\n");
+    }
+
+    #[test]
+    fn a_line_break_inside_a_lines_entry_is_refused() {
+        let dir = TempDir::new("tool-hashline");
+        let path = dir.seed("main.bean", "a\nb\n");
+        let read = read_file(&path, None, None).unwrap();
+
+        // Operation 2 would write two physical lines while echoing one view,
+        // so every later `n` — and the echoed hash — would be wrong.
+        let error = apply_edits(
+            &path,
+            &[
+                insert_after(&anchor(&read.lines[0]), &["ok"]),
+                replace(&anchor(&read.lines[1]), &["one\ntwo"]),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.contains("operation 2"), "{error}");
+        assert!(error.contains("line break"), "{error}");
+        assert!(error.contains("lines[0]"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\n");
+
+        // A bare `\r` is stripped on the way back from a CRLF file, so it
+        // would break the echo the same way.
+        for entry in ["one\rtwo", "one\r"] {
+            let error =
+                apply_edits(&path, &[insert_after(&anchor(&read.lines[0]), &[entry])]).unwrap_err();
+            assert!(error.contains("operation 1"), "{entry:?}: {error}");
+            assert!(error.contains("line break"), "{entry:?}: {error}");
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\n");
+
+        // A `write` is the whole file and carries its own breaks.
+        apply_edits(
+            &path,
+            &[EditOp::Write {
+                content: "one\ntwo\n".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
     }
 
     #[test]

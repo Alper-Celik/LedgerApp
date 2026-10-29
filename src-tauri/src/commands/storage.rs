@@ -121,7 +121,7 @@ pub async fn pick_ledger_folder(
             return Ok(None);
         };
         let config = app_config_dir(&app)?;
-        let mirror = config.join("tree");
+        let mirror = super::tree_mirror(&config);
         // A tree that was open still owes the folder whatever the app wrote into
         // its mirror; pushing is best effort (the reader is leaving it) but it
         // must not be skipped silently, since the mirror is about to be dropped.
@@ -203,14 +203,6 @@ pub fn storage_error(state: State<'_, AppState>) -> Option<String> {
     state.storage_failure()
 }
 
-/// Where a SAF tree is mirrored: app-private data, per install. The mirror is
-/// what the loader, the editor and git see; the tree is only the source and the
-/// sink.
-#[cfg(target_os = "android")]
-fn tree_mirror(app: &tauri::AppHandle<AppRuntime>) -> Result<PathBuf, String> {
-    Ok(app_config_dir(app)?.join("tree"))
-}
-
 /// The open SAF tree and its private mirror, for a closure.
 ///
 /// Every tree command needs the same three things — the persisted grant, the tree
@@ -227,7 +219,7 @@ fn with_tree<T>(
     let json = std::fs::read_to_string(&settings)
         .map_err(|error| format!("{}: {error}", settings.display()))?;
     let tree = crate::storage::AndroidTree::from_json(app, json.trim())?;
-    work(&tree, &config.join("tree"))
+    work(&tree, &super::tree_mirror(&config))
 }
 
 /// Android: write the mirror's changed files back into the SAF tree. Called after
@@ -353,7 +345,7 @@ pub fn restore_tree(app: &tauri::AppHandle<AppRuntime>) {
             return;
         }
     };
-    let mirror = config.join("tree");
+    let mirror = super::tree_mirror(&config);
     // `mirror_into` reconciles: files this device wrote and did not push are
     // pushed first, files the folder gained or changed are pulled, and a file
     // both sides changed is kept in the mirror and left alone. Nothing is

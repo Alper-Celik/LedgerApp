@@ -32,33 +32,6 @@ export type WidgetKind =
 	| "lifestyle-inflation"
 	| "balances-table";
 
-/**
- * One card on a dashboard: what it is, how it is tuned, and where it sits.
- *
- * Deliberately not derived from the generated `DashboardWidget`: that type's
- * `kind` is a string, because a saved file may hold one this build cannot draw.
- * This union is the set the registry can render, so adding a kind to the backend
- * has to be a decision here rather than a silent drop at runtime.
- */
-export type Widget = {
-	/** Stable identity, so a layout can be saved and reordered by it. */
-	id: string;
-	kind: WidgetKind;
-	/** Plain JSON, normalised against the kind's defaults when the dashboard loads. */
-	config: WidgetConfig;
-	/** Columns it asks for; the grid narrows it when the row is too narrow. */
-	span: WidgetSpan;
-	/** Position in the dashboard; ties keep their saved order. */
-	order: number;
-};
-
-/** A named dashboard: an ordered set of widgets saved alongside the ledger. */
-export type Dashboard = {
-	id: string;
-	name: string;
-	widgets: Widget[];
-};
-
 /** Whether a value read from a saved dashboard is a span this grid understands. */
 export function isWidgetSpan(value: unknown): value is WidgetSpan {
 	return value === 1 || value === 2 || value === 4;
