@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { IndexSeries, LifestyleReport } from "../../../bindings";
+import { parseDecimal, scaledAt } from "$lib/money.js";
 
 /**
  * The month ranges the lifestyle screen offers, in the order they are shown.
@@ -25,21 +26,6 @@ export function lastPoint(series: IndexSeries): IndexSeries["points"][number] | 
 	return series.points.at(-1) ?? null;
 }
 
-type Decimal = { negative: boolean; whole: string; fraction: string };
-
-/** A plain decimal string (`-1234.50`, `125`, `0.00`) split into its digits. */
-function parseDecimal(text: string): Decimal | null {
-	const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(text.trim());
-	if (!match) return null;
-	return { negative: match[1] === "-", whole: match[2] ?? "0", fraction: match[3] ?? "" };
-}
-
-/** The value at `scale` decimal places, as an integer. */
-function scaledAt(value: Decimal, scale: number): bigint {
-	const magnitude = BigInt(`${value.whole}${value.fraction.padEnd(scale, "0")}`);
-	return value.negative ? -magnitude : magnitude;
-}
-
 /** Integer division rounded to the nearest integer, midpoint away from zero. */
 function divideRounded(numerator: bigint, denominator: bigint): bigint {
 	const negative = (numerator < 0n) !== (denominator < 0n);
@@ -53,11 +39,13 @@ function divideRounded(numerator: bigint, denominator: bigint): bigint {
 /**
  * `latest` against `previous` in percent, two decimals: `-50.00`, `25.00`.
  *
- * The same arithmetic the backend's `percentage_change` does — exact decimal
- * integers, one rounding at the end, midpoint away from zero — so a figure
- * worked out here agrees with one the report already returned. `null` when
- * either side is not a decimal string or `previous` is zero: there is no
- * honest percentage against nothing.
+ * Mirrors `percentage_change` in `src-tauri/src/index.rs` — the function
+ * `src-tauri/src/reports.rs` uses — so a figure worked out here agrees with one
+ * the report already returned: exact decimal integers, one rounding at the end,
+ * midpoint away from zero. It stays here rather than behind an `invoke` because
+ * the screen needs a percentage of two figures it already holds, synchronously,
+ * while rendering. `null` when either side is not a decimal string or
+ * `previous` is zero: there is no honest percentage against nothing.
  */
 export function percentChange(previous: string, latest: string): string | null {
 	const before = parseDecimal(previous);

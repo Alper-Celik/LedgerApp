@@ -29,8 +29,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The route's own load, taken once to seed the screen. */
 	const first = untrack(() => data);
-	/** The load the screen's state was last taken from. */
-	let loaded = $state(first);
+	/** The load the screen's state was last taken from (plain: see `branches`). */
+	let adopted = first;
 
 	let report = $state<Report | null>(first.report);
 	let error = $state(first.error);
@@ -44,8 +44,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// A scan belongs to one folder: after another ledger is opened (which
 		// re-runs this route's load) the previous folder's conflict copies — and a
 		// resolver opened on one of them — are not this ledger's.
-		if (data === loaded) return;
-		loaded = data;
+		if (data === adopted) return;
+		adopted = data;
 		report = data.report;
 		error = data.error;
 		notice = "";

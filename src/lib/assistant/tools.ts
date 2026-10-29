@@ -12,12 +12,11 @@
  *
  * The names map onto the commands the app has: accounts, the register, the
  * journal's files, a file's text, the budget, the stored index series, the
- * lifestyle report, the price targets and BQL. `query` is called through
- * `invoke` by its Tauri name until it reaches `src/bindings.ts`, the way
- * `api.ts` calls the `ai_*` commands. Names are accepted in the endpoint's own
- * spelling: snake_case, camelCase, or with a `ledger`/namespace prefix. An
- * unknown name is answered as an error the model can read and correct, never
- * thrown.
+ * lifestyle report, the price targets and BQL — every one a generated binding
+ * in `src/bindings.ts`, so a rename in the backend fails here at compile time.
+ * Names are accepted in the endpoint's own spelling: snake_case, camelCase, or
+ * with a `ledger`/namespace prefix. An unknown name is answered as an error the
+ * model can read and correct, never thrown.
  *
  * `run_python` is the one tool that is not a backend command: it runs a script
  * in a worker (see `python/sandbox.ts`), and every `ledger.*` call that script
@@ -31,14 +30,18 @@
  * command — so a model can ask for an edit and never make one.
  */
 import { invalidateAll } from "$app/navigation";
-import { invoke } from "@tauri-apps/api/core";
-import { commands, type NewPosting, type NewTransaction } from "../../bindings";
+import {
+	commands,
+	type NewPosting,
+	type NewTransaction,
+	type ToolCall,
+	type ToolSchema,
+} from "../../bindings";
 import { messageOf } from "../errors.js";
 import { bumpLedgerRevision } from "../ledger-revision.svelte.js";
 import type { PythonRun } from "./artifacts/types.js";
 import { runPython } from "./python/sandbox.js";
 import type { PythonRpcAnswer } from "./python/protocol.js";
-import type { ToolCall, ToolSchema } from "./api.js";
 
 export type DispatchOutcome = {
 	/** Whether the tool actually ran: false on a refusal, or on a script that raised. */
@@ -203,26 +206,6 @@ export function isRunPython(name: string): boolean {
  */
 const DEFAULT_QUERY_ROWS = 200;
 
-/** A BQL answer: the column names and every row as the strings the engine produced. */
-type QueryAnswer = {
-	columns: string[];
-	rows: string[][];
-	truncated: boolean;
-};
-
-/**
- * One BQL statement through the backend's query engine.
- *
- * `query` is not in `src/bindings.ts` yet — the command layer that registers it
- * is being added separately — so the call goes through `invoke` by its Tauri
- * name; the row cap is camelCased from the Rust `max_rows` argument. A refused
- * statement rejects with the engine's own message, which the dispatcher hands
- * to the model as it came.
- */
-function queryRows(bql: string, maxRows: number): Promise<QueryAnswer> {
-	return invoke<QueryAnswer>("query", { bql, maxRows });
-}
-
 /**
  * One `ledger.*` call from the sandbox, run through this same dispatcher.
  *
@@ -386,7 +369,7 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 					optionalPositiveInt(args, "max_rows") ??
 					optionalPositiveInt(args, "maxRows") ??
 					DEFAULT_QUERY_ROWS;
-				return success(await queryRows(bql, maxRows));
+				return success(await unwrap(commands.query(bql, maxRows)));
 			}
 
 			case "run_python": {

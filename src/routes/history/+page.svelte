@@ -54,8 +54,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The route's own page of the log, taken once to seed the screen. */
 	const first = untrack(() => data);
-	/** The load the state below was last taken from. */
-	let loaded = $state(first);
+	/** The load the state below was last taken from (plain: see `branches`). */
+	let adopted = first;
 
 	let operations = $state<Operation[]>(first.operations);
 	let error = $state(first.error);
@@ -73,8 +73,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// after an undo — and the page above was seeded from an earlier read. The
 		// log belongs to whichever ledger is open, so the page follows its own
 		// load instead of offering the previous one's operations to Undo.
-		if (data === loaded) return;
-		loaded = data;
+		if (data === adopted) return;
+		adopted = data;
 		operations = data.operations;
 		limit = data.page;
 		exhausted = data.operations.length < data.page;
@@ -112,13 +112,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		if (next === origin) return;
 		origin = next;
 		clearTimeout(filterTimer);
-		void load(loaded.page);
+		void load(first.page);
 	}
 
 	/** Typing a path waits for a pause; every keystroke is not a scan. */
 	function pathChanged() {
 		clearTimeout(filterTimer);
-		filterTimer = setTimeout(() => void load(loaded.page), 300);
+		filterTimer = setTimeout(() => void load(limit), 300);
 	}
 
 	async function undo(operation: Operation) {
@@ -343,7 +343,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Button
 				size="sm"
 				variant="outline"
-				onclick={() => load(limit + loaded.page)}
+				onclick={() => load(limit + first.page)}
 				disabled={loading || exhausted}
 			>
 				{loading ? "Loading…" : "Load more"}

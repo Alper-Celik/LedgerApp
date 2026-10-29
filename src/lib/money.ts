@@ -64,6 +64,61 @@ export function signOf(units: string): number {
 }
 
 /**
+ * A decimal string (`-1234.50`, `125`, `0.00`) split into its sign and its two
+ * runs of digits. Keeping the digits as text is what lets an amount be scaled
+ * to an integer — `+`, `-`, `.` and leading zeroes dropped — without ever
+ * passing through a float.
+ */
+export type Decimal = { negative: boolean; whole: string; fraction: string };
+
+/**
+ * `text` as a sign and digit runs, or `null` when it is not a plain decimal.
+ *
+ * A leading `+` is accepted (an exporter may write one) and an empty fraction
+ * (`5.`) is simply no places. Anything else — `""`, `.5`, `1e5` — is
+ * refused rather than guessed at: this module compares and sums ledger
+ * amounts, and an amount it cannot read must not silently become a number.
+ */
+export function parseDecimal(text: string): Decimal | null {
+	const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(text.trim());
+	if (!match) return null;
+	return { negative: match[1] === "-", whole: match[2] ?? "0", fraction: match[3] ?? "" };
+}
+
+/**
+ * `value` as an integer at `scale` decimal places: the fraction is padded out
+ * to that many places and the digits are joined, so `-12.30` at scale 3 is
+ * `-12300n`. `scale` must be at least the value's own fraction length (callers
+ * pass the wider of the two values being compared, which is why the padding
+ * only ever grows). `-0` scales to `0n`, so it stays the same amount as `0`.
+ */
+export function scaledAt(value: Decimal, scale: number): bigint {
+	const magnitude = BigInt(`${value.whole}${value.fraction.padEnd(scale, "0")}`);
+	return value.negative ? -magnitude : magnitude;
+}
+
+/**
+ * Exact ordering of two decimal strings: `-1`, `0` or `1`.
+ *
+ * The sign comes first — a negative amount orders below zero and `-0` is the
+ * same amount as `0`, so it ties — and only amounts of one sign are compared
+ * by magnitude, at the wider of the two scales and as integers, which is where
+ * a `Number()` comparison would lose digits or call two amounts equal. Text
+ * that is not a decimal string (`""`, `.`) is not an amount: it orders below
+ * every number and ties with its own kind, so a sort stays a total order.
+ */
+export function compareDecimals(left: string, right: string): number {
+	const a = parseDecimal(left);
+	const b = parseDecimal(right);
+	if (!a || !b) return a ? 1 : b ? -1 : 0;
+	const scale = Math.max(a.fraction.length, b.fraction.length);
+	const scaledLeft = scaledAt(a, scale);
+	const scaledRight = scaledAt(b, scale);
+	if (scaledLeft === scaledRight) return 0;
+	return scaledLeft < scaledRight ? -1 : 1;
+}
+
+/**
  * CLDR's ISO 4217 list (307 codes), when the engine has `Intl.supportedValuesOf`
  * — WebKit 615+/Safari 15.4+. Without it, fall back to ICU's own rule that a
  * currency code is three letters.

@@ -220,6 +220,13 @@ class LanguageServer {
 	private sending: Promise<unknown> = Promise.resolve();
 	private unlisten: UnlistenFn | null = null;
 	private starting: Promise<void> | null = null;
+	/**
+	 * Bumped by every shutdown. A start that is still in flight when it moves
+	 * belongs to a journal that is no longer open, so it stops at its next await
+	 * instead of installing a listener nobody can remove or starting the server
+	 * for whatever is loaded now.
+	 */
+	private generation = 0;
 	private monaco: typeof Monaco | null = null;
 	private providersRegistered = false;
 
@@ -318,14 +325,16 @@ class LanguageServer {
 	 * server) is what lets the next attach start it.
 	 */
 	async shutdown(): Promise<void> {
+		this.generation += 1;
 		for (const document of this.documents.values()) {
 			clearTimeout(document.timer);
 		}
 		this.documents.clear();
 		this.byUri.clear();
-		this.starting = null;
-		await this.unlisten?.();
+		const unlisten = this.unlisten;
 		this.unlisten = null;
+		this.starting = null;
+		await unlisten?.();
 	}
 
 	private ensureStarted(): Promise<void> {
@@ -343,10 +352,18 @@ class LanguageServer {
 	}
 
 	private async start(): Promise<void> {
-		this.unlisten = await listen<string>(MESSAGE_EVENT, (event) => {
+		const generation = this.generation;
+		const unlisten = await listen<string>(MESSAGE_EVENT, (event) => {
 			this.receive(event.payload);
 		});
+		if (generation !== this.generation) {
+			// Overtaken by a journal switch: this listener belongs to nothing.
+			void unlisten();
+			return;
+		}
+		this.unlisten = unlisten;
 		const started = await commands.lspStart();
+		if (generation !== this.generation) return;
 		if (started.status === "error") throw new Error(started.error);
 		if (started.data) {
 			await this.request("initialize", {

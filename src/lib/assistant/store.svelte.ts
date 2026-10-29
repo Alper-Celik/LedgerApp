@@ -24,26 +24,20 @@
  */
 import {
 	commands,
-	type Conversation,
-	type MalformedFile,
-	type Message as StoredMessage,
-	type Summary,
-} from "../../bindings";
-import { messageOf } from "../errors.js";
-import {
-	aiConfigure,
-	aiModels,
-	aiSettings,
-	aiStream,
-	aiTools,
-	type AiSettings,
+	type AiSettingsView,
 	type ChatMessage,
 	type ChatResponse,
+	type Conversation,
+	type MalformedFile,
 	type MediaPart,
+	type Message as StoredMessage,
 	type ModelInfo,
+	type Summary,
 	type ToolCall,
 	type ToolSchema,
-} from "./api.js";
+} from "../../bindings";
+import { messageOf } from "../errors.js";
+import { aiStream } from "./api.js";
 import { mediaPartsOf, visionOf, type Attachment } from "./media.js";
 import {
 	applyProposal as writeProposal,
@@ -75,7 +69,7 @@ export type Entry =
 	  };
 
 export class Assistant {
-	settings = $state<AiSettings | null>(null);
+	settings = $state<AiSettingsView | null>(null);
 	settingsError = $state("");
 	/** True while the first-run form and its model picker hold the panel. */
 	setupOpen = $state(false);
@@ -142,7 +136,9 @@ export class Assistant {
 
 	async loadSettings(): Promise<void> {
 		try {
-			const settings = await aiSettings();
+			const answer = await commands.aiSettings();
+			if (answer.status === "error") throw new Error(answer.error);
+			const settings = answer.data;
 			this.settings = settings;
 			this.settingsError = "";
 			if (!settings.has_key) this.setupOpen = true;
@@ -166,7 +162,9 @@ export class Assistant {
 		const wasSetup = this.setupOpen || this.settings?.has_key === false;
 		this.settingsError = "";
 		try {
-			const settings = await aiConfigure(baseUrl, apiKey, model, maxTokens, temperature);
+			const answer = await commands.aiConfigure(baseUrl, apiKey, model, maxTokens, temperature);
+			if (answer.status === "error") throw new Error(answer.error);
+			const settings = answer.data;
 			this.settings = settings;
 			if (settings.has_key && wasSetup) this.setupOpen = true;
 			if (settings.has_key) {
@@ -186,13 +184,15 @@ export class Assistant {
 		if (!settings) return false;
 		this.settingsError = "";
 		try {
-			this.settings = await aiConfigure(
+			const answer = await commands.aiConfigure(
 				settings.base_url,
 				null,
 				model,
 				settings.max_tokens,
 				settings.temperature
 			);
+			if (answer.status === "error") throw new Error(answer.error);
+			this.settings = answer.data;
 			return true;
 		} catch (cause) {
 			this.settingsError = messageOf(cause);
@@ -208,7 +208,9 @@ export class Assistant {
 	async loadModels(): Promise<void> {
 		this.modelsLoading = true;
 		try {
-			this.models = await aiModels();
+			const answer = await commands.aiModels();
+			if (answer.status === "error") throw new Error(answer.error);
+			this.models = answer.data;
 			this.modelsError = "";
 		} catch (cause) {
 			this.modelsError = messageOf(cause);
@@ -219,7 +221,7 @@ export class Assistant {
 
 	async loadTools(): Promise<void> {
 		try {
-			this.tools = offeredTools(await aiTools());
+			this.tools = offeredTools(await commands.aiTools());
 			this.toolsError = "";
 		} catch (cause) {
 			// The backend's catalogue failing must not hide the sandbox: the panel
@@ -412,7 +414,7 @@ export class Assistant {
 	 */
 	private async mediaFor(
 		attachments: Attachment[],
-		settings: AiSettings
+		settings: AiSettingsView
 	): Promise<{ media: MediaPart[]; notice: string }> {
 		if (attachments.length === 0) return { media: [], notice: "" };
 		const vision = visionOf(this.models, settings.model);
@@ -789,7 +791,7 @@ function replayable(messages: ChatMessage[]): ChatMessage[] {
 	const announced = new Set<string>();
 	for (const message of messages) {
 		if (message.role !== "assistant") continue;
-		for (const call of message.tool_calls) announced.add(call.id);
+		for (const call of message.tool_calls ?? []) announced.add(call.id);
 	}
 
 	const out: ChatMessage[] = [];
@@ -798,7 +800,7 @@ function replayable(messages: ChatMessage[]): ChatMessage[] {
 			if (message.tool_call_id && announced.has(message.tool_call_id)) out.push(message);
 			continue;
 		}
-		if (message.role === "assistant" && message.tool_calls.length) {
+		if (message.role === "assistant" && message.tool_calls?.length) {
 			out.push({
 				...message,
 				tool_calls: message.tool_calls.filter((call) => answered.has(call.id)),

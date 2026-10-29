@@ -3,22 +3,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 /**
- * The conflict resolver's model: what the two resolver commands answer with,
- * and the naming the list and the panel share.
+ * The conflict resolver's model: the naming the list and the panel share, and
+ * the one pick vocabulary the backend takes.
  *
- * `sync_conflicts` is a generated binding already; `conflict_compare` and
- * `conflict_resolve` are newer than the checked-in `bindings.ts`, so this module
- * talks to them by command name and gives their shapes types here. Once the
- * bindings are regenerated the two wrappers below can call
- * `commands.conflictCompare` / `commands.conflictResolve` instead — the shapes
- * do not change, and nothing else on the screen has to.
+ * The commands and their shapes are generated bindings (`commands.conflictCompare`,
+ * `commands.conflictResolve`, `ConflictView`, `DecisionDto`, `MergeSummaryDto`),
+ * so this module holds only what the wire does not say: the four picks the
+ * resolver offers, and how a client, a path and a classification read on
+ * screen.
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import type { Candidate, SyncClient } from "../../../bindings";
-import { messageOf } from "$lib/errors.js";
+import type { Candidate, DecisionDto, SyncClient } from "../../../bindings";
 
-/** What to keep for one directive the merge could not settle by itself. */
+/**
+ * What to keep for one directive the merge could not settle by itself.
+ *
+ * The backend's `conflict_resolve` takes these as plain strings; the union is
+ * this module's, so the pick control cannot invent a fifth answer.
+ */
 export type ConflictPick = "ours" | "theirs" | "both" | "drop";
 
 /** The pick control's four answers, in reading order. */
@@ -28,95 +30,6 @@ export const CHOICES: readonly { id: ConflictPick; label: string; hint: string }
 	{ id: "both", label: "Both", hint: "Keep both versions, ours first" },
 	{ id: "drop", label: "Drop", hint: "Keep neither version" },
 ];
-
-/** One directive, as the merge sees it. */
-export type ConflictDecision = {
-	/** Opaque identity string, stable across the compare and the resolve. */
-	key: string;
-	/** `transaction`, `open`, `balance`, … */
-	kind: string;
-	/** One-line human description, e.g. `2026-01-10 * "Groceries"`. */
-	label: string;
-	/** What happened across the three versions. */
-	class: string;
-	/** Settled by the merge, or in need of a [`ConflictPick`]. */
-	needs_user: boolean;
-	/** This directive exactly as the original has it. */
-	ours: string | null;
-	/** This directive exactly as the conflicted copy has it. */
-	theirs: string | null;
-	/** This directive exactly as the common base has it, when there is one. */
-	base: string | null;
-};
-
-/** Counts for the resolver's header. */
-export type ConflictSummary = {
-	unchanged: number;
-	auto: number;
-	needs_user: number;
-	ambiguous: number;
-	total: number;
-	/** Directives per kind, in kind-name order. */
-	kinds: [string, number][];
-};
-
-/** One original and its conflicted copy, compared. */
-export type ConflictComparison = {
-	original: string;
-	copy: string;
-	/** The client's display name (`Google Drive`, …), or empty when unknown. */
-	client: string;
-	/** False when the log holds no common base for the file yet. */
-	base_found: boolean;
-	/** The whole original text. */
-	ours: string;
-	/** The whole copy's text. */
-	theirs: string;
-	summary: ConflictSummary;
-	decisions: ConflictDecision[];
-};
-
-export type CompareResult =
-	| { ok: true; comparison: ConflictComparison }
-	| { ok: false; error: string };
-
-export type ResolveResult = { ok: true; message: string } | { ok: false; error: string };
-
-/**
- * Compare an original with its conflict copy: the whole texts, the header's
- * counts, and one decision per directive. The backend remembers the comparison
- * for the copy, so `resolveConflict` only works after this call, in this
- * process.
- */
-export async function compareConflict(
-	original: string,
-	copy: string
-): Promise<CompareResult> {
-	try {
-		return {
-			ok: true,
-			comparison: await invoke<ConflictComparison>("conflict_compare", { original, copy }),
-		};
-	} catch (cause) {
-		return { ok: false, error: messageOf(cause) };
-	}
-}
-
-/**
- * Apply the picks and write the merged file back over `original`. The answer is
- * the backend's own sentence on success; a refusal is the exception text,
- * verbatim.
- */
-export async function resolveConflict(
-	original: string,
-	picks: [string, ConflictPick][]
-): Promise<ResolveResult> {
-	try {
-		return { ok: true, message: await invoke<string>("conflict_resolve", { original, picks }) };
-	} catch (cause) {
-		return { ok: false, error: messageOf(cause) };
-	}
-}
 
 /** How a client names itself in a heading. */
 const CLIENT_LABELS: Record<SyncClient, string> = {
@@ -147,7 +60,7 @@ const ISO_DATE = /\d{4}-\d{2}-\d{2}/;
  * carries. Directives without a date (`option`, `include`, `plugin`) answer
  * null.
  */
-export function dateOf(decision: ConflictDecision): string | null {
+export function dateOf(decision: DecisionDto): string | null {
 	return (
 		decision.label.match(ISO_DATE)?.[0] ??
 		decision.ours?.match(ISO_DATE)?.[0] ??
@@ -172,7 +85,7 @@ export function classLabel(classification: string): string {
  * panel shows these with the settled directives, not as work: `summary` already
  * counts them apart from `auto`.
  */
-export function isUnchanged(decision: ConflictDecision): boolean {
+export function isUnchanged(decision: DecisionDto): boolean {
 	return classLabel(decision.class) === "unchanged";
 }
 

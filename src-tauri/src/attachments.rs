@@ -349,22 +349,6 @@ pub fn read_text(path: &Path, max_bytes: u64) -> Result<String, String> {
         .unwrap_or(text))
 }
 
-/// The MIME type a provider payload should carry for each kind. PDFs never
-/// leave as `application/pdf`: [`render_pdf`] hands over PNG pages, one image
-/// per page.
-pub fn mime_of(kind: AttachmentKind) -> &'static str {
-    match kind {
-        AttachmentKind::Pdf => "application/pdf",
-        AttachmentKind::Image => "image/png",
-        AttachmentKind::Spreadsheet => {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        }
-        AttachmentKind::Csv => "text/csv",
-        AttachmentKind::Text => "text/plain",
-        AttachmentKind::Other => "application/octet-stream",
-    }
-}
-
 /// Refuse `path` before a reader touches it when it is over the attachment
 /// ceiling: [`read_table`] bounds rows and columns, but the file itself would
 /// still be read whole, and a million-row xlsx is not a document.
@@ -1334,18 +1318,5 @@ mod tests {
 
         assert!(error.contains("not UTF-8"), "{error}");
         assert!(error.contains("offset 1"), "{error}");
-    }
-
-    #[test]
-    fn mime_of_maps_every_kind() {
-        assert_eq!(mime_of(AttachmentKind::Pdf), "application/pdf");
-        assert_eq!(mime_of(AttachmentKind::Image), "image/png");
-        assert_eq!(mime_of(AttachmentKind::Csv), "text/csv");
-        assert_eq!(mime_of(AttachmentKind::Text), "text/plain");
-        assert_eq!(mime_of(AttachmentKind::Other), "application/octet-stream");
-        assert_eq!(
-            mime_of(AttachmentKind::Spreadsheet),
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
     }
 }

@@ -102,7 +102,9 @@ test("the sidebar carries the git views and survives a failing backend", async (
 	// git views are gone in that state on purpose — `git_state` failed, so the
 	// sidebar cannot claim the ledger is a repository and offers no diff/commit.
 	await page.goto("/ledger?fail=1");
-	await expect(page.getByText("no ledger")).toBeVisible();
+	// The page's own alert, not the sync bar's status line, which names the
+	// same failure in the banner above it.
+	await expect(page.getByRole("alert").filter({ hasText: "no ledger" })).toBeVisible();
 	await expect(page.getByRole("link", { name: "Diff", exact: true })).toHaveCount(0);
 	await expect(page.getByRole("link", { name: "Budget", exact: true })).toBeVisible();
 });

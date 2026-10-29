@@ -127,7 +127,7 @@ impl Change {
     /// The same change with the line hunks the writer worked out. Nothing calls
     /// this yet: the line tools attach hunks once they edit through the pipeline,
     /// and the log already carries the field for them.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_hunks(mut self, hunks: Vec<Hunk>) -> Self {
         self.hunks = Some(hunks);
         self

@@ -155,11 +155,6 @@ pub struct NameMatch {
 ///
 /// The rest of the answer — copies whose original is gone — is
 /// [`scan_report`]; this is the shorthand for the common case.
-#[cfg(test)]
-pub fn scan(root: &Path) -> Result<Vec<Candidate>, String> {
-    Ok(scan_report(root)?.candidates)
-}
-
 /// Walk `root` and report every conflicted copy under it.
 ///
 /// `.git` and `.ledger` are skipped at every depth: the first is not ledger
@@ -561,6 +556,11 @@ fn consider(dir: &Path, path: &Path, name: &std::ffi::OsStr, report: &mut Report
 
 #[cfg(test)]
 mod tests {
+    /// The candidates under a fixture directory — what the screen lists.
+    fn candidates(root: &Path) -> Result<Vec<Candidate>, String> {
+        Ok(scan_report(root)?.candidates)
+    }
+
     use std::fs;
 
     use super::*;
@@ -582,7 +582,7 @@ mod tests {
 
     /// `(copy, original, client, stamp)` per candidate, in the scan's order.
     fn pairs(dir: &Path) -> Vec<(String, String, SyncClient, Option<String>)> {
-        scan(dir)
+        candidates(dir)
             .unwrap()
             .into_iter()
             .map(|c| (base(&c.copy), base(&c.original), c.client, c.stamp))
@@ -796,7 +796,7 @@ mod tests {
             assert_eq!(candidate.3.as_deref(), stamp, "{name}");
         }
         // Every original is the real file, not a name the scan assembled.
-        for candidate in scan(root).unwrap() {
+        for candidate in candidates(root).unwrap() {
             assert_eq!(candidate.original, root.join("ledger.bean"));
         }
     }
@@ -819,13 +819,13 @@ mod tests {
             write(root, name);
         }
 
-        assert_eq!(scan(root).unwrap(), Vec::new());
+        assert_eq!(candidates(root).unwrap(), Vec::new());
         assert_eq!(scan_report(root).unwrap().orphans, Vec::new());
 
         // A directory is not an original either: only a file can be merged into.
         fs::create_dir(root.join("folder.bean")).unwrap();
         write(root, "folder (1).bean");
-        assert_eq!(scan(root).unwrap(), Vec::new());
+        assert_eq!(candidates(root).unwrap(), Vec::new());
     }
 
     #[test]
@@ -1007,8 +1007,8 @@ mod tests {
             write(root, copy);
         }
 
-        let first = scan(root).unwrap();
-        let second = scan(root).unwrap();
+        let first = candidates(root).unwrap();
+        let second = candidates(root).unwrap();
         assert_eq!(first, second);
         let copies: Vec<PathBuf> = first.iter().map(|c| c.copy.clone()).collect();
         let mut sorted = copies.clone();
@@ -1020,7 +1020,7 @@ mod tests {
     fn scan_refuses_an_unreadable_root() {
         let dir = TempDir::new("conflict-names-missing");
         let missing = dir.dir().join("not-there");
-        let error = scan(&missing).unwrap_err();
+        let error = candidates(&missing).unwrap_err();
         assert!(error.contains("not-there"), "{error}");
     }
 
@@ -1032,6 +1032,6 @@ mod tests {
         // copy is never its own original.
         write(root, "(1).bean");
         write(root, ".bean");
-        assert!(scan(root).unwrap().is_empty());
+        assert!(candidates(root).unwrap().is_empty());
     }
 }

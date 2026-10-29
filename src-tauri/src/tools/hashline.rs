@@ -110,7 +110,9 @@ pub enum EditOp {
 /// runs, machines and Rust versions, so an anchor minted by one `read` still
 /// names the same line after an unrelated edit. Four hex characters are not a
 /// checksum — the `hash@line` form and the ambiguity check below are what make
-/// a collision harmless.
+/// a collision harmless. This rule is an edit anchor and nothing else: no
+/// value, amount or file identity is hashed this way, and a caller must not
+/// read the result as one.
 pub fn hash_line(text: &str) -> String {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in text.as_bytes() {

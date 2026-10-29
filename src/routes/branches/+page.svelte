@@ -35,9 +35,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** The route's own read, taken once to seed the screen. */
 	const first = untrack(() => data);
-	/** The load the state below was last taken from. */
-	let loaded = $state(first);
-	const root = $derived(loaded.root ?? "");
+	/**
+	 * The load the state below was last taken from. A plain variable, not state:
+	 * the prop is a raw object and `$state` would proxy it, so the identity
+	 * comparison below could never hold and adopting again would re-run the.
+	 */
+	let adopted: typeof first = first;
+	const root = $derived(data.root ?? "");
 
 	let branches = $state<BranchInfo[]>(first.branches);
 	let commits = $state<CommitInfo[]>(first.commits);
@@ -60,13 +64,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// opened, or after this screen reloads the ledger — and the state above
 		// was taken from an earlier read. Following the prop is what keeps a
 		// "Switch" on a stale row from driving the previous repository.
-		if (data === loaded) return;
+		if (data === adopted) return;
 		// The write's own sentence is cleared only when the repository changed:
 		// this screen's reload is what announces "Switched to …", and clearing it
 		// would erase the confirmation of the click that caused the reload.
 		const switched = data.root !== shownRoot;
 		shownRoot = data.root;
-		loaded = data;
+		adopted = data;
 		branches = data.branches;
 		commits = data.commits;
 		journal = data.journal;
@@ -234,11 +238,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<div class="flex flex-wrap items-center gap-2">
 		<h1 class="text-lg font-semibold tracking-tight">Branches</h1>
 		<span class="text-muted-foreground text-xs">
-			{loaded.repo && current
+			{first.repo && current
 				? `branches, history and merges — on ${current}`
 				: "branches, history and merges of the ledger's repository"}
 		</span>
-		{#if loaded.repo}
+		{#if first.repo}
 			<div class="ml-auto flex items-center gap-1">
 				<Button size="sm" variant="ghost" disabled={refreshing} onclick={() => void refreshAll()}>
 					{refreshing ? "Reading…" : "Refresh"}
@@ -248,16 +252,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{/if}
 	</div>
 
-	{#if !loaded.repo}
+	{#if !first.repo}
 		<div class="flex max-w-2xl flex-col gap-2 rounded-lg border px-3 py-4">
-			{#if loaded.error}
+			{#if first.error}
 				<p class="text-sm font-medium">The repository state could not be read</p>
 				<p class="text-muted-foreground text-xs">
 					The screen first has to know whether the ledger's folder is a repository, and that
 					read failed.
 				</p>
-				<Alert variant="destructive">{loaded.error}</Alert>
-			{:else if loaded.noLedger}
+				<Alert variant="destructive">{first.error}</Alert>
+			{:else if first.noLedger}
 				<p class="text-sm font-medium">No ledger is open</p>
 				<p class="text-muted-foreground text-xs">
 					Branches are a property of the repository holding the journal, and no journal is
@@ -273,7 +277,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			{/if}
 			<div>
 				<Button size="sm" variant="secondary" href={resolve("/settings")}>
-					{loaded.noLedger || loaded.error ? "Open Settings" : "Open Settings → Git"}
+					{first.noLedger || first.error ? "Open Settings" : "Open Settings → Git"}
 				</Button>
 			</div>
 		</div>

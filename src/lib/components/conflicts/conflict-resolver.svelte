@@ -5,16 +5,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { onMount } from "svelte";
-	import type { Candidate } from "../../../bindings";
+	import { commands, type Candidate, type ConflictView } from "../../../bindings";
 	import {
 		CHOICES,
 		classLabel,
-		compareConflict,
 		dateOf,
 		isUnchanged,
 		nameOf,
-		resolveConflict,
-		type ConflictComparison,
 		type ConflictPick,
 	} from "./conflicts.js";
 	import { Alert } from "$lib/components/ui/alert/index.js";
@@ -50,7 +47,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		onclose: () => void;
 	} = $props();
 
-	let comparison = $state<ConflictComparison | null>(null);
+	let comparison = $state<ConflictView | null>(null);
 	let loading = $state(true);
 	let error = $state("");
 	/** The pick per decision key; a needs-user directive without one blocks Apply. */
@@ -61,13 +58,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	async function load() {
 		loading = true;
 		error = "";
-		const result = await compareConflict(candidate.original, candidate.copy);
+		const result = await commands.conflictCompare(candidate.original, candidate.copy);
 		loading = false;
-		if (!result.ok) {
+		if (result.status === "error") {
 			error = result.error;
 			return;
 		}
-		comparison = result.comparison;
+		comparison = result.data;
 	}
 
 	onMount(() => {
@@ -99,13 +96,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			const pick = picks[decision.key];
 			return pick ? [[decision.key, pick] as [string, ConflictPick]] : [];
 		});
-		const result = await resolveConflict(comparison.original, chosen);
+		const result = await commands.conflictResolve(comparison.original, chosen);
 		applying = false;
-		if (!result.ok) {
+		if (result.status === "error") {
 			error = result.error;
 			return;
 		}
-		onresolved(result.message);
+		onresolved(result.data);
 	}
 
 	/** A side as the panel prints it: an absent or blank directive says so. */

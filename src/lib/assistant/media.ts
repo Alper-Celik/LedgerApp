@@ -10,15 +10,15 @@
  * and sent page by page as PNG images, because that is what a vision model
  * reads — see [`mediaPartsOf`]. The endpoint's own model list is the only
  * voice that says whether the selected model takes anything visual, so an
- * attachment is only sent when `aiModels` marked the model vision-capable;
- * otherwise the UI says so instead of shipping bytes the endpoint cannot read.
+ * attachment is only sent when `commands.aiModels` marked the model
+ * vision-capable; otherwise the UI says so instead of shipping bytes the
+ * endpoint cannot read.
  *
  * Limits are deliberately the frontend's: the browser already has the bytes,
  * and a 10 MB file should be refused before it is encoded and passed over IPC.
  */
-import { commands } from "../../bindings";
+import { commands, type MediaPart, type ModelInfo } from "../../bindings";
 import { messageOf } from "../errors.js";
-import type { MediaPart, ModelInfo } from "./api.js";
 
 /** The most files one message may carry. */
 export const MAX_ATTACHMENTS = 3;

@@ -5,7 +5,7 @@
 import { invalidateAll } from "$app/navigation";
 import { commands, type LoadSummary } from "../bindings";
 import { messageOf } from "./errors.js";
-import { noteTreeReport } from "./sync.svelte.js";
+import { noteSyncReadError, noteTreeReport } from "./sync.svelte.js";
 import { bumpLedgerEpoch, bumpLedgerRevision } from "./ledger-revision.svelte.js";
 
 /**
@@ -66,9 +66,17 @@ export async function chooseLedger() {
  * logged, never surfaced as a failed edit (the edit itself did happen).
  */
 export async function syncTree(): Promise<void> {
+	let kind: string;
 	try {
-		const kind = await commands.storageKind();
-		if (kind !== "tree") return;
+		kind = await commands.storageKind();
+	} catch (cause) {
+		// Whether the ledger is in a folder is a read; a failure here says
+		// nothing about a write having been lost.
+		noteSyncReadError(messageOf(cause));
+		return;
+	}
+	if (kind !== "tree") return;
+	try {
 		const result = await commands.syncLedgerTree();
 		if (result.status === "error") {
 			noteTreeReport({ external: [], conflicts: [], error: result.error });

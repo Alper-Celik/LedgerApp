@@ -12,7 +12,7 @@ import {
 	type WidgetKind,
 	type WidgetSpan,
 } from "$lib/dashboard/index.js";
-import { signOf, sumDecimals } from "$lib/money.js";
+import { compareDecimals, signOf, sumDecimals } from "$lib/money.js";
 import type {
 	AccountBalance,
 	BudgetRange,
@@ -324,24 +324,17 @@ export function spendingSeries(
 	];
 }
 
-/** An exact comparison of two decimal strings, by magnitude — no float involved. */
+/**
+ * An exact comparison of two decimal strings — no float involved.
+ *
+ * Delegates to [`compareDecimals`]: sign first, then magnitude at a common
+ * scale. Every value a widget compares here is a sum of spending already
+ * filtered to positive figures, so for the inputs in use this is the magnitude
+ * ordering the widgets sort by; a negative one would order below zero rather
+ * than beside its own size.
+ */
 export function compareMagnitude(left: string, right: string): number {
-	const a = magnitudeParts(left);
-	const b = magnitudeParts(right);
-	if (a.whole.length !== b.whole.length) return a.whole.length - b.whole.length;
-	if (a.whole !== b.whole) return a.whole < b.whole ? -1 : 1;
-	const width = Math.max(a.fraction.length, b.fraction.length);
-	const fa = a.fraction.padEnd(width, "0");
-	const fb = b.fraction.padEnd(width, "0");
-	if (fa === fb) return 0;
-	return fa < fb ? -1 : 1;
-}
-
-/** The digits of an amount, sign and leading zeroes set aside. */
-function magnitudeParts(units: string): { whole: string; fraction: string } {
-	const text = units.trim().replace(/^[+-]/, "");
-	const [whole = "0", fraction = ""] = text.split(".");
-	return { whole: whole.replace(/^0+(?=\d)/, ""), fraction };
+	return compareDecimals(left, right);
 }
 
 /**

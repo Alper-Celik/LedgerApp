@@ -2,21 +2,10 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { commands } from "../bindings";
+import { commands, type RepoState } from "../bindings";
 import { messageOf } from "./errors.js";
 
-/**
- * What the backend's `git_state` answers: whether the ledger's directory is a
- * repository, where that repository starts, and the identity commits would be
- * attributed to. Written out here because the generated bindings type arrives
- * with the command itself.
- */
-type GitState = {
-	repo: boolean;
-	root: string | null;
-	user_name: string | null;
-	user_email: string | null;
-};
+type GitState = RepoState;
 
 /**
  * The ledger's git state, in one place. The diff view, the commit view and the

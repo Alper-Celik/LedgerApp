@@ -22,7 +22,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		amountOf,
 		appendKey,
 		fromAnswer,
-		requestSuggestions,
+		RECENT_DAYS,
 		suggestions,
 		todayIso,
 		type QuickAddSign,
@@ -149,7 +149,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 */
 	async function presets(balances: AccountBalance[]): Promise<QuickAddSuggestions> {
 		try {
-			return fromAnswer(await requestSuggestions(), balances);
+			const answer = await commands.quickAddSuggestions(RECENT_DAYS);
+			// A refusal (an older backend, no ledger open) falls through to the
+			// register read, so it is a throw here rather than a second branch.
+			if (answer.status === "error") throw new Error(answer.error);
+			return fromAnswer(answer.data, balances);
 		} catch (cause) {
 			console.warn("quick_add_suggestions failed; deriving from the register", cause);
 			return suggestions(await commands.accountTransactions(""), balances);

@@ -79,6 +79,16 @@ export async function refreshSyncWatch() {
 	}
 }
 
+/**
+ * Report a failure to find out whether the ledger is in a tree at all.
+ *
+ * That is a read problem, not a write that failed: the folder was never reached,
+ * so the bar must not claim a write did not land.
+ */
+export function noteSyncReadError(message: string) {
+	syncWatch.error = message;
+}
+
 /** Dismiss the bar until the next change. */
 export function dismissSyncWatch() {
 	syncWatch.changes = [];

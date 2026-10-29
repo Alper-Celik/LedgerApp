@@ -831,10 +831,6 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> 
 /// speaks it) or a Unicode block chart; the renderer chooses, so a caller never
 /// has to detect a terminal. Write them to stdout as they come — re-encoding
 /// them as text would corrupt the escape.
-pub fn chart(spec_json: &str) -> Result<Vec<u8>, String> {
-    chart_with(spec_json, TerminalOptions::default())
-}
-
 /// [`chart`] with explicit options — the CLI's `--width` sets the cell count.
 pub fn chart_with(spec_json: &str, options: TerminalOptions) -> Result<Vec<u8>, String> {
     let spec = ChartSpec::from_json(spec_json)
@@ -1162,9 +1158,14 @@ option \"operating_currency\" \"USD\"
 
         // The default path picks a protocol for the environment; either way the
         // answer is bytes, never a re-encoded string.
-        assert!(!chart(spec).expect("the default renders").is_empty());
+        assert!(
+            !chart_with(spec, TerminalOptions::default())
+                .expect("the default renders")
+                .is_empty()
+        );
 
-        let error = chart("{ not json }").expect_err("garbage is refused");
+        let error =
+            chart_with("{ not json }", TerminalOptions::default()).expect_err("garbage is refused");
         assert!(error.contains("not a chart spec"), "{error}");
     }
 

@@ -2,20 +2,19 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { invoke } from "@tauri-apps/api/core";
-import type { AccountBalance, TransactionView } from "../bindings";
+import type { AccountBalance, QuickAdd, TransactionView } from "../bindings";
 
 /**
  * The quick-add sheet's two pieces of thinking, kept out of the component so
  * both can be read on their own: the keypad's decimal accumulator, and the
  * guesses the sheet opens with.
  *
- * The guesses are the backend's: `quick_add_suggestions` counts the recent
- * categories, payees and the last account pair over the ledger it already has
- * loaded, so opening the sheet no longer ships the whole register to the
- * webview. [`suggestions`] remains as the fallback for a build whose command
- * refuses or is missing — same shape, same ranking, read from a register the
- * caller fetched itself.
+ * The guesses are the backend's: `commands.quickAddSuggestions` counts the
+ * recent categories, payees and the last account pair over the ledger it
+ * already has loaded, so opening the sheet no longer ships the whole register
+ * to the webview. [`suggestions`] remains as the fallback for a build whose
+ * command refuses or is missing — same shape, same ranking, read from a
+ * register the caller fetched itself.
  *
  * Money never becomes a `number` here. The keypad collects the characters the
  * user pressed and the sign is glued on at the end, so the figure reaches the
@@ -60,19 +59,6 @@ export type QuickAddSuggestions = {
 export type QuickAddKey = string;
 
 /**
- * What `quick_add_suggestions` answers: the pair the ledger posted last, and
- * the category and free-text names it sees most in the window.
- *
- * The pair arrives as two strings — the posting order is the ledger's — and
- * `null` when no entry has both legs yet.
- */
-export type QuickAddAnswer = {
-	last_pair: [string, string] | null;
-	categories: string[];
-	payees: string[];
-};
-
-/**
  * The sheet's presets from the backend's answer.
  *
  * A remembered account this ledger no longer has is dropped rather than
@@ -80,10 +66,7 @@ export type QuickAddAnswer = {
  * most used category, exactly as [`suggestions`] would have answered. The
  * lists keep the backend's order, capped at [`MAX_SUGGESTIONS`].
  */
-export function fromAnswer(
-	answer: QuickAddAnswer,
-	accounts: AccountBalance[]
-): QuickAddSuggestions {
+export function fromAnswer(answer: QuickAdd, accounts: AccountBalance[]): QuickAddSuggestions {
 	const known = new Set(accounts.map((account) => account.name));
 	const pair = answer.last_pair;
 	const from = pair && known.has(pair[0]) ? pair[0] : "";
@@ -99,21 +82,6 @@ export function fromAnswer(
 		payees: answer.payees.slice(0, MAX_SUGGESTIONS),
 		categories,
 	};
-}
-
-/**
- * The backend's suggestions over the last [`RECENT_DAYS`] days.
- *
- * `quick_add_suggestions` is not in `src/bindings.ts` yet — the command layer
- * that registers it is being added separately — so the call goes through
- * `invoke` by its Tauri name, the way `src/lib/assistant/api.ts` already calls
- * the `ai_*` commands; the argument is spelled as Tauri's camelCasing expects
- * it, so this wrapper keeps working when the command is generated. A refusal
- * (an older backend, no ledger open) rejects, and the caller decides whether
- * the register fallback applies.
- */
-export function requestSuggestions(days: number = RECENT_DAYS): Promise<QuickAddAnswer> {
-	return invoke<QuickAddAnswer>("quick_add_suggestions", { days });
 }
 
 /**
