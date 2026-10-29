@@ -8,9 +8,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
 	import FolderPicker from "$lib/components/folder-picker.svelte";
+	import SyncBar from "$lib/components/sync-bar.svelte";
 	import QuickAdd from "$lib/components/quick-add.svelte";
 	import { sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import { syncTree } from "$lib/ledger.svelte.js";
+	import { refreshSyncWatch } from "$lib/sync.svelte.js";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { load as loadTheme } from "$lib/theme/store.svelte.js";
 	import "../app.css";
@@ -27,6 +29,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	$effect(() => {
 		void ledgerRevision.value;
 		void syncTree();
+		// Every write also tells whether the folder moved behind us; the bar in
+		// the inset offers the reload.
+		void refreshSyncWatch();
 	});
 </script>
 
@@ -46,6 +51,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Sidebar.Trigger class="size-9 -ms-1" aria-label="Open navigation" />
 			<span class="truncate text-sm font-semibold">Ledger</span>
 		</header>
+		<SyncBar />
 		{@render children?.()}
 	</Sidebar.Inset>
 	<!-- One picker for the whole app: the sidebar and Settings both just open it. -->
