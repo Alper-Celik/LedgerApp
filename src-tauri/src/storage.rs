@@ -247,6 +247,10 @@ impl Manifest {
 
 /// Forget the mirror: the app is about to open a *different* folder, so neither
 /// the private copy nor what it knew about the previous tree applies.
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code) // called by the Android pick; the tests exercise it here
+)]
 pub fn reset_mirror(target_dir: &Path) -> Result<(), String> {
     match fs::remove_dir_all(target_dir) {
         Ok(()) => {}
@@ -499,11 +503,12 @@ pub fn resolve_conflicts(
                     write_local(target_dir, &path, &bytes)?;
                     manifest.files.insert(path, crate::sync::hash(&bytes));
                 }
-                // Gone from the folder: the folder's answer is that it is gone.
-                Err(_) => {
-                    let _ = fs::remove_file(&local);
-                    manifest.files.remove(&path);
-                }
+                // The folder could not be read — a revoked grant and a deleted
+                // file look the same from here, and only one of them means "take
+                // the deletion". Keeping the app's copy and leaving the base
+                // alone makes the next pass report the conflict again rather
+                // than deleting bytes on a transient failure.
+                Err(_) => continue,
             },
         }
     }
