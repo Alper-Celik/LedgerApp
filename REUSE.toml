@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Licensing metadata for trees whose files are generated rather than written,
+# so they cannot carry an SPDX header of their own (REUSE spec 3.3, annotations).
+#
+# `src-tauri/gen/android` is the Gradle project `tauri android init` emits from
+# Tauri's own templates; its files are distributed under Tauri's MIT license
+# (see the MIT text in LICENSES/). Re-running `tauri android init` regenerates
+# them, which is also why an inline header would be lost.
+
+version = 1
+
+[[annotations]]
+path = "src-tauri/gen/android/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025 Tauri Programme within The Commons Conservancy"
+SPDX-License-Identifier = "MIT"

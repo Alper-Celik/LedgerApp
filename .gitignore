@@ -44,6 +44,9 @@ src/lib/paraglide
 # Nix build output
 /result
 
+# Android build caches (GRADLE_USER_HOME for `nix develop .#android`)
+/.gradle-android
+
 project.inlang/cache/
 
 # The ledger itself: private data, and its own git repository.

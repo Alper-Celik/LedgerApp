@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Android linkers: the NDK's clang wrappers, named without a path so they
+# resolve through `nix develop .#android`'s PATH (the NDK toolchain's `bin`).
+# The `24` in each name is the API level, matching the Gradle project's
+# `minSdk = 24`. `tauri android build` exports CARGO_TARGET_*_LINKER itself and
+# that wins; these entries are what make a bare
+# `cargo build --target aarch64-linux-android` work, and what give cargo the
+# right linker for the `cargo check`/`cargo clippy` runs that do not go through
+# Tauri.
+#
+# Desktop targets are untouched: nothing here matches the host or the Qt
+# runtime's target, so `npm run tauri build` on Linux still links with the
+# system compiler.
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android24-clang"
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi24-clang"
+
+[target.i686-linux-android]
+linker = "i686-linux-android24-clang"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android24-clang"
