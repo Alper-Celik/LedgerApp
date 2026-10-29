@@ -6,15 +6,18 @@
 //! the journal and refuse — rolling the file back — if the loader complains
 //! about something the journal did not already say.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
-use rustledger_loader::LedgerError;
+use rust_decimal::Decimal;
+use rustledger_loader::{Ledger, LedgerError};
 
+use crate::files::source_of_file;
 use crate::git::stage_file;
-use crate::model::{TransactionEdit, TransactionFile};
-use crate::rewrite::rewrite_transaction;
+use crate::model::{NewTransaction, TransactionEdit, TransactionFile};
+use crate::rewrite::{checked_date, checked_flag, quote_beancount, rewrite_transaction};
 use crate::session::{AppState, Loaded, load_journal};
 use crate::source::{line_column, source_of_transaction};
 
@@ -129,6 +132,240 @@ pub(crate) fn edit_file_source(state: &AppState, id: u32, text: &str) -> Result<
     apply_file_edit(state, &path, &previous, text.to_string(), reported)
 }
 
+/// The body of [`update_file_text`](crate::commands::update_file_text): a journal
+/// file named by path — not by an entry inside it — has its whole text replaced,
+/// then takes the same reload, refusal and staging path as every other edit.
+///
+/// The file is looked up in the journal, so a stale picker or a hand-written
+/// payload can only ever write a file this session loaded; the loader, not this
+/// function, is the authority on whether the text is a legal ledger.
+pub(crate) fn edit_named_file_source(
+    state: &AppState,
+    file: &str,
+    text: &str,
+) -> Result<(), String> {
+    let (path, previous, reported) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let found = source_of_file(&loaded.ledger, file)?;
+        (
+            found.path.clone(),
+            found.source.to_string(),
+            error_signatures(&loaded.ledger.errors),
+        )
+    };
+
+    apply_file_edit(state, &path, &previous, text.to_string(), reported)
+}
+
+/// The body of [`add_transaction`](crate::commands::add_transaction), split out
+/// like [`edit_file_source`] so it can be driven without a running Tauri app:
+/// work out the file's new text from the loaded copy, then take the same
+/// reload-and-stage path as every edit.
+///
+/// The entry names the file it goes into; one the journal does not hold is
+/// refused rather than written to, so this can only touch the ledger's own
+/// files. Everything the entry says is rendered as ledger tokens first: a date,
+/// flag or account the lexer could split is rejected before any byte is written,
+/// and a booked entry that does not balance is caught by the reload like any
+/// other edit.
+pub(crate) fn create_transaction(state: &AppState, entry: NewTransaction) -> Result<(), String> {
+    let (path, previous, rewritten, reported) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let ledger = &loaded.ledger;
+        let file = source_of_file(ledger, &entry.file)?;
+        let previous = file.source.to_string();
+        let rewritten = append_transaction(&previous, ledger, &entry)?;
+        (
+            file.path.clone(),
+            previous,
+            rewritten,
+            error_signatures(&ledger.errors),
+        )
+    };
+
+    apply_file_edit(state, &path, &previous, rewritten, reported)
+}
+
+/// `text` with `entry` appended to the end of the file as a new transaction.
+fn append_transaction(
+    text: &str,
+    ledger: &Ledger,
+    entry: &NewTransaction,
+) -> Result<String, String> {
+    let rendered = render_transaction(text, ledger, entry)?;
+    Ok(append_directive(text, &rendered))
+}
+
+/// `text` with `rendered` appended to the end of the file.
+///
+/// Only bytes are added: one blank line separates the directive from whatever
+/// the file already ends with, and not a byte of what was there is rewritten, so
+/// the change the diff view shows is the directive itself.
+fn append_directive(text: &str, rendered: &str) -> String {
+    let mut rewritten = String::with_capacity(text.len() + rendered.len() + 2);
+    rewritten.push_str(text);
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            rewritten.push_str("\n\n");
+        } else if !text.ends_with("\n\n") {
+            rewritten.push('\n');
+        }
+    }
+    rewritten.push_str(rendered);
+    rewritten
+}
+
+/// The text of `entry`, laid out the way the file it is going into lays its own
+/// postings out: the header, then one line per posting, each account padded to
+/// the column the file's postings put their amounts at.
+///
+/// Only the tokens beancount reads are written, from values that are validated
+/// or quoted on the way in, so nothing typed into the form can land in the file
+/// as syntax of its own.
+fn render_transaction(
+    text: &str,
+    ledger: &Ledger,
+    entry: &NewTransaction,
+) -> Result<String, String> {
+    let date = checked_date(&entry.date)?;
+    let flag = checked_flag(&entry.flag)?;
+    let payee = entry
+        .payee
+        .as_deref()
+        .map(str::trim)
+        .filter(|payee| !payee.is_empty());
+    let narration = entry.narration.trim();
+    let mut rendered = String::new();
+    rendered.push_str(&date);
+    rendered.push(' ');
+    rendered.push_str(flag);
+    // A payee that only repeats the narration is not written down twice — the
+    // same rule the register's header rewrite follows.
+    if let Some(payee) = payee.filter(|payee| *payee != narration) {
+        rendered.push(' ');
+        rendered.push_str(&quote_beancount(payee));
+    }
+    rendered.push(' ');
+    rendered.push_str(&quote_beancount(narration));
+
+    let column = amount_column(text)
+        // A file with no posting to take a column from — a root journal of
+        // `open`s and `include`s, say — still gets postings that line up with
+        // each other: the entry is its own convention then.
+        .unwrap_or_else(|| 2 + longest_account(entry) + 1);
+    for (position, posting) in entry.postings.iter().enumerate() {
+        let account = posting.account.trim();
+        if account.is_empty() {
+            return Err(format!("posting {} has no account", position + 1));
+        }
+        if account
+            .chars()
+            .any(|character| character.is_whitespace() || character == '"' || character == ';')
+        {
+            return Err(format!("`{account}` is not an account name"));
+        }
+        rendered.push('\n');
+        rendered.push_str("  ");
+        rendered.push_str(account);
+        let figure = match posting
+            .units
+            .as_deref()
+            .map(str::trim)
+            .filter(|units| !units.is_empty())
+        {
+            // An amount left blank is the leg beancount interpolates: the
+            // account stands alone, the way a hand-written ledger leaves it.
+            None => continue,
+            Some(units) => Decimal::from_str(units)
+                .map_err(|e| format!("`{units}` is not an amount: {e}"))?
+                .to_string(),
+        };
+        let currency = posting
+            .currency
+            .as_deref()
+            .map(str::trim)
+            .filter(|currency| !currency.is_empty())
+            .or_else(|| ledger.options.operating_currency.first().map(String::as_str))
+            .ok_or("the ledger declares no `operating_currency` to write amounts in")?;
+        // Pad out to the file's own amount column, never below one space, so an
+        // account longer than the file's widest cannot touch its figure.
+        rendered.extend(std::iter::repeat_n(
+            ' ',
+            column.saturating_sub(2 + account.len()).max(1),
+        ));
+        rendered.push_str(&figure);
+        rendered.push(' ');
+        rendered.push_str(currency);
+    }
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+/// The longest account `entry` posts to, in bytes — the width a file with no
+/// postings of its own gets its new entry aligned to.
+fn longest_account(entry: &NewTransaction) -> usize {
+    entry
+        .postings
+        .iter()
+        .map(|posting| posting.account.trim().len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The column the file's own postings put their amounts at: the one most of them
+/// agree on, so a new entry lines up with the entries around it. `None` when the
+/// file has no posting with a figure yet.
+fn amount_column(text: &str) -> Option<usize> {
+    let mut columns: BTreeMap<usize, usize> = BTreeMap::new();
+    for line in text.lines() {
+        if let Some(column) = posting_amount_column(line) {
+            *columns.entry(column).or_default() += 1;
+        }
+    }
+    // The most common column wins; a tie goes to the leftmost, so an entry never
+    // drifts further right than the file already puts its own amounts.
+    columns
+        .into_iter()
+        .max_by_key(|&(column, count)| (count, std::cmp::Reverse(column)))
+        .map(|(column, _)| column)
+}
+
+/// The byte column a posting line's amount figure starts at, when the line is
+/// one of the file's own postings: indented, an account name, then a figure.
+///
+/// A posting the file leaves without an amount has no figure to align to, and
+/// neither has anything else on the line: an account name starts with a capital
+/// and never ends with a colon, which is what keeps a metadata line's
+/// `key: value` from reading as one.
+fn posting_amount_column(line: &str) -> Option<usize> {
+    let indent = line.len() - line.trim_start().len();
+    if indent == 0 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let account_end = rest.find(char::is_whitespace)?;
+    let account = &rest[..account_end];
+    let named = account.chars().next()?.is_ascii_uppercase()
+        && account.contains(':')
+        && !account.ends_with(':')
+        && account.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_')
+        });
+    if !named {
+        return None;
+    }
+    let value = &rest[account_end..];
+    let gap = value.len() - value.trim_start().len();
+    value
+        .trim_start()
+        .starts_with(|character: char| {
+            character.is_ascii_digit() || matches!(character, '-' | '+')
+        })
+        .then_some(indent + account_end + gap)
+}
+
 /// Write an edit's `rewritten` file text over the loaded copy at `path`, reload
 /// the ledger from disk, and stage the file — the shared tail of every edit
 /// path: field-by-field, transaction source, and whole file.
@@ -228,8 +465,68 @@ fn new_errors(before: &[String], after: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::git::{commit_staged, ledger_diff_text};
-    use crate::model::TransactionEdit;
+    use crate::model::{NewPosting, TransactionEdit};
     use crate::testing::*;
+
+    /// The amount column the fixtures below align their postings at.
+    const FIXTURE_COLUMN: usize = 34;
+
+    /// A posting line of the fixtures' own shape: indented account, spaces out to
+    /// [`FIXTURE_COLUMN`], then the figure and its commodity.
+    fn aligned(account: &str, units: &str) -> String {
+        format!(
+            "  {account}{}{units} USD",
+            " ".repeat(FIXTURE_COLUMN.saturating_sub(2 + account.len()))
+        )
+    }
+
+    /// A posting of a new entry, as the form sends it.
+    fn new_posting(account: &str, units: Option<&str>) -> NewPosting {
+        NewPosting {
+            account: account.to_string(),
+            units: units.map(str::to_string),
+            currency: Some("USD".to_string()),
+        }
+    }
+
+    /// A new entry for the journal file named `file`.
+    fn new_entry(
+        file: &str,
+        date: &str,
+        narration: &str,
+        postings: Vec<NewPosting>,
+    ) -> NewTransaction {
+        NewTransaction {
+            file: file.to_string(),
+            date: date.to_string(),
+            flag: "*".to_string(),
+            payee: None,
+            narration: narration.to_string(),
+            postings,
+        }
+    }
+
+    /// One committed journal of two `open` directives and one entry, with the
+    /// postings aligned at [`FIXTURE_COLUMN`] — the file the whole-text and
+    /// new-entry tests write into.
+    fn single_file_fixture(dir: &TempDir) -> (git2::Repository, std::path::PathBuf, String) {
+        let text = format!(
+            "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+2026-01-10 * \"Groceries\"
+{}
+{}
+",
+            aligned("Assets:Bank:Checking", "-20.00"),
+            aligned("Expenses:Food", "20.00"),
+        );
+        let (repo, path) = committed_fixture(dir, &text);
+        (repo, path, text)
+    }
 
     /// A journal split across files — the root holds the `open` directives, an
     /// included file the entries — is editable like any other: the reload after
@@ -918,5 +1215,157 @@ option \"operating_currency\" \"USD\"
         assert!(modified_narrations(&state).is_empty());
         assert!(ledger_diff_text(&state).is_err());
         assert!(commit_staged(&state, "no repository").is_err());
+    }
+
+    /// A file's whole text is what the text editor saves: the same text is no
+    /// edit at all, a changed one goes through the loader and is staged, and a
+    /// text the loader refuses leaves the file byte-for-byte as it stood.
+    #[test]
+    fn a_files_whole_text_goes_through_the_loader_and_is_staged() {
+        let dir = TempDir::new("file-text");
+        let (repo, path, text) = single_file_fixture(&dir);
+        let state = loaded_state(&path);
+        let name = path.display().to_string();
+        let head = repo.head().unwrap().peel_to_tree().unwrap();
+
+        // What the text mode is handed is the copy this session loaded.
+        let handed = {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            source_of_file(&guard.as_ref().unwrap().ledger, &name)
+                .unwrap()
+                .source
+                .to_string()
+        };
+        assert_eq!(handed, text);
+
+        // The same text back is no edit at all: no bytes written, nothing staged.
+        let before = fs::read(&path).unwrap();
+        edit_named_file_source(&state, &name, &handed).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(repo.index().unwrap().write_tree().unwrap(), head.id());
+
+        // A file written with one more entry is staged, and the app holds the
+        // ledger it now describes.
+        let rewritten = format!(
+            "{text}\n2026-01-20 * \"Coffee\"\n{}\n{}\n",
+            aligned("Assets:Bank:Checking", "-3.00"),
+            aligned("Expenses:Food", "3.00"),
+        );
+        edit_named_file_source(&state, &name, &rewritten).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), rewritten);
+        assert_eq!(
+            views(&state)
+                .into_iter()
+                .filter(|view| view.narration == "Coffee")
+                .count(),
+            1
+        );
+        let staged = repo.diff_tree_to_index(Some(&head), None, None).unwrap();
+        assert_eq!(staged.deltas().count(), 1);
+
+        // Text the loader refuses — legs that do not balance — leaves the file
+        // exactly as it was, and a path the journal does not hold is refused
+        // without reading anything.
+        let before = fs::read(&path).unwrap();
+        let refused = format!(
+            "{rewritten}2026-01-21 * \"Broken\"\n  Assets:Bank:Checking  -3.00 USD\n  Expenses:Food          2.00 USD\n"
+        );
+        assert!(edit_named_file_source(&state, &name, &refused).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(
+            edit_named_file_source(&state, "/tmp/elsewhere.bean", "whatever\n")
+                .unwrap_err()
+                .contains("not a file of this journal")
+        );
+    }
+
+    /// A new entry lands in the file it names, at the end, laid out like that
+    /// file's own postings — through the same reload, refusal and staging path as
+    /// every other edit, with the leg left without a figure booked on reload.
+    #[test]
+    fn a_new_entry_is_appended_to_the_named_file_and_booked() {
+        let dir = TempDir::new("add");
+        let (repo, path, text) = single_file_fixture(&dir);
+        let state = loaded_state(&path);
+        let name = path.display().to_string();
+        let head = repo.head().unwrap().peel_to_tree().unwrap();
+
+        create_transaction(
+            &state,
+            NewTransaction {
+                payee: Some("Corner Shop".to_string()),
+                ..new_entry(
+                    &name,
+                    "2026-01-14",
+                    "Coffee",
+                    vec![
+                        new_posting("Assets:Bank:Checking", Some("-16.20")),
+                        new_posting("Expenses:Food", None),
+                    ],
+                )
+            },
+        )
+        .unwrap();
+
+        // Appended at the end, aligned like the file's own amounts, with the
+        // implied leg written as the account alone.
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!(
+                "{text}\n2026-01-14 * \"Corner Shop\" \"Coffee\"\n{}\n  Expenses:Food\n",
+                aligned("Assets:Bank:Checking", "-16.20"),
+            )
+        );
+        let coffee = views(&state)
+            .into_iter()
+            .find(|view| view.narration == "Coffee")
+            .expect("the new entry is in the register");
+        assert_eq!(
+            coffee
+                .postings
+                .iter()
+                .map(|posting| (posting.account.as_str(), posting.units.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("Assets:Bank:Checking", "-16.20"),
+                ("Expenses:Food", "16.20"),
+            ]
+        );
+        let staged = repo.diff_tree_to_index(Some(&head), None, None).unwrap();
+        assert_eq!(staged.deltas().count(), 1);
+
+        // An entry the loader refuses, or a file the journal does not hold, is
+        // not written: the file keeps every byte it had.
+        let before = fs::read(&path).unwrap();
+        assert!(
+            create_transaction(
+                &state,
+                new_entry(
+                    &name,
+                    "2026-01-15",
+                    "Unbalanced",
+                    vec![
+                        new_posting("Assets:Bank:Checking", Some("-3.50")),
+                        new_posting("Expenses:Food", Some("3.00")),
+                    ],
+                ),
+            )
+            .is_err(),
+            "an unbalanced entry went through"
+        );
+        assert!(
+            create_transaction(
+                &state,
+                new_entry(
+                    "/tmp/elsewhere.bean",
+                    "2026-01-15",
+                    "Elsewhere",
+                    vec![new_posting("Expenses:Food", Some("-3.00"))],
+                ),
+            )
+            .unwrap_err()
+            .contains("not a file of this journal")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }

@@ -266,7 +266,7 @@ fn units_replacement(
 
 /// Quote a string for a transaction header, escaping exactly what the lexer
 /// reads as an escape so the value round-trips.
-fn quote_beancount(value: &str) -> String {
+pub(crate) fn quote_beancount(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for character in value.chars() {
@@ -378,7 +378,7 @@ fn end_of_string(line: &str, start: usize) -> Option<usize> {
 }
 
 /// Validate a `YYYY-MM-DD` date and hand back its canonical spelling.
-fn checked_date(date: &str) -> Result<String, String> {
+pub(crate) fn checked_date(date: &str) -> Result<String, String> {
     let invalid = || format!("`{date}` is not a YYYY-MM-DD date");
     let mut parts = date.split('-');
     let year: i32 = parts
@@ -406,7 +406,7 @@ fn checked_date(date: &str) -> Result<String, String> {
 
 /// Validate a transaction flag: a single character, and not one that would end
 /// the header token it is written in.
-fn checked_flag(flag: &str) -> Result<&str, String> {
+pub(crate) fn checked_flag(flag: &str) -> Result<&str, String> {
     let mut characters = flag.chars();
     match (characters.next(), characters.next()) {
         (Some(character), None)

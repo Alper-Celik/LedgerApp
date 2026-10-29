@@ -35,7 +35,7 @@ tauri = { version = "2", default-features = false, features = [
 ] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 specta = "2.0.0-rc.25"
 tauri-specta = { version = "2.0.0-rc.25", features = ["javascript", "typescript"] }
 specta-typescript = "0.0.12"
@@ -45,22 +45,108 @@ rustledger-parser = "0.24.0"
 # `plugins/rustledger-envelope` reaches the app.
 rustledger-loader = { version = "0.24.0", features = ["wasm-plugins"] }
 rustledger-query = "0.24.0"
+# The journal's language server, embedded in-process. Its `run_main_loop`
+# takes the channels below as its transport, so the editor's completion, hover
+# and diagnostics are the same handlers `rledger-lsp` runs over stdio.
+rustledger-lsp = "0.24.0"
+crossbeam-channel = "0.5"
+lsp-server = "0.10"
+lsp-types = "0.97"
 rust_decimal = "1"
+# The published CLI crate, for its price layer only: `cmd::price` already
+# carries the market-quote sources, the source registry, the symbol discovery
+# that reads a ledger's `price:`/`quote_currency:` metadata, and an on-disk
+# quote cache. `default-features = false` keeps its Python-plugin stack out;
+# the app still loads its own plugins through `rustledger-loader` above.
+rustledger = { version = "0.24.0", default-features = false }
+# `cmd::price::PriceSource` is a public trait whose methods return
+# `anyhow::Result`, so a source of this crate's own — TEFAS, which upstream has
+# no provider for — must name that type to implement it.
+anyhow = "1"
+# Price-index providers: fetching the published series, and reading the CSV
+# payloads FRED serves and the CSV imports users hand in. `ureq`'s TLS is
+# rustls, so the build needs no system OpenSSL — the same reason git2 above
+# keeps its HTTPS transport off.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+csv = "1"
+# The assistant's image parts travel as `data:` URLs, so an attachment is
+# base64-encoded here. The version already in the tree through the TLS stack,
+# so this adds no crate to the build.
+base64 = "0.22"
+# Spreadsheets as attachments: `calamine` reads xlsx/xls/ods into rows without
+# an office suite, pure Rust, no system libraries.
+calamine = "0.37"
+# The assistant's base tools (`tools/`): `ignore` walks a tree honouring
+# .gitignore the way a coding tool must, `globset` matches the file patterns,
+# `regex` is grep. All three are already in the build through `ignore`-style
+# dependencies; naming them keeps the tool layer honest about what it uses.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
 # libgit2 bindings for staging and diffing the ledger against HEAD. Default
 # features stay off: this app only ever touches a local repository, so the SSH
 # and HTTPS transports (and their OpenSSL/libssh2 build chain) are dead weight.
 git2 = { version = "0.21", default-features = false }
+# Content hashing for the operation log (`history`): every pre- and post-image
+# is named by its BLAKE3 hash, so identical versions dedupe and a revert can
+# prove the file still holds what the operation left there. Fast enough to hash
+# whole files on every write, pure Rust, no system library.
+blake3 = "1"
+
+# PDF pages are rasterised by MuPDF, whose licence is AGPL-3.0 — the same one
+# this app carries. `mupdf-sys` compiles the MuPDF source it vendors, so the
+# build needs a C compiler, `make` and libclang for bindgen (no system MuPDF).
+# The wrapper's default features stay off: they drag in OCR (tesseract) and a
+# JS engine, neither of which a page renderer needs. `img` stays on so images
+# embedded in a PDF decode, and `base14-fonts` keeps the standard fonts a PDF
+# may leave unembedded. Android is left out — its MuPDF cross-build is
+# unverified — and `attachments::render_pdf` documents the refusal there.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+mupdf = { version = "0.8", default-features = false, features = [
+    "base14-fonts",
+    "img",
+] }
 
 # Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
 # builds against the checkout so runtime fixes land here first. Qt windowing
-# (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk.
+# (QWindow/QWidget) replaces tao and QtWebEngine replaces webkit2gtk. The dialog
+# plugin rides along for `pick_ledger_folder`, through its xdg-desktop-portal
+# backend (D-Bus; no toolkit in the process) rather than rfd's default GTK one.
+[dev-dependencies]
+# Temp directories for the backend's tests: every module's fixture builder needs
+# one, and `tempfile` is what the existing tests already assume exists.
+tempfile = "3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri-runtime-qt = { path = "../vendor/TauriQt/tauri-runtime-qt" }
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
 
-# Windows / macOS: the stock wry runtime. Enabling `wry` only here keeps
-# WebView2/WKWebView out of the Linux build and Qt out of the others.
-[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# Everything but Linux: the stock wry runtime (Windows/macOS today, Android and
+# iOS as they come). Enabling `wry` only here keeps WebView2/WKWebView/the system
+# WebView out of the Linux build and Qt out of the others.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri = { version = "2", default-features = false, features = ["wry"] }
+
+# Desktop: Tauri's own dialogs, which is what `pick_ledger_folder` asks. On
+# Windows and macOS that is rfd's native backend; on Linux it must be the
+# xdg-desktop-portal one (`default-features = false` drops rfd's GTK backend,
+# whose dialog is built on Qt's GLib main context and segfaults in this process —
+# see src/folders.rs). The portal is a D-Bus service, so no toolkit enters the
+# process at all. Phones are deliberately absent: they have no folder picker in
+# the plugin, and their answer is the Storage Access Framework
+# (`ACTION_OPEN_DOCUMENT_TREE` + content URIs, e.g. tauri-plugin-android-fs).
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tauri-plugin-dialog = "2"
+
+# Android: a user-chosen directory is a Storage Access Framework tree behind a
+# content URI, with no stable filesystem path — the folder picker above does not
+# exist there, and neither the loader nor git could open a URI. This plugin is
+# the JNI bridge to that tree (`pick_dir`, persisted permissions, content-URI
+# reads/writes); `storage` mirrors the tree into app-private files. Android-only
+# on purpose: off Android the crate is dead weight, and its build pulls in
+# `jni`/`libc`.
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-android-fs = "30"
 
 [features]
 # Escape hatch: build the Linux app on wry instead (e.g. to compare engines).

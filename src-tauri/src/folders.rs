@@ -5,13 +5,14 @@
 //! The in-app folder picker's data: the folders inside a directory, and which
 //! of them already hold a root journal.
 //!
-//! This exists instead of a native chooser because neither native route works
-//! in this process: the Qt runtime drops `run_on_main_thread` closures (so
-//! tauri-plugin-dialog never opens anything), and rfd's GTK backend creates its
-//! dialog on whichever GLib main context dispatches the idle — under Qt that is
-//! the Qt thread, while GTK itself was initialised on rfd's own thread, which
-//! segfaults. No desktop portal is running either. Listing directories ourselves
-//! has no toolkit, no portal and no thread affinity to get wrong.
+//! This backs the in-app picker, the fallback where the system chooser has no
+//! implementation (`pick_ledger_folder` answers with an error on phones, today).
+//! Desktop takes the system chooser instead: Tauri's dialog plugin through the
+//! xdg-desktop-portal on Linux, which is a D-Bus service — the plugin's default
+//! GTK backend is what must stay away from this process (rfd builds the dialog on
+//! Qt's GLib context after initialising GTK on its own thread, which segfaults).
+//! Listing directories ourselves has no toolkit, no portal and no thread
+//! affinity to get wrong.
 
 use std::fs;
 use std::path::{Path, PathBuf};
