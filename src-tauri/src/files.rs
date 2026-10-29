@@ -29,22 +29,18 @@ pub(crate) fn journal_file_views(loaded: &Loaded) -> Vec<JournalFile> {
     // journal's directory (its own `base_dir` rule, shared by `include` and
     // `option "documents"`), so that is the directory a label is relative to.
     let base = files.first().and_then(|file| file.path.parent());
-    // One walk of the transaction stream, counted per file — the same pairing
-    // the register uses to know which file an entry came from. An entry the
-    // loader synthesized has no file, so a `pad`'s transaction or a plugin's
-    // entries are no file's.
-    let view = ledger.balance_view();
-    let sources = source_directive_index(ledger, &view);
+    // Count straight off the parsed directives: each transaction already carries
+    // the file it came from, so this is one pass with no ledger clone and no
+    // source index. An entry the loader synthesized has no file, so a `pad`'s
+    // transaction or a plugin's entries are no file's — which is also why they
+    // cannot inflate a count here.
     let mut counts = vec![0u32; files.len()];
-    for (id, directive) in view.iter().enumerate() {
-        if !matches!(directive, Directive::Transaction(_)) {
+    for directive in &ledger.directives {
+        // `Spanned<Directive>` carries the file; the transaction inside does not.
+        if !matches!(directive.value, Directive::Transaction(_)) {
             continue;
         }
-        let Some(index) = sources.get(id).copied().flatten() else {
-            continue;
-        };
-        let file = usize::from(ledger.directives[index].file_id);
-        if let Some(count) = counts.get_mut(file) {
+        if let Some(count) = counts.get_mut(usize::from(directive.file_id)) {
             *count = count.saturating_add(1);
         }
     }
