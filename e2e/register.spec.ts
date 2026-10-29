@@ -164,7 +164,7 @@ test("the ledger-wide views the sidebar links to render", async ({ page }) => {
 });
 
 test("the new screens mount with their empty states", async ({ page }) => {
-	// Branches: the stub's repository has no commits yet.
+	// Branches: the stub reports a repository, so the screen mounts.
 	await page.goto("/branches");
 	await expect(page.getByRole("heading", { name: "Branches", level: 1 })).toBeVisible();
 

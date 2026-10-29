@@ -166,30 +166,26 @@ fn parse_latest(fund: &str, body: &str) -> Result<(NaiveDate, Decimal), String> 
              clients that way behind its bot protection"
         ));
     }
-    let json: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| shape_error(fund, body))?;
+    // The rows are read as `RawValue`s, so a `fiyat` is the literal the site
+    // wrote rather than a number that has already been through `f64`: the ledger
+    // stores decimals exactly, and a price must not arrive rounded.
+    let answer: Answer = serde_json::from_str(body).map_err(|_| shape_error(fund, body))?;
 
-    if let Some(message) = json
-        .get("errorMessage")
-        .and_then(serde_json::Value::as_str)
+    if let Some(message) = answer
+        .error_message
+        .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
     {
         return Err(format!("TEFAS reported `{message}` for `{fund}`"));
     }
 
-    let rows = json
-        .get("resultList")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| shape_error(fund, body))?;
+    let rows = answer.result_list.ok_or_else(|| shape_error(fund, body))?;
 
     rows.iter()
         .filter_map(|row| {
-            let date = row
-                .get("tarih")
-                .and_then(serde_json::Value::as_str)
-                .and_then(feed_date)?;
-            let price = row.get("fiyat").and_then(price_of)?;
+            let date = row.tarih.as_ref().and_then(|raw| feed_date(unquote(raw)))?;
+            let price = row.fiyat.as_ref().and_then(|raw| price_of(unquote(raw)))?;
             Some((date, price))
         })
         .max_by_key(|(date, _)| *date)
@@ -201,21 +197,43 @@ fn parse_latest(fund: &str, body: &str) -> Result<(NaiveDate, Decimal), String> 
         })
 }
 
+/// The envelope, with every value kept as the text the site wrote.
+#[derive(serde::Deserialize)]
+struct Answer {
+    #[serde(rename = "errorMessage")]
+    error_message: Option<String>,
+    #[serde(rename = "resultList")]
+    result_list: Option<Vec<Row>>,
+}
+
+#[derive(serde::Deserialize)]
+struct Row {
+    tarih: Option<Box<serde_json::value::RawValue>>,
+    fiyat: Option<Box<serde_json::value::RawValue>>,
+}
+
+/// A raw value's text, without the quotes a JSON string carries. Dates and
+/// prices hold no escapes, so unquoting is the whole decode.
+fn unquote(raw: &serde_json::value::RawValue) -> &str {
+    let text = raw.get().trim();
+    text.strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(text)
+}
+
 /// A feed date: a bare `YYYY-MM-DD`, or the date prefix of an ISO timestamp.
 fn feed_date(raw: &str) -> Option<NaiveDate> {
     raw.get(..10)?.parse::<NaiveDate>().ok()
 }
 
-/// A `fiyat` value as an exact decimal. The field arrives as a JSON number;
-/// a string is accepted too (with a comma read as the Turkish decimal mark),
-/// so a serialization change cannot turn every price into "no price".
-fn price_of(value: &serde_json::Value) -> Option<Decimal> {
-    let raw = match value {
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::String(text) => text.replace(',', "."),
-        _ => return None,
-    };
-    Decimal::from_str(raw.trim())
+/// A `fiyat` value as an exact decimal. The field arrives as a JSON number —
+/// read from its literal text, so no float stands between the site and the
+/// ledger — and a string is accepted too (with a comma read as the Turkish
+/// decimal mark), so a serialization change cannot turn every price into
+/// "no price".
+fn price_of(raw: &str) -> Option<Decimal> {
+    let raw = raw.trim().replace(',', ".");
+    Decimal::from_str(&raw)
         .ok()
         .filter(|price| *price > Decimal::ZERO)
 }

@@ -42,13 +42,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * remounts it — the draft and the remembered pair survive.
 	 */
 
-	/** The remembered pair: what this sheet posted last, so tap three repeats it. */
-	const LAST_PAIR_KEY = "quick-add:last-pair";
+	/**
+	 * The remembered pair: what this sheet posted last, so tap three repeats it.
+	 *
+	 * The key carries the journal's own path. A pair of account names that exist
+	 * in two ledgers would otherwise be re-applied after a switch — the epoch
+	 * reset would last only until the next open — and post the other journal's
+	 * accounts into this one.
+	 */
+	const LAST_PAIR_PREFIX = "quick-add:last-pair:";
 
 	/** The zeros and ones the keypad is laid out as. */
 	const KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "backspace"];
 
 	let open = $state(false);
+	/** Bumped per draft, so a write that finishes late touches nothing of the next. */
+	let drafts = 0;
 	/** Whether any sheet or dialog is showing — this one included. */
 	let modalOpen = $state(false);
 
@@ -99,7 +108,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	function rememberedPair(): { from: string; to: string } {
 		if (!browser) return { from: "", to: "" };
 		try {
-			const raw = localStorage.getItem(LAST_PAIR_KEY);
+			const raw = localStorage.getItem(pairKey());
 			if (raw === null) return { from: "", to: "" };
 			const parsed: unknown = JSON.parse(raw);
 			if (typeof parsed !== "object" || parsed === null) return { from: "", to: "" };
@@ -114,10 +123,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		}
 	}
 
-	function rememberPair() {
+	/** The storage key for the journal open now. */
+	function pairKey(): string {
+		return `${LAST_PAIR_PREFIX}${ledger.summary?.path ?? ""}`;
+	}
+
+	function rememberPair(from: string, to: string) {
 		if (!browser) return;
 		try {
-			localStorage.setItem(LAST_PAIR_KEY, JSON.stringify({ from, to }));
+			localStorage.setItem(pairKey(), JSON.stringify({ from, to }));
 		} catch {
 			// A full or forbidden store costs the shortcut, never the write.
 		}
@@ -129,6 +143,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * pair (or the register walk when that command refuses).
 	 */
 	async function openSheet() {
+		drafts += 1;
 		digits = "";
 		sign = "expense";
 		date = todayIso();
@@ -238,8 +253,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		}
 		saving = true;
 		error = "";
+		// The draft this write belongs to, and the pair it posts: closing the
+		// sheet and opening a new one while the write is still in flight must not
+		// let this write's tail remember its pair over the new draft — or close
+		// it, wiping an amount the reader is typing.
+		const draft = ++drafts;
+		const posting = { from, to };
 		try {
-			const file = await commands.suggestTransactionFile([from, to]);
+			const file = await commands.suggestTransactionFile([posting.from, posting.to]);
 			if (file === null) {
 				error = "No journal file is known for these accounts, so there is nowhere to write.";
 				return;
@@ -251,8 +272,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				payee: null,
 				narration: text.trim(),
 				postings: [
-					{ account: to, units: amount, currency: null },
-					{ account: from, units: null, currency: null },
+					{ account: posting.to, units: amount, currency: null },
+					{ account: posting.from, units: null, currency: null },
 				],
 			});
 			if (result.status === "error") {
@@ -263,10 +284,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			error = messageOf(cause);
 			return;
 		} finally {
-			saving = false;
+			// A newer draft owns `saving` now; only this one may clear it.
+			if (draft === drafts) saving = false;
 		}
-		rememberPair();
-		close();
+		rememberPair(posting.from, posting.to);
+		if (draft === drafts) close();
 		bumpLedgerRevision();
 		await invalidateAll();
 	}

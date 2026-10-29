@@ -12,7 +12,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		PencilEdit01Icon,
 	} from "@hugeicons/core-free-icons";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
-	import { commands, type PostingView, type TransactionView } from "../../bindings";
+	import { type PostingView, type TransactionView } from "../../bindings";
 	import { Alert, AlertDescription } from "$lib/components/ui/alert/index.js";
 	import { Badge } from "$lib/components/ui/badge/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -21,6 +21,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import RegisterCompose from "$lib/components/register-compose.svelte";
+	import RegisterEntryEditor, { type EntryDraft } from "$lib/components/register-entry-editor.svelte";
 	import SourceEditor from "$lib/components/source-editor.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { IsMobile } from "$lib/hooks/is-mobile.svelte.js";
@@ -121,12 +122,25 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let current = $state<number | null>(null);
 	/**
 	 * In-place editing, the way GnuCash's register works: the current entry's
-	 * cells *become* fields. `draft` holds the values while editing; Enter (or
-	 * leaving the row) saves, Escape cancels.
+	 * cells *become* fields, which `RegisterEntryEditor` renders and writes.
+	 * `draft` is the values they hold — it lives here, not in the editor,
+	 * because the leg rows' amount fields bind to it too — and it is opened with
+	 * a copy of the entry and dropped by `cancelEdit`.
 	 */
 	let editing = $state<number | null>(null);
-	let draft = $state<{ date: string; payee: string; narration: string; units: string[] } | null>(null);
+	let draft = $state<EntryDraft | null>(null);
 	let editError = $state("");
+
+	/**
+	 * The open editor, for the rules the register keeps on its rows: the keys
+	 * and the commit-on-leave check are caught by the entry's rows (and, in the
+	 * table, by its leg block, which is a row of its own), not by the fields the
+	 * editor renders. Null whenever no entry is open.
+	 */
+	let editor = $state<{
+		save: () => Promise<void>;
+		keydown: (event: KeyboardEvent) => void;
+	} | null>(null);
 
 	/**
 	 * The other editor: `editing` rewrites an entry's fields in place, this one
@@ -168,39 +182,30 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		if (editing !== tx.id) return;
 		const next = event.relatedTarget;
 		const owner = next instanceof Element ? next.closest("[data-entry-id]") : null;
-		if (owner?.getAttribute("data-entry-id") !== String(tx.id)) saveEdit(tx);
+		if (owner?.getAttribute("data-entry-id") !== String(tx.id)) void editor?.save();
 	}
 
 	/**
-	 * The keys the register answers while editing: Enter saves the entry,
-	 * Escape drops the draft. The table's row catches them as they bubble from
-	 * its cells; the phone's card cannot put them on its `<li>` (a list item is
-	 * not an interactive element), so its inputs carry them directly.
+	 * The keys an entry's rows answer: Enter saves the entry, Escape drops the
+	 * draft. The rows catch them as they bubble from whichever cell or leg field
+	 * has focus, and hand them to the open editor; with no entry open a row
+	 * still swallows both, since its cells are read-only and Enter would
+	 * otherwise activate whichever action button held focus.
 	 */
 	function keys(event: KeyboardEvent, tx: TransactionView) {
-		if (event.key === "Enter") {
+		if (editing === tx.id && editor) {
+			editor.keydown(event);
+		} else if (event.key === "Enter" || event.key === "Escape") {
 			event.preventDefault();
-			saveEdit(tx);
-		} else if (event.key === "Escape") {
-			event.preventDefault();
-			cancelEdit();
 		}
 	}
 
-	async function saveEdit(tx: TransactionView) {
-		if (!draft || editing !== tx.id) return;
-		const result = await commands.updateTransaction({
-			id: tx.id,
-			date: draft.date,
-			flag: tx.flag,
-			payee: draft.payee.trim() === "" ? null : draft.payee,
-			narration: draft.narration,
-			postings: draft.units.map((units, index) => ({ index, units })),
-		});
-		if (result.status === "error") {
-			editError = result.error;
-			return;
-		}
+	/**
+	 * What a successful in-place write does, in the order it has always done it:
+	 * close the draft before the reload renumbers the entries it was opened on,
+	 * stage the revision, and bring the register back in step with the file.
+	 */
+	async function afterEditSaved() {
 		cancelEdit();
 		bumpLedgerRevision();
 		await invalidateAll();
@@ -522,58 +527,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					>
 						{#if editing === tx.id && draft}
 							<!--
-								Fields cannot sit inside the summary button, so the card's
-								head *becomes* the fields while the entry is edited —
-								stacked, because a phone has no room for a row of them.
+								The card's head *becomes* the fields while the entry is
+								edited: the editor stacks them, because a phone has no
+								room for a row of them.
 							-->
-							<div
-								class={cn(
-									"flex flex-col gap-1.5 border-s-2 p-3",
-									tx.modified ? "border-s-added" : "border-s-primary"
-								)}
-							>
-								<Input
-									class="h-8 tabular-nums"
-									placeholder="YYYY-MM-DD"
-									bind:value={draft.date}
-									onkeydown={(event) => keys(event, tx)}
-									aria-label="Date"
-								/>
-								<Input
-									class="h-8"
-									placeholder="Payee"
-									bind:value={draft.payee}
-									onkeydown={(event) => keys(event, tx)}
-									aria-label="Payee"
-								/>
-								<Input
-									class="h-8"
-									placeholder="Narration"
-									bind:value={draft.narration}
-									onkeydown={(event) => keys(event, tx)}
-									aria-label="Narration"
-								/>
-								<!--
-									Thumb-sized instead of the keyboard's Enter: a phone's
-									done key does not always blur the field, and these
-									buttons stay put — swapping the footer's own buttons
-									out would blur the one that was just tapped and so
-									commit before the first keystroke.
-								-->
-								<span class="flex items-center gap-2 pt-0.5">
-									<Button size="sm" class="h-8 flex-1" onclick={() => saveEdit(tx)}>
-										Save
-									</Button>
-									<Button
-										size="sm"
-										class="h-8 flex-1"
-										variant="ghost"
-										onclick={cancelEdit}
-									>
-										Cancel
-									</Button>
-								</span>
-							</div>
+							<RegisterEntryEditor
+								bind:this={editor}
+								variant="card"
+								{tx}
+								bind:draft
+								onError={(message) => (editError = message)}
+								onSaved={afterEditSaved}
+								onCancel={cancelEdit}
+							/>
 						{:else}
 							<button
 								type="button"
@@ -851,58 +817,47 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									</Button>
 								</span>
 							</Table.Cell>
-							<Table.Cell
-								class={cn(
-									"border-s border-border py-1.5 tabular-nums text-muted-foreground",
-									editing === tx.id ? "px-1" : "pr-3 pl-2"
-								)}
-							>
-								{#if editing === tx.id && draft}
-									<Input
-										class="h-6 px-1 tabular-nums"
-										placeholder="YYYY-MM-DD"
-										bind:value={draft.date}
-										aria-label="Date"
-									/>
-								{:else}
-									{tx.date}
-								{/if}
-							</Table.Cell>
-							<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
+							{#if editing === tx.id && draft}
 								<!--
-									The uncommitted state, said in the sidebar's own
-									words: one dot in the diff's green, named in the
-									tooltip and for assistive tech so it is not
-									silent. It rides in the description cell — the
-									column that absorbs the slack — because the
-									actions column is already full: an expander, a
-									pencil and the braces fill it to the pixel, and a
-									fourth child would spill over its border.
+									The row's two value cells *become* fields: the editor
+									renders them and the register keeps the rest of the
+									row — the actions, the transfer and the amounts.
 								-->
-								<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
-								{#if editing === tx.id && draft}
-									<span class="flex min-w-0 items-center gap-1">
-										<Input
-											class="h-6 min-w-0 flex-1 px-1"
-											placeholder="Payee"
-											bind:value={draft.payee}
-											aria-label="Payee"
-										/>
-										<span class="text-muted-foreground">—</span>
-										<Input
-											class="h-6 min-w-0 flex-2 px-1"
-											placeholder="Narration"
-											bind:value={draft.narration}
-											aria-label="Narration"
-										/>
-									</span>
-								{:else if tx.payee && tx.payee !== tx.narration}
-									<span class="font-medium">{tx.payee}</span>
-									<span class="text-muted-foreground">— {tx.narration}</span>
-								{:else}
-									{tx.narration}
-								{/if}
-							</Table.Cell>
+								<RegisterEntryEditor
+									bind:this={editor}
+									variant="table"
+									{tx}
+									bind:draft
+									onError={(message) => (editError = message)}
+									onSaved={afterEditSaved}
+									onCancel={cancelEdit}
+								/>
+							{:else}
+								<Table.Cell
+									class="border-s border-border py-1.5 pr-3 pl-2 tabular-nums text-muted-foreground"
+								>
+									{tx.date}
+								</Table.Cell>
+								<Table.Cell class="border-s border-border truncate py-1.5 pr-3 pl-2 font-medium">
+									<!--
+										The uncommitted state, said in the sidebar's own
+										words: one dot in the diff's green, named in the
+										tooltip and for assistive tech so it is not
+										silent. It rides in the description cell — the
+										column that absorbs the slack — because the
+										actions column is already full: an expander, a
+										pencil and the braces fill it to the pixel, and a
+										fourth child would spill over its border.
+									-->
+									<UncommittedMark modified={tx.modified} class="me-1.5 align-middle" />
+									{#if tx.payee && tx.payee !== tx.narration}
+										<span class="font-medium">{tx.payee}</span>
+										<span class="text-muted-foreground">— {tx.narration}</span>
+									{:else}
+										{tx.narration}
+									{/if}
+								</Table.Cell>
+							{/if}
 							<!--
 								The basic ledger names the other side; the split styles
 								instead say how many legs are still hidden, so an entry that

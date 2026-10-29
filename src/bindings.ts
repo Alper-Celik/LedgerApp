@@ -546,6 +546,16 @@ export type BudgetEnvelope = {
 	 */
 	full_name: string,
 	/**
+	 *  The ledger account this envelope mirrors — `Expenses:Food` for an envelope
+	 *  over `Expenses:Food`.
+	 * 
+	 *  The register deliberately hides every posting inside the envelope
+	 *  namespace (they are the plugin's bookkeeping, not the reader's entries), so
+	 *  `full_name` opens an empty page; this is the account the reader's own
+	 *  spending actually reaches.
+	 */
+	account: string,
+	/**
 	 *  What the month put into the envelope, net: inherited funding, one-off
 	 *  `adjust`/`zero`/`pad` deltas, and the rollover sweep's own correction,
 	 *  which takes money back out and so reads negative.

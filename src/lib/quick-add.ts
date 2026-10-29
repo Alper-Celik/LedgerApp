@@ -269,13 +269,25 @@ function rankedCategories(
 	return ranked.slice(0, MAX_SUGGESTIONS);
 }
 
-/** `Assets:Cash`, else the first `Assets` account, else the first funding one. */
+/**
+ * `Assets:Cash`, else the first `Assets` account, else the first funding one.
+ *
+ * The list is the sidebar's tree, which carries every synthesized ancestor: a
+ * bare `Assets` is a grouping node, not a postable account, and writing an entry
+ * to it makes the loader refuse the file. A node whose name *is* its root is
+ * therefore skipped.
+ */
 function firstFundingAccount(accounts: AccountBalance[]): string {
+	const postable = (account: AccountBalance) => account.name !== rootOf(account.name);
 	const named = accounts.find((account) => account.name === "Assets:Cash");
 	if (named) return named.name;
-	const asset = accounts.find((account) => rootOf(account.name) === "Assets");
+	const asset = accounts.find(
+		(account) => postable(account) && rootOf(account.name) === "Assets"
+	);
 	if (asset) return asset.name;
-	const funding = accounts.find((account) => FUNDING_ROOTS.has(rootOf(account.name)));
+	const funding = accounts.find(
+		(account) => postable(account) && FUNDING_ROOTS.has(rootOf(account.name))
+	);
 	return funding?.name ?? "";
 }
 

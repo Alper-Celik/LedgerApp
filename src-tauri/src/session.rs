@@ -84,10 +84,16 @@ pub(crate) fn load_journal(root: &Path) -> Result<Ledger, String> {
 /// `main.beancount`, `ledger.bean`, …). This is what makes opening a folder a
 /// way to point the app at a ledger without naming its root file.
 fn journal_in(path: &Path) -> Result<PathBuf, String> {
+    // Every folder consumer takes the root's parent, and a bare `main.bean` has
+    // an empty one: `canonicalize("")` is ENOENT (so every attachment fails) and
+    // libgit2 cannot open "" (so the repository is invisible). Resolving here
+    // fixes the directory, the summary the UI hands back, and cwd-dependence in
+    // one place.
+    let path = std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))?;
     if !path.is_dir() {
-        return Ok(path.to_path_buf());
+        return Ok(path);
     }
-    rustledger_loader::discover_journal_file(path)
+    rustledger_loader::discover_journal_file(&path)
         .ok_or_else(|| format!("no root journal (main.bean, …) in {}", path.display()))
 }
 
@@ -179,11 +185,15 @@ impl AppState {
 /// `main.bean`. A directory is resolved to the root journal inside it when it
 /// is loaded (see [`load_baselined`]).
 fn resolve_ledger_path() -> PathBuf {
-    let raw = std::env::args()
+    // `args()`/`var()` are the UTF-8 views, and a journal path is a filesystem
+    // path: a name that is not valid Unicode would abort the process at startup
+    // (`args()` panics) or be ignored silently (`var()`), while the CLI reads the
+    // same input as a `PathBuf` and opens it.
+    let raw = std::env::args_os()
         .skip(1) // drop the program name
         .last()
-        .or_else(|| std::env::var("LEDGER_PATH").ok())
-        .unwrap_or_else(|| "main.bean".to_string());
+        .or_else(|| std::env::var_os("LEDGER_PATH"))
+        .unwrap_or_else(|| std::ffi::OsString::from("main.bean"));
     PathBuf::from(raw)
 }
 

@@ -345,7 +345,8 @@ export function compareMagnitude(left: string, right: string): number {
  * branch's `spent` totals over the widget's own window, added as exact decimal
  * strings. Only positive sums become slices — a branch whose refunds outweigh
  * its spending has no share of a total to show — and the limit is applied
- * after sorting, so it keeps the branches that matter.
+ * after sorting, so it keeps the branches that matter — and the branches the
+ * limit drops are folded into one "N more" slice, so the total still adds up.
  */
 export function categoryShare(
 	branches: readonly CategoryMonths[],
@@ -355,7 +356,7 @@ export function categoryShare(
 	const wantedCurrency = stringSetting(config, "currency");
 	const categories = stringListSetting(config, "categories");
 	const limit = clamp(numberSetting(config, "limit", 8), 1, 12);
-	return branches
+	const ranked = branches
 		.filter(
 			(branch) =>
 				(wantedCurrency === null || branch.currency === wantedCurrency) &&
@@ -367,8 +368,22 @@ export function categoryShare(
 			currency: branch.currency,
 		}))
 		.filter((point) => signOf(point.value) > 0)
-		.sort((left, right) => compareMagnitude(right.value, left.value))
-		.slice(0, limit);
+		.sort((left, right) => compareMagnitude(right.value, left.value));
+
+	// A donut's centre sums the slices it was given, and every percentage is a
+	// ratio of that sum: dropping the tail without folding it in would make the
+	// card's total smaller than the ledger's spending and describe nothing.
+	if (ranked.length <= limit) return ranked;
+	const shown = ranked.slice(0, limit - 1);
+	const rest = ranked.slice(limit - 1);
+	return [
+		...shown,
+		{
+			label: `${rest.length} more`,
+			value: sumDecimals(rest.map((point) => point.value)),
+			currency: rest[0]?.currency ?? "",
+		},
+	];
 }
 
 /**
@@ -413,9 +428,14 @@ export function balanceRows(
 	accounts: readonly AccountBalance[],
 	config: WidgetConfig
 ): BalanceRow[] {
-	const depth = clamp(numberSetting(config, "depth", 2), 1, 6);
 	const showZero = booleanSetting(config, "showZero", false);
 	const wanted = stringListSetting(config, "accounts");
+	// The rows are grouped at `depth`, and the filter is matched against those
+	// group keys: a filter naming a deeper account than the grouping would match
+	// nothing at all and blank the card, so the grouping goes at least as deep as
+	// the account the reader named.
+	const named = wanted.reduce((depth, account) => Math.max(depth, account.split(":").length), 0);
+	const depth = clamp(Math.max(numberSetting(config, "depth", 2), named), 1, 6);
 	const reported = new Map(accounts.map((account) => [account.name, account] as const));
 	const seen = new Set<string>();
 	const rows: BalanceRow[] = [];

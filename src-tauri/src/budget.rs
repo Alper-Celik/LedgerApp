@@ -75,10 +75,14 @@ fn budget_currency(held: &BTreeMap<String, Decimal>, operating: &[String]) -> Op
     {
         return Some(currency.clone());
     }
+    // `>=` on an ascending map keeps the later name on a tie, which is the rule
+    // the reports use (`report_currency`) — one answer per ledger, and the doc
+    // above says which.
     let mut best: Option<(&String, Decimal)> = None;
     for (currency, total) in held {
-        if best.is_none_or(|(_, highest)| total.abs() > highest) {
-            best = Some((currency, total.abs()));
+        let moved = total.abs();
+        if best.is_none_or(|(_, highest)| moved >= highest) {
+            best = Some((currency, moved));
         }
     }
     best.map(|(currency, _)| currency.clone())
@@ -282,6 +286,9 @@ impl EnvelopeFlows {
             let envelope = BudgetEnvelope {
                 name,
                 full_name: account.clone(),
+                // `path` is the envelope's place inside the namespace, which is
+                // the ledger account the envelope shadows.
+                account: path.to_owned(),
                 budgeted: budgeted.to_string(),
                 spent: spent.to_string(),
                 balance: balance.to_string(),
@@ -547,6 +554,26 @@ fn month_label(index: i32) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Two commodities with the same moved total: the answer is the later name,
+    /// the same rule the reports use, so one ledger cannot report two currencies
+    /// depending on which screen asked.
+    #[test]
+    fn a_tie_in_moved_money_resolves_to_the_later_name() {
+        let held: std::collections::BTreeMap<String, rust_decimal::Decimal> = [
+            ("TRY".to_string(), rust_decimal::Decimal::from(100)),
+            ("USD".to_string(), rust_decimal::Decimal::from(100)),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(super::budget_currency(&held, &[]).as_deref(), Some("USD"));
+        // The operating currency wins over both when the envelope used it.
+        assert_eq!(
+            super::budget_currency(&held, &["TRY".to_string()]).as_deref(),
+            Some("TRY")
+        );
+    }
+
     use super::*;
     use crate::testing::{TempDir, loaded_state};
     use std::fs;

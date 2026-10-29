@@ -57,7 +57,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<span class="truncate">{row.group}</span>
 		</button>
 	{:else}
-		<div class="truncate text-sm" title={row.fullName}>{row.envelope}</div>
+		<div class="truncate text-sm" title={row.account}>{row.envelope}</div>
 	{/if}
 	<div class="mt-1 grid grid-cols-3 gap-2">
 		{#each [{ label: "Budgeted", units: cell.budgeted }, { label: "Spent", units: cell.spent }, { label: "Balance", units: cell.balance }] as figure (figure.label)}
@@ -70,7 +70,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					<a
 						class="focus-visible:ring-ring rounded-sm text-sm underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
 						href={resolve("/account/[id]", { id: row.fullName })}
-						aria-label={`${row.fullName} register, ${monthLabel(month)}`}
+						aria-label={`${row.account} register, ${monthLabel(month)}`}
 						title="Open this envelope's register"
 					>
 						<BudgetAmount units={figure.units} {currency} />

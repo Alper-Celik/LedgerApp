@@ -373,7 +373,13 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
         let mut activity = Vec::new();
         if let Some(spending) = per_month_activity.remove(&month.index()) {
             for (account, spent) in spending {
-                if config.strict && !assigned.contains(&account) {
+                // A fund names a category, and spending posted to a *child* of it
+                // is still covered by what was assigned — the whole subtree is.
+                if config.strict
+                    && !assigned
+                        .iter()
+                        .any(|funded| accounts::is_under(&account, funded))
+                {
                     // The first posting that landed in the category this month,
                     // recorded during the scan; a transaction with no source
                     // location reports the warning without one.
@@ -726,15 +732,27 @@ fn posting_value(posting: &PostingData, units: &AmountData, quantity: Decimal) -
     if let Some(cost) = &posting.cost
         && let Some(currency) = &cost.currency
     {
+        // A *total* cost (`{{…}}`, `@@`) is a total for the whole posting, not a
+        // magnitude: the trade's direction is in the units, so a refund written
+        // as a negative posting weighs the opposite way. This is the ladder
+        // `rustledger_booking` uses, and the one the validator applies — without
+        // the sign a refund reads as more spending of the same sign as a purchase.
+        // `is_sign_negative` is inherent; `signum` would need a trait import for a
+        // value whose magnitude never matters here.
+        let sign = if quantity.is_sign_negative() {
+            -Decimal::ONE
+        } else {
+            Decimal::ONE
+        };
         let value = match cost.number.as_ref()? {
             CostNumberData::PerUnit { value } => quantity * Decimal::from_str(value.trim()).ok()?,
-            CostNumberData::Total { value } => Decimal::from_str(value.trim()).ok()?,
+            CostNumberData::Total { value } => Decimal::from_str(value.trim()).ok()? * sign,
             CostNumberData::PerUnitFromTotal { total, .. } => {
-                Decimal::from_str(total.trim()).ok()?
+                Decimal::from_str(total.trim()).ok()? * sign
             }
             CostNumberData::Compound { per_unit, total } => {
                 quantity * Decimal::from_str(per_unit.trim()).ok()?
-                    + Decimal::from_str(total.trim()).ok()?
+                    + Decimal::from_str(total.trim()).ok()? * sign
             }
         };
         return Some(Money::new(value, currency.clone()));
@@ -747,8 +765,14 @@ fn posting_value(posting: &PostingData, units: &AmountData, quantity: Decimal) -
                 return Some(Money::new(quantity * per_unit, amount.currency.clone()));
             }
             PriceAnnotationView::Total(amount) => {
+                // `@@` reads the same way: the total carries the units' sign.
                 let total = Decimal::from_str(amount.number.trim()).ok()?;
-                return Some(Money::new(total, amount.currency.clone()));
+                let sign = if quantity.is_sign_negative() {
+                    -Decimal::ONE
+                } else {
+                    Decimal::ONE
+                };
+                return Some(Money::new(total * sign, amount.currency.clone()));
             }
             PriceAnnotationView::UnitIncomplete { .. }
             | PriceAnnotationView::TotalIncomplete { .. } => {}
@@ -848,6 +872,44 @@ fn matches_any(patterns: &[Regex], account: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A refund posted as a negative amount with a *total* price weighs the
+    /// opposite way from a purchase of the same total: the sign lives in the
+    /// units, and the budget must read spending, not magnitude.
+    #[test]
+    fn a_total_price_carries_the_units_sign() {
+        use rust_decimal::Decimal;
+        use rustledger_plugin_types::{AmountData, PriceAnnotationData};
+
+        let price = Some(PriceAnnotationData {
+            is_total: true,
+            amount: Some(AmountData {
+                number: "3600".to_string(),
+                currency: "TRY".to_string(),
+            }),
+            number: None,
+            currency: None,
+        });
+        let units = AmountData {
+            number: "-100".to_string(),
+            currency: "EUR".to_string(),
+        };
+        let posting = rustledger_plugin_types::PostingData {
+            account: "Expenses:Travel".to_string(),
+            units: Some(units.clone()),
+            cost: None,
+            price,
+            flag: None,
+            metadata: Vec::new(),
+            span: None,
+        };
+
+        let value = super::posting_value(&posting, &units, Decimal::from(-100))
+            .expect("a total price weighs");
+
+        assert_eq!(value.value, Decimal::from(-3600));
+        assert_eq!(value.currency, "TRY");
+    }
+
     use std::str::FromStr;
 
     use rust_decimal::Decimal;

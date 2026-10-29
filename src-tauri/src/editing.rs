@@ -12,7 +12,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
-use rustledger_loader::{Ledger, LedgerError};
+use rustledger_loader::{ErrorSeverity, Ledger, LedgerError};
 
 use crate::files::source_of_file;
 use crate::git::stage_file;
@@ -535,11 +535,19 @@ fn record_history(state: &AppState, path: &Path, before: &[u8], after: &[u8], or
     }
 }
 
-/// The ledger's errors in comparable form: code and message are what separate an
-/// edit's mistakes from the errors the file already had.
+/// The ledger's *errors* in comparable form: code and message are what separate
+/// an edit's mistakes from the errors the file already had.
+///
+/// Warnings are excluded on purpose. They are advice — a budget the plugin says
+/// went negative, an unknown key it ignores — and the app's own soundness check
+/// treats them as non-fatal; refusing an edit because it raised one would make
+/// the source editor unable to save a ledger the loader accepts, and a warning
+/// whose text carries a figure (an over-budget pool) would refuse every later
+/// edit that changes that figure.
 fn error_signatures(errors: &[LedgerError]) -> Vec<String> {
     errors
         .iter()
+        .filter(|error| error.severity == ErrorSeverity::Error)
         .map(|error| format!("{}: {}", error.code, error.message))
         .collect()
 }
@@ -1317,6 +1325,46 @@ option \"operating_currency\" \"USD\"
         assert!(modified_narrations(&state).is_empty());
         assert!(ledger_diff_text(&state).is_err());
         assert!(commit_staged(&state, "no repository").is_err());
+    }
+
+    /// A new *warning* is not a refused edit.
+    ///
+    /// The plugin's budget advisories and its unknown-key notice are warnings,
+    /// and one of them embeds a figure (an over-budget pool): treating them as
+    /// errors would refuse the edit that raises one, and then refuse every later
+    /// edit that changes the figure the message carries.
+    #[test]
+    fn a_new_warning_does_not_refuse_an_edit() {
+        let dir = TempDir::new("warning-is-not-an-error");
+        let path = dir.file("main.bean");
+        fs::write(
+            &path,
+            "option \"operating_currency\" \"USD\"\n\n2026-01-01 open Assets:Bank:Checking\n2026-01-01 open Expenses:Food\n",
+        )
+        .unwrap();
+        let state = loaded_state(&path);
+
+        let with_warning = "\
+option \"operating_currency\" \"USD\"
+
+2026-01-01 open Assets:Bank:Checking
+2026-01-01 open Expenses:Food
+
+2026-01-02 * \"Coffee\"
+  Assets:Bank:Checking  -3.00 USD
+  Expenses:Food          3.00 USD
+
+2026-01-03 custom \"unknown-plugin\" \"a key no plugin reads\"
+";
+        edit_named_file_source(
+            &state,
+            &path.display().to_string(),
+            with_warning,
+            Some(&fs::read_to_string(&path).unwrap()),
+        )
+        .expect("a warning must not refuse the write");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), with_warning);
     }
 
     /// Writing exactly what the session holds still checks the disk: a caller

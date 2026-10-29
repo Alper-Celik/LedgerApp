@@ -64,7 +64,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		</div>
 	{:else}
 		<div role="rowheader" class="flex min-w-0 items-center px-2 pl-7 text-xs">
-			<span class="truncate" title={row.fullName}>{row.envelope}</span>
+			<span class="truncate" title={row.account}>{row.envelope}</span>
 		</div>
 	{/if}
 	{#each row.cells as cell, index (index)}
@@ -76,13 +76,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				{#if row.fullName}
 					<!--
 						The one thing a cell does: an envelope's spending opens the account
-						it was spent from. The register takes no month filter, so the whole
-						account is the honest target.
+						it was spent from — the ledger account the envelope mirrors, not the
+						envelope's own bookkeeping account, which the register hides. The
+						register takes no month filter, so the whole account is the honest
+						target.
 					-->
 					<a
 						class="focus-visible:ring-ring rounded-sm underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"
 						href={resolve("/account/[id]", { id: row.fullName })}
-						aria-label={`${row.fullName} register, ${monthLabel(months[index]?.month ?? "")}`}
+						aria-label={`${row.account} register, ${monthLabel(months[index]?.month ?? "")}`}
 						title="Open this envelope's register"
 					>
 						<BudgetAmount units={cell.spent} {currency} />

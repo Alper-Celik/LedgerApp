@@ -81,8 +81,14 @@ export type BudgetRow = {
 	group: string;
 	/** The envelope's label inside its group; empty on a group's own row. */
 	envelope: string;
-	/** The account the envelope writes to, the register link's target; empty on a group row. */
+	/** The account the envelope writes to, which names it in the ledger; empty on a group row. */
 	fullName: string;
+	/**
+	 * The ledger account the envelope mirrors — what the register link opens.
+	 * `fullName` is inside the envelope namespace, where the register hides every
+	 * posting, so linking it would open an empty page for every envelope.
+	 */
+	account: string;
 	/** One cell per visible month, in the same order as the months. */
 	cells: BudgetCell[];
 };
@@ -91,7 +97,7 @@ type GroupDraft = {
 	/** The group's own figures per month, `null` where the month did not report it. */
 	cells: (BudgetCell | null)[];
 	/** Its envelopes in first-seen order — the ledger's tree order, oldest month first. */
-	envelopes: Map<string, { name: string; cells: (BudgetCell | null)[] }>;
+	envelopes: Map<string, { name: string; account: string; cells: (BudgetCell | null)[] }>;
 };
 
 /**
@@ -128,7 +134,11 @@ export function budgetRows(months: readonly BudgetRangeMonth[]): BudgetRow[] {
 			for (const envelope of group.envelopes) {
 				let row = draft.envelopes.get(envelope.full_name);
 				if (!row) {
-					row = { name: envelope.name, cells: months.map(() => null) };
+					row = {
+						name: envelope.name,
+						account: envelope.account,
+						cells: months.map(() => null),
+					};
 					draft.envelopes.set(envelope.full_name, row);
 				}
 				row.cells[index] = {
@@ -149,6 +159,7 @@ export function budgetRows(months: readonly BudgetRangeMonth[]): BudgetRow[] {
 			group: name,
 			envelope: "",
 			fullName: "",
+			account: "",
 			cells: draft.cells.map((value) => value ?? EMPTY_CELL),
 		});
 		for (const [fullName, envelope] of draft.envelopes) {
@@ -157,6 +168,7 @@ export function budgetRows(months: readonly BudgetRangeMonth[]): BudgetRow[] {
 				group: name,
 				envelope: envelope.name,
 				fullName,
+				account: envelope.account,
 				cells: envelope.cells.map((value) => value ?? EMPTY_CELL),
 			});
 		}

@@ -36,7 +36,7 @@ without restarting; the chooser is the desktop's own (xdg-desktop-portal on Linu
 For the phone, the same Rust code builds an APK:
 
 ```sh
-scripts/android-build.sh                 # debug APK for aarch64
+scripts/android-build.sh                 # debug APK for all four ABIs
 scripts/android-build.sh --apk            # release APK (release is the default)
 ```
 

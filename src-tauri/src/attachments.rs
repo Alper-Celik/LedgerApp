@@ -128,6 +128,15 @@ pub struct Table {
 /// attachments are documents, not data dumps.
 const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The largest worksheet this code will turn into rows.
+///
+/// A compressed workbook's *file* size says nothing about its sheet: 64 MiB of
+/// xlsx can expand to a million-row rectangle, and calamine builds that whole
+/// rectangle before any row cap is consulted. The cell budget is the bound that
+/// can be enforced after the fact, and it is generous: a ledger attachment is a
+/// statement, not a database export.
+const MAX_SHEET_CELLS: u64 = 2_000_000;
+
 /// The highest dpi [`render_pdf`] honours. Past this, a page is upscaled
 /// without gaining detail and the pixel budget is spent for nothing.
 ///
@@ -630,44 +639,72 @@ fn read_csv(path: &Path, options: TableOptions) -> Result<Table, String> {
 fn read_workbook(path: &Path, sheet: Option<&str>, options: TableOptions) -> Result<Table, String> {
     let mut workbook = calamine::open_workbook_auto(path)
         .map_err(|error| format!("cannot open {} as a spreadsheet: {error}", path.display()))?;
-    let names = workbook.sheet_names();
-    let name = match sheet {
-        Some(wanted) => names
-            .iter()
-            .find(|name| name.as_str() == wanted)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "{} has no sheet named {wanted:?}; it has: {}",
-                    path.display(),
-                    names.join(", ")
-                )
-            })?,
+    let names = worksheets(&workbook);
+    // The first filled sheet is already read when the scan finds it, so it is
+    // handed back rather than read again: a workbook whose only data is in its
+    // last sheet would otherwise be parsed twice.
+    let (name, range) = match sheet {
+        Some(wanted) => {
+            let name = names
+                .iter()
+                .find(|name| name.as_str() == wanted)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "{} has no sheet named {wanted:?}; it has: {}",
+                        path.display(),
+                        if names.is_empty() {
+                            "no worksheets".to_string()
+                        } else {
+                            names.join(", ")
+                        }
+                    )
+                })?;
+            let range = workbook.worksheet_range(&name).map_err(|error| {
+                format!("cannot read sheet {name:?} of {}: {error}", path.display())
+            })?;
+            (name, range)
+        }
         None => first_filled_sheet(&mut workbook, &names)?
-            .ok_or_else(|| format!("{} has no sheets to read", path.display()))?,
+            .ok_or_else(|| format!("{} has no worksheets to read", path.display()))?,
     };
-    let range = workbook
-        .worksheet_range(&name)
-        .map_err(|error| format!("cannot read sheet {name:?} of {}: {error}", path.display()))?;
+    // Reading a sheet builds the whole used rectangle before any cap applies, so
+    // the cell count is the one bound this code can enforce: a workbook whose
+    // sheet is enormous is refused rather than turned into millions of strings.
+    let cells = range.height().saturating_mul(range.width());
+    if cells as u64 > MAX_SHEET_CELLS {
+        return Err(format!(
+            "sheet {name:?} of {} holds {cells} cells, over the {MAX_SHEET_CELLS}-cell \
+             attachment limit; export the range you need as CSV instead",
+            path.display()
+        ));
+    }
     table_from_range(&range, options)
 }
 
-/// The first sheet holding any value, else the first sheet, so an empty
-/// workbook still answers with an (empty) table.
+/// The first worksheet holding any value and the rows already read for it, else
+/// the first one (empty), so an empty workbook still answers with an (empty)
+/// table.
 fn first_filled_sheet<RS: Read + std::io::Seek>(
     workbook: &mut impl Reader<RS>,
     names: &[String],
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, calamine::Range<Data>)>, String> {
     for name in names {
         let range = workbook
             .worksheet_range(name)
             // The reader's own error type is only Debug, not Display.
             .map_err(|error| format!("cannot read sheet {name:?}: {error:?}"))?;
         if !range.is_empty() {
-            return Ok(Some(name.clone()));
+            return Ok(Some((name.clone(), range)));
         }
     }
-    Ok(names.first().cloned())
+    let Some(first) = names.first() else {
+        return Ok(None);
+    };
+    let range = workbook
+        .worksheet_range(first)
+        .map_err(|error| format!("cannot read sheet {first:?}: {error:?}"))?;
+    Ok(Some((first.clone(), range)))
 }
 
 /// A worksheet's used rectangle as a table: the first row is the header, and

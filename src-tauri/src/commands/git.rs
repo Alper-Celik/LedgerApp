@@ -130,11 +130,18 @@ pub fn git_unstage(paths: Vec<String>, state: State<'_, AppState>) -> Result<(),
 /// log is behind rather than letting a rewrite the app made itself surface later
 /// as an outside change.
 fn note_best_effort(state: &State<'_, AppState>) {
-    if let Err(error) = note_rewritten_files(state) {
-        eprintln!("history: rewritten files not noted: {error}");
-        state.note_storage_failure(format!(
-            "The files a repository operation rewrote could not be noted: {error}. An edit the app made itself may show as an outside change."
-        ));
+    match note_rewritten_files(state) {
+        // Writing the note is the write that repairs what a failed one described,
+        // so it retires the sentence: a warning nothing can clear teaches the
+        // reader to ignore the one place folder failures are reported.
+        Ok(()) => state.clear_storage_failure(),
+        Err(error) => {
+            eprintln!("history: rewritten files not noted: {error}");
+            state.note_storage_failure(format!(
+                "The files a repository operation rewrote could not be noted: {error}. An \
+                 edit the app made itself may show as an outside change."
+            ));
+        }
     }
 }
 

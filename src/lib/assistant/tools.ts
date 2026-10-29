@@ -126,6 +126,8 @@ const NAMES = [
 	"lifestyle_report",
 	"price_targets",
 	"query",
+	"grep",
+	"read_lines",
 	"run_python",
 	"add_transaction",
 	"write_file",
@@ -354,7 +356,23 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 
 			case "read_lines": {
 				const path = stringArg(args, "path");
-				const json = await unwrap(commands.toolInvoke("read", JSON.stringify({ path })));
+				// A line costs its text plus the anchor around it, and the panel
+				// refuses an answer over its size cap — about 1,100 lines. Without a
+				// window a whole-file journal would simply be unreadable, and a file
+				// cut at the line cap could never be read further.
+				// `offset` is a 1-based line number, so zero is not a page; both are
+				// bounded the way the reader's own arguments are.
+				const offset =
+					typeof args.offset === "number" && Number.isInteger(args.offset) && args.offset > 0
+						? args.offset
+						: undefined;
+				const limit = optionalPositiveInt(args, "limit") ?? undefined;
+				const json = await unwrap(
+					commands.toolInvoke(
+						"read",
+						JSON.stringify({ path, offset: offset ?? undefined, limit: limit ?? undefined })
+					)
+				);
 				return success(JSON.parse(json) as unknown);
 			}
 

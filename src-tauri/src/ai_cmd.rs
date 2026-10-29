@@ -330,13 +330,27 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "read_lines",
-        description: "Read a journal file as numbered lines, each with a short content hash. To change the file, read all of it and propose the new text with `write_file`; reading the file again gives fresh hashes.",
-        args: &[ToolArg {
-            name: "path",
-            kind: ArgKind::Text,
-            description: "A path from the `files` tool, relative to the ledger's directory.",
-            required: true,
-        }],
+        description: "Read a journal file as numbered lines, each with a short content hash. A file longer than one answer allows is read a page at a time with `offset`/`limit`: read the next page until `truncated` is false. To change the file, propose the new text with `write_file`; reading it again gives fresh hashes.",
+        args: &[
+            ToolArg {
+                name: "path",
+                kind: ArgKind::Text,
+                description: "A path from the `files` tool, relative to the ledger's directory.",
+                required: true,
+            },
+            ToolArg {
+                name: "offset",
+                kind: ArgKind::Whole,
+                description: "First line to return, 1-based. Omit to start at the top.",
+                required: false,
+            },
+            ToolArg {
+                name: "limit",
+                kind: ArgKind::Whole,
+                description: "How many lines to return. Omit for the reader's default page.",
+                required: false,
+            },
+        ],
         read_only: true,
     },
     ToolSpec {

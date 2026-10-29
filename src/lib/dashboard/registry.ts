@@ -91,11 +91,11 @@ const definitions = {
 		charts: ["area"] as const,
 		defaultSpan: 2,
 		normalise: (config: WidgetConfig): WidgetConfig => ({
-			account: textOrNull(config.account),
-			currency: textOrNull(config.currency),
+			// `netWorthSeries` reads the window and the commodity; an account scope
+			// and an inflation toggle that no renderer applies would be saved into
+			// the document and read back as if they did something.
 			months: integerIn(config.months, 12, 1, MAX_MONTHS),
-			adjustForInflation:
-				typeof config.adjustForInflation === "boolean" ? config.adjustForInflation : false,
+			currency: textOrNull(config.currency),
 		}),
 	},
 	"cash-flow": {
@@ -105,9 +105,9 @@ const definitions = {
 		charts: ["bar"] as const,
 		defaultSpan: 2,
 		normalise: (config: WidgetConfig): WidgetConfig => ({
-			account: textOrNull(config.account),
-			currency: textOrNull(config.currency),
+			// Same rule: the cash-flow series reads its window and its commodity.
 			months: integerIn(config.months, 12, 1, MAX_MONTHS),
+			currency: textOrNull(config.currency),
 		}),
 	},
 	"spending-by-month": {
@@ -129,8 +129,9 @@ const definitions = {
 		charts: ["bar"] as const,
 		defaultSpan: 2,
 		normalise: (config: WidgetConfig): WidgetConfig => ({
-			budget: textOrNull(config.budget),
-			currency: textOrNull(config.currency),
+			// The range command answers the newest budgeted months in its own
+			// commodity; a budget name and a currency no renderer applies were
+			// being saved and read back as a scope this widget does not have.
 			months: integerIn(config.months, 6, 1, MAX_MONTHS),
 		}),
 	},
