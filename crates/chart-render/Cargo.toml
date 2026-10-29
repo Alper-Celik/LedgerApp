@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "chart-render"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Renders a Beancount chart spec to PNG (via SVG) and to a terminal (kitty graphics protocol with a Unicode fallback)."
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# SVG -> PNG rasterisation. Default features are off on purpose: charts are drawn
+# with explicit vector paths, so `text` (fontdb / system fonts) and
+# `raster-images` (gif/webp/jpeg) would only add compile time and, for system
+# fonts, non-deterministic output across hosts.
+resvg = { version = "0.45.1", default-features = false }
+tiny-skia = "0.11.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
