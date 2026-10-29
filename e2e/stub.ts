@@ -54,6 +54,15 @@ export const accounts: AccountBalance[] = [
 	{ name: "Liabilities:KYK", balance: "-45000.00", currency: "TRY", modified: false },
 ];
 
+/**
+ * What `accounts` answers once another journal has been opened: the same
+ * account names with different money, so a sidebar that keeps showing the old
+ * balances is visibly stale rather than merely stale in principle.
+ */
+export const booksAccounts: AccountBalance[] = [
+	{ name: "Assets:Bank", balance: "999.00", currency: "TRY", modified: false },
+];
+
 export const transactions: TransactionView[] = [
 	{
 		id: 5,
@@ -82,6 +91,187 @@ export const transactions: TransactionView[] = [
 	},
 ];
 
+/** The month the budget screen shows, as the backend would compute it. */
+export const budgetMonth = {
+	month: "2026-01",
+	months: ["2025-12", "2026-01"],
+	groups: [
+		{
+			name: "Food",
+			budgeted: "1000.00",
+			spent: "123.45",
+			balance: "876.55",
+			envelopes: [
+				{
+					name: "Groceries",
+					full_name: "Equity:Envelope:Food:Groceries",
+					budgeted: "1000.00",
+					spent: "123.45",
+					balance: "876.55",
+					rollover: true,
+				},
+			],
+		},
+	],
+	to_budget: "250.00",
+	currency: "TRY",
+};
+
+/** The journal's files, as the file explorer lists them. */
+export const journalFiles = [
+	{ path: "/ledger/main.bean", label: "main.bean", transactions: 2, change: "modified" },
+	{ path: "/ledger/2026/01.bean", label: "2026/01.bean", transactions: 0, change: "unchanged" },
+];
+
+/** The root journal's text, which the editor's whole-file mode loads. */
+export const fileText = `2026-01-10 * "Migros" "weekly groceries"
+  Assets:Bank:Checking   -123.45 TRY
+  Expenses:Food:Groceries  123.45 TRY
+`;
+
+/** The ledger's git repository, as the settings screen reads it. */
+export const gitState = {
+	repo: true,
+	root: "/ledger",
+	user_name: "Alper Çelik",
+	user_email: "alper@example.com",
+};
+
+/** Two months of the same envelope budget, as the multi-month grid reads it. */
+export const budgetRange = {
+	from: "2025-12",
+	to: "2026-01",
+	currency: "TRY",
+	months: [
+		{
+			month: "2025-12",
+			to_budget: "150.00",
+			budgeted: "1000.00",
+			spent: "80.00",
+			balance: "920.00",
+			groups: [
+				{
+					name: "Food",
+					budgeted: "1000.00",
+					spent: "80.00",
+					balance: "920.00",
+					envelopes: [
+						{
+							name: "Groceries",
+							full_name: "Equity:Envelope:Food:Groceries",
+							budgeted: "1000.00",
+							spent: "80.00",
+							balance: "920.00",
+							rollover: true,
+						},
+					],
+				},
+			],
+		},
+		{
+			month: "2026-01",
+			to_budget: "250.00",
+			budgeted: "1000.00",
+			spent: "123.45",
+			balance: "876.55",
+			groups: [
+				{
+					name: "Food",
+					budgeted: "1000.00",
+					spent: "123.45",
+					balance: "876.55",
+					envelopes: [
+						{
+							name: "Groceries",
+							full_name: "Equity:Envelope:Food:Groceries",
+							budgeted: "1000.00",
+							spent: "123.45",
+							balance: "876.55",
+							rollover: true,
+						},
+					],
+				},
+			],
+		},
+	],
+};
+
+/** One saved dashboard, as the editor and the rendered view read it. */
+export const dashboards = [
+	{
+		id: "overview",
+		name: "Overview",
+		widgets: [
+			{ id: "w-net", kind: "net-worth", config: {}, span: 4, order: 0 },
+			{ id: "w-cats", kind: "category-share", config: {}, span: 2, order: 1 },
+			{ id: "w-life", kind: "lifestyle-inflation", config: {}, span: 2, order: 2 },
+		],
+	},
+];
+
+/** One price index, as the index store reports it. */
+export const indexSeries = [
+	{
+		id: "CPI:TRY",
+		label: "TÜİK CPI (TR)",
+		source: "tuik",
+		unofficial: false,
+		frequency: "monthly",
+		currency: "TRY",
+		points: [
+			{ date: "2025-11-01", value: "1000.0" },
+			{ date: "2025-12-01", value: "1032.5" },
+			{ date: "2026-01-01", value: "1071.9" },
+		],
+	},
+];
+
+/** Lifestyle inflation: nominal vs index-adjusted spending per category. */
+export const lifestyle = {
+	index: { id: "CPI:TRY", label: "TÜİK CPI (TR)", change: "3.81" },
+	months: [
+		{ month: "2025-12", index_value: "1032.5" },
+		{ month: "2026-01", index_value: "1071.9" },
+	],
+	totals: [
+		{ month: "2025-12", nominal: "80.00", real: "80.00", currency: "TRY" },
+		{ month: "2026-01", nominal: "123.45", real: "118.93", currency: "TRY" },
+	],
+	categories: [
+		{
+			account: "Expenses:Food",
+			label: "Food",
+			currency: "TRY",
+			months: [
+				{ month: "2025-12", nominal: "80.00", real: "80.00" },
+				{ month: "2026-01", nominal: "123.45", real: "118.93" },
+			],
+			nominal_change: "54.31",
+			real_change: "48.66",
+		},
+	],
+};
+
+export const priceSources = [
+	{ name: "ecb", description: "European Central Bank reference rates", official: true },
+	{ name: "tefas", description: "Turkish fund NAVs (TEFAS)", official: false },
+	{ name: "yahoo", description: "Yahoo Finance quotes", official: false },
+];
+
+export const priceTargets = [
+	{
+		commodity: "USD",
+		currency: "TRY",
+		kind: "currency",
+		latest: { commodity: "USD", currency: "TRY", date: "2026-01-30", price: "43.12", source: "ecb" },
+	},
+	{ commodity: "AFT", currency: "TRY", kind: "fund", latest: null },
+];
+
+export const priceQuotes = [
+	{ commodity: "AFT", currency: "TRY", date: "2026-01-30", price: "1.2345", source: "tefas" },
+];
+
 export const source = `2026-01-10 * "Migros" "weekly groceries"
   Assets:Bank:Checking   -123.45 TRY
   Expenses:Food:Groceries  123.45 TRY
@@ -104,6 +294,12 @@ export async function stubIpc(page: Page) {
 	await page.addInitScript(
 		(fixtures) => {
 			const log: Invoke[] = [];
+			/**
+			 * Whether another journal has been opened. `accounts` answers from the
+			 * new journal's balances after that, the way the backend's own state
+			 * has already swapped by the time the UI refetches.
+			 */
+			let opened = false;
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
 					log.push({ cmd, args });
@@ -116,7 +312,7 @@ export async function stubIpc(page: Page) {
 					// Rust command would produce; rejecting models `Err`.
 					switch (cmd) {
 						case "accounts":
-							return Promise.resolve(fixtures.accounts);
+							return Promise.resolve(opened ? fixtures.booksAccounts : fixtures.accounts);
 						case "account_transactions":
 							return Promise.resolve(fixtures.transactions);
 						case "transaction_source":
@@ -132,11 +328,72 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.summary);
 						case "load_ledger":
 							// `typedError`: reject to model `Err`; resolve the raw summary.
-							return path === "/ledger/Books"
-								? Promise.resolve({ ...fixtures.summary, path: "/ledger/Books/main.bean" })
-								: Promise.reject(`no root journal (main.bean, …) in ${path ?? "main.bean"}`);
+							if (path !== "/ledger/Books") {
+								return Promise.reject(`no root journal (main.bean, …) in ${path ?? "main.bean"}`);
+							}
+							opened = true;
+							return Promise.resolve({ ...fixtures.summary, path: "/ledger/Books/main.bean" });
+						case "budget":
+							return Promise.resolve(fixtures.budgetMonth);
+						case "journal_files":
+							return Promise.resolve(fixtures.journalFiles);
+						case "file_transactions":
+							return Promise.resolve(fixtures.transactions);
+						case "file_text":
+							return Promise.resolve(fixtures.fileText);
+						case "update_file_text":
+						case "add_transaction":
+							return Promise.resolve(null);
+						case "suggest_transaction_file":
+							return Promise.resolve(fixtures.journalFiles[0].path);
+						case "git_state":
+							// `?norepo=1` models a ledger that is not under git yet.
+							return Promise.resolve(
+								window.location.search.includes("norepo=1")
+									? { repo: false, root: null, user_name: null, user_email: null }
+									: fixtures.gitState
+							);
+						case "git_init":
+						case "git_set_identity":
+							return Promise.resolve(null);
+						case "lsp_start":
+							return Promise.resolve(true);
+						case "lsp_send":
+							return Promise.resolve(null);
+						case "lsp_file_path":
+							return Promise.resolve(`file://${path}`);
 						case "list_folders":
 							return Promise.resolve(path === "/ledger/Books" ? fixtures.books : fixtures.folders);
+						case "budget_range":
+							return Promise.resolve(fixtures.budgetRange);
+						case "dashboards":
+							return Promise.resolve(fixtures.dashboards);
+						case "save_dashboard":
+						case "delete_dashboard":
+							return Promise.resolve(null);
+						case "index_series":
+							return Promise.resolve(fixtures.indexSeries);
+						case "index_import":
+						case "index_refresh":
+							return Promise.resolve(fixtures.indexSeries[0]);
+						case "lifestyle_report":
+							return Promise.resolve(fixtures.lifestyle);
+						case "price_sources":
+							return Promise.resolve(fixtures.priceSources);
+						case "price_targets":
+							return Promise.resolve(fixtures.priceTargets);
+						case "fetch_prices":
+							return Promise.resolve(fixtures.priceQuotes);
+						case "write_prices":
+							return Promise.resolve(null);
+						case "pick_ledger_folder":
+							// The desktop's own chooser (`typedError`: reject models
+							// `Err`). `?native=folder` models a runtime that draws one and
+							// the user picking `Books`; every other run models a runtime
+							// without a chooser, which the in-app picker falls back on.
+							return window.location.search.includes("native=folder")
+								? Promise.resolve("/ledger/Books")
+								: Promise.reject("this runtime has no native folder chooser");
 						default:
 							return Promise.resolve({ status: "ok", data: null });
 					}
@@ -151,7 +408,27 @@ export async function stubIpc(page: Page) {
 			});
 			Object.defineProperty(window, "__invokes", { value: log, writable: false });
 		},
-		{ accounts, transactions, source, diff, summary, folders, books }
+		{
+			accounts,
+			booksAccounts,
+			transactions,
+			source,
+			diff,
+			summary,
+			folders,
+			books,
+			budgetMonth,
+			journalFiles,
+			fileText,
+			gitState,
+			budgetRange,
+			dashboards,
+			indexSeries,
+			lifestyle,
+			priceSources,
+			priceTargets,
+			priceQuotes,
+		}
 	);
 }
 

@@ -98,8 +98,65 @@ test("the sidebar carries the git views and survives a failing backend", async (
 	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
 	await expect(page.getByRole("link", { name: "Commit", exact: true })).toBeVisible();
 
-	// A backend that rejects must leave the app standing: no thrown render.
+	// A backend that rejects must leave the app standing: no thrown render. The
+	// git views are gone in that state on purpose — `git_state` failed, so the
+	// sidebar cannot claim the ledger is a repository and offers no diff/commit.
 	await page.goto("/ledger?fail=1");
 	await expect(page.getByText("no ledger")).toBeVisible();
-	await expect(page.getByRole("link", { name: "Diff", exact: true })).toBeVisible();
+	await expect(page.getByRole("link", { name: "Diff", exact: true })).toHaveCount(0);
+	await expect(page.getByRole("link", { name: "Budget", exact: true })).toBeVisible();
+});
+
+test("phones get a card per entry, with the register's work still there", async ({ page }) => {
+	// A phone: the table's tracks cannot fit, so the register renders cards.
+	await page.setViewportSize({ width: 390, height: 844 });
+	await page.goto("/account/Assets:Bank");
+
+	await expect(page.getByRole("columnheader")).toHaveCount(0);
+	const card = page.getByRole("main").locator('ul > li[data-entry-id="5"]');
+	await expect(card).toContainText("60.00");
+	await expect(card).toContainText("Expenses:Fees");
+
+	// The card's own head opens the legs under it.
+	const head = card.locator("button").first();
+	await expect(head).toHaveAttribute("aria-expanded", "false");
+	await head.click();
+	await expect(head).toHaveAttribute("aria-expanded", "true");
+	await expect(card).toContainText("Assets:Bank:Emergency");
+
+	// Editing in place sends the same exact decimal strings the table sends.
+	await card.getByRole("button", { name: "Edit Fees and top-up" }).click();
+	await expect(card.getByLabel("Narration")).toHaveValue("Fees and top-up");
+	await card.getByLabel("Narration").fill("fees, revised");
+	await card.getByRole("button", { name: "Save", exact: true }).click();
+
+	await expect
+		.poll(async () => editArgument(await invokes(page), "update_transaction"))
+		.toMatchObject({ id: 5, narration: "fees, revised" });
+	const edit = editArgument(await invokes(page), "update_transaction");
+	expect(edit?.postings).toEqual([
+		{ index: 0, units: "-100.00" },
+		{ index: 1, units: "40.00" },
+		{ index: 2, units: "60.00" },
+	]);
+});
+
+test("the ledger-wide views the sidebar links to render", async ({ page }) => {
+	await page.goto("/ledger");
+
+	// Budget: the month's envelopes and the pool left to assign.
+	await page.getByRole("link", { name: "Budget", exact: true }).click();
+	await expect(page.getByText("Food")).toBeVisible();
+	// The group total, the envelope row and the balance pill all carry it.
+	await expect(page.getByText("876.55").first()).toBeVisible();
+
+	// Dashboards: the list of them.
+	await page.getByRole("link", { name: "Dashboards", exact: true }).click();
+	await expect(page.getByRole("heading", { name: "Dashboards" })).toBeVisible();
+
+	// Files: the sidebar lists the journal's files; the root one opens.
+	await expect(page.getByRole("link", { name: /main\.bean/ })).toBeVisible();
+	await page.getByRole("link", { name: /main\.bean/ }).click();
+	await expect(page.getByRole("heading", { name: "main.bean" })).toBeVisible();
+	await expect(page.getByText("weekly groceries").first()).toBeVisible();
 });

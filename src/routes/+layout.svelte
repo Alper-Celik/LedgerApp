@@ -8,11 +8,16 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import AppSidebar from "$lib/components/app-sidebar.svelte";
 	import FolderPicker from "$lib/components/folder-picker.svelte";
+	import QuickAdd from "$lib/components/quick-add.svelte";
 	import { sidebarWidth } from "$lib/sidebar-width.svelte.js";
+	import { load as loadTheme } from "$lib/theme/store.svelte.js";
 	import "../app.css";
 	import { ModeWatcher } from "mode-watcher";
 
 	let { children } = $props();
+
+	// Before the first paint: re-apply the saved token overrides, if any.
+	loadTheme();
 </script>
 
 <!-- The passed style lands after the component's default `--sidebar-width`, so it wins. -->
@@ -35,4 +40,6 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</Sidebar.Inset>
 	<!-- One picker for the whole app: the sidebar and Settings both just open it. -->
 	<FolderPicker />
+	<!-- One quick-add button for the whole app, so navigating never remounts it. -->
+	<QuickAdd />
 </Sidebar.Provider>

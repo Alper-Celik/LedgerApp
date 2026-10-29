@@ -45,11 +45,52 @@ export const commands = {
 	 *  in-app folder picker: each one's absolute path, and whether a root journal
 	 *  sits in it.
 	 * 
-	 *  There is deliberately no native dialog behind this: the Qt runtime drops
-	 *  `run_on_main_thread` closures, and a GTK dialog in this process segfaults.
-	 *  Listing directories needs neither a toolkit nor a portal.
+	 *  This backs the in-app picker, the fallback for platforms where the desktop's
+	 *  own chooser ([`pick_ledger_folder`]) has no implementation — phones today.
 	 */
 	listFolders: (path: string | null) => typedError<FolderListing, string>(__TAURI_INVOKE("list_folders", { path })),
+	/**
+	 *  The folder the desktop's own chooser returned, or `None` when the user
+	 *  cancelled.
+	 * 
+	 *  One command, one Tauri-level chooser behind it — Tauri's dialog plugin, on
+	 *  every desktop target, so the frontend and this signature never learn which
+	 *  platform answered:
+	 * 
+	 *  * Linux: the plugin's xdg-desktop-portal backend. Its default GTK backend is
+	 *    the one that segfaults in this process (rfd builds the dialog on Qt's GLib
+	 *    main context after initialising GTK on its own thread — see `folders.rs`),
+	 *    and the portal is a D-Bus service, so nothing toolkit-shaped is loaded.
+	 *  * Windows / macOS: the plugin's native backend.
+	 *  * Phones: the plugin has no folder picker there, so this answers with an
+	 *    error and the frontend falls back to the in-app picker. Android's storage
+	 *    framework is the eventual answer — a tree URI read through a
+	 *    `ContentResolver`, not a filesystem path.
+	 */
+	pickLedgerFolder: () => typedError<string | null, string>(__TAURI_INVOKE("pick_ledger_folder")),
+	/**
+	 *  Start the embedded language server for the loaded journal, if it is not
+	 *  already running for that journal.
+	 * 
+	 *  The result says whether the caller still has to send `initialize`: a new
+	 *  server is waiting for it, while one an earlier editor already initialized
+	 *  refuses a second one. Messages come back as `lsp-message` events, one
+	 *  JSON-RPC object each; the editor talks to the server from then on through
+	 *  [`lsp_send`]. The server loads the journal itself, from disk, so the account
+	 *  and currency completions cover every included file and not only the open
+	 *  buffer.
+	 */
+	lspStart: () => typedError<boolean, string>(__TAURI_INVOKE("lsp_start")),
+	/**  One JSON-RPC message to the language server, as [`lsp_start`] left it. */
+	lspSend: (message: string) => typedError<null, string>(__TAURI_INVOKE("lsp_send", { message })),
+	/**
+	 *  The absolute path of a journal file, the form a `file:` URI needs.
+	 * 
+	 *  The loader keeps the paths it read — the root journal's spelling and its
+	 *  `include`s — which may be relative to the process, while the language
+	 *  server's URIs are absolute. This is the one conversion those two need.
+	 */
+	lspFilePath: (file: string) => typedError<string, string>(__TAURI_INVOKE("lsp_file_path", { file })),
 	/**
 	 *  Rewrite one transaction's own lines in the `.bean` file it came from, reload
 	 *  the ledger from disk, and stage the file.
@@ -94,6 +135,179 @@ export const commands = {
 	 */
 	updateFileSource: (id: number, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_source", { id, text })),
 	/**
+	 *  The journal's files — the root journal first, then everything it includes —
+	 *  for the file explorer and the new-entry form's file picker.
+	 */
+	journalFiles: () => __TAURI_INVOKE<JournalFile[]>("journal_files"),
+	/**
+	 *  Every transaction one journal file writes, newest first, each carrying all of
+	 *  its postings — the file view's transaction mode. The rows are the register's
+	 *  own, ids included, so an entry opened from here edits and stages exactly as
+	 *  it does from an account page.
+	 */
+	fileTransactions: (file: string) => typedError<TransactionView[], string>(__TAURI_INVOKE("file_transactions", { file })),
+	/**
+	 *  A journal file's whole text, as this session loaded it — the file view's
+	 *  text mode reads the file the ledger was opened from, not a fresh read of
+	 *  disk, so what the editor shows and what an edit rewrites are the same copy.
+	 */
+	fileText: (file: string) => typedError<string, string>(__TAURI_INVOKE("file_text", { file })),
+	/**
+	 *  Replace a journal file's whole text — the text mode's way out — through the
+	 *  same pipeline as [`update_file_source`]: the loader is the authority on
+	 *  whether the text is a legal ledger, a refusal puts the file back
+	 *  byte-for-byte, and a success stages it for a later commit.
+	 */
+	updateFileText: (file: string, text: string) => typedError<null, string>(__TAURI_INVOKE("update_file_text", { file, text })),
+	/**
+	 *  The journal file a new transaction should go into, given the accounts it
+	 *  mentions — the new-entry form's default, so the form can preselect a file
+	 *  before the user has to think about one. `None` only when no ledger is loaded.
+	 */
+	suggestTransactionFile: (accounts: string[]) => __TAURI_INVOKE<string | null>("suggest_transaction_file", { accounts }),
+	/**
+	 *  Append a new transaction to one of the journal's files, through the same
+	 *  pipeline as every other edit: reload the ledger and refuse the write (putting
+	 *  the file back byte-for-byte) if the reload fails or raises an error the
+	 *  ledger did not already have, and stage the file on success.
+	 */
+	addTransaction: (entry: NewTransaction) => typedError<null, string>(__TAURI_INVOKE("add_transaction", { entry })),
+	/**
+	 *  One month of the ledger's envelope budget — the budget screen's data.
+	 * 
+	 *  `month` is a `YYYY-MM` label, or `None` for the newest month the plugin has
+	 *  budgeted, which is what the screen opens on. The figures are for that month,
+	 *  in the ledger's operating currency; see [`BudgetMonth`] for what each one
+	 *  means. Read-only on purpose: the plugin owns the allocations (its `fund`,
+	 *  `adjust`, `zero`, `pad` and `rollover` configuration) and rewrites them on
+	 *  every load, so an edit from here would fight the next run of it.
+	 */
+	budget: (month: string | null) => typedError<BudgetMonth, string>(__TAURI_INVOKE("budget", { month })),
+	/**
+	 *  Several months of the same envelope budget, oldest first — the multi-month
+	 *  grid's data.
+	 * 
+	 *  `from`/`to` are `YYYY-MM` labels; with neither, the newest budgeted month
+	 *  back at most six months. An empty `months` list is not an error: it is what a
+	 *  ledger without an envelope budget looks like, and the screen says so.
+	 */
+	budgetRange: (from: string | null, to: string | null) => typedError<BudgetRange, string>(__TAURI_INVOKE("budget_range", { from, to })),
+	/**
+	 *  Every saved dashboard, oldest id order as stored; a first run answers with
+	 *  the six seeded defaults (and writes nothing until one is saved).
+	 */
+	dashboards: () => typedError<Dashboard[], string>(__TAURI_INVOKE("dashboards")),
+	/**  Create or replace one dashboard by id. */
+	saveDashboard: (dashboard: Dashboard) => typedError<null, string>(__TAURI_INVOKE("save_dashboard", { dashboard })),
+	/**  Remove one dashboard; `false` when no dashboard had that id. */
+	deleteDashboard: (id: string) => typedError<boolean, string>(__TAURI_INVOKE("delete_dashboard", { id })),
+	/**
+	 *  Is the ledger under git, and with which identity? Also `repo: false` when the
+	 *  ledger lives in a SAF tree, because git cannot run there — the settings view
+	 *  then offers only the history journal.
+	 */
+	gitState: () => __TAURI_INVOKE<RepoState>("git_state"),
+	/**
+	 *  Initialise a repository in the ledger's directory. Idempotent, and it makes
+	 *  no commit: what to commit is the diff view's business.
+	 */
+	gitInit: () => typedError<null, string>(__TAURI_INVOKE("git_init")),
+	/**  Write `user.name`/`user.email` into the ledger repository's own config. */
+	gitSetIdentity: (name: string, email: string) => typedError<null, string>(__TAURI_INVOKE("git_set_identity", { name, email })),
+	/**  The quote sources this build can ask (`ecb`, `yahoo`, `tefas`, …). */
+	priceSources: () => __TAURI_INVOKE<PriceSourceInfo[]>("price_sources"),
+	/**
+	 *  Every commodity the ledger could price, with `latest` being the newest
+	 *  `price` directive already in it — the prices view never fetches on load.
+	 */
+	priceTargets: () => __TAURI_INVOKE<PriceTarget[]>("price_targets"),
+	/**
+	 *  Fetch quotes for the given requests. Blocking network work, so it runs on a
+	 *  worker thread; per-request failures come back as `PriceFetch::Failed` and the
+	 *  command only errors when every request failed.
+	 */
+	fetchPrices: (requests: QuoteRequest[]) => typedError<PriceFetch[], string>(__TAURI_INVOKE("fetch_prices", { requests })),
+	/**
+	 *  Append fetched quotes to one journal file as `price` directives, through the
+	 *  same loader-verified write pipeline as every other edit.
+	 */
+	writePrices: (file: string, quotes: PriceQuote[]) => typedError<null, string>(__TAURI_INVOKE("write_prices", { file, quotes })),
+	/**  The assistant's endpoint/model, and whether a key is stored (never the key). */
+	aiSettings: () => typedError<AiSettingsView, string>(__TAURI_INVOKE("ai_settings")),
+	/**
+	 *  Store the endpoint, model and (optionally) a new key. `None` keeps the
+	 *  stored key, `Some("")` clears it.
+	 */
+	aiConfigure: (baseUrl: string, apiKey: string | null, model: string, maxTokens: number | null, temperature: number | null) => typedError<AiSettingsView, string>(__TAURI_INVOKE("ai_configure", { baseUrl, apiKey, model, maxTokens, temperature })),
+	/**  What the endpoint says it can run. Blocking HTTP, so a worker thread. */
+	aiModels: () => typedError<ModelInfo[], string>(__TAURI_INVOKE("ai_models")),
+	/**
+	 *  The tool schemas the panel offers the model — the same table the backend
+	 *  keeps, so the two cannot drift.
+	 */
+	aiTools: () => __TAURI_INVOKE<ToolSchema[]>("ai_tools"),
+	/**
+	 *  One completion turn. Blocking (a provider may take a while), so a worker
+	 *  thread; tool calls come back for the panel to execute and answer.
+	 */
+	aiChat: (request: ChatRequest) => typedError<ChatResponse, string>(__TAURI_INVOKE("ai_chat", { request })),
+	/**  Every index series this build knows how to build. */
+	indexProviderList: () => __TAURI_INVOKE<IndexProviderInfo[]>("index_provider_list"),
+	/**
+	 *  The stored index series — what the inflation screen lists and the lifestyle
+	 *  report can be run against.
+	 */
+	indexSeries: () => typedError<IndexSeries[], string>(__TAURI_INVOKE("index_series")),
+	/**  Store a series the user pasted or imported as CSV (`date,value` rows). */
+	indexImport: (id: string, label: string, source: string, currency: string, csvText: string) => typedError<IndexSeries, string>(__TAURI_INVOKE("index_import", { id, label, source, currency, csvText })),
+	/**
+	 *  Download one provider's series and store it. Blocking network work on a
+	 *  worker thread; the provider id is the series id (`us-cpi`, `tr-enag`, …).
+	 */
+	indexRefresh: (id: string) => typedError<IndexSeries, string>(__TAURI_INVOKE("index_refresh", { id })),
+	/**
+	 *  Spending per month in nominal and index-adjusted terms, per category — the
+	 *  lifestyle-inflation screen's data. `index` names a stored series.
+	 */
+	lifestyleReport: (months: number, index: string) => typedError<LifestyleReport, string>(__TAURI_INVOKE("lifestyle_report", { months, index })),
+	/**
+	 *  The ledger's saved conversations, newest first — they live inside the ledger
+	 *  so they sync with it.
+	 */
+	conversations: () => typedError<Listing, string>(__TAURI_INVOKE("conversations")),
+	/**  One conversation with its messages. */
+	conversation: (id: string) => typedError<Conversation, string>(__TAURI_INVOKE("conversation", { id })),
+	/**  Append one message to a conversation, creating it when `id` is empty. */
+	conversationAppend: (id: string, title: string, model: string, message: Message) => typedError<Summary, string>(__TAURI_INVOKE("conversation_append", { id, title, model, message })),
+	/**  Rename a conversation (the file name stays: it is a creation record). */
+	conversationRename: (id: string, title: string) => typedError<Summary, string>(__TAURI_INVOKE("conversation_rename", { id, title })),
+	/**  Delete a conversation's file; its history is the repository's. */
+	conversationDelete: (id: string) => typedError<null, string>(__TAURI_INVOKE("conversation_delete", { id })),
+	/**  One page of the operation log, newest first. */
+	history: (origin: string | null, path: string | null, limit: number) => typedError<Operation[], string>(__TAURI_INVOKE("history", { origin, path, limit })),
+	/**
+	 *  Undo one operation by writing its pre-images back through the loader-verified
+	 *  pipeline. Refuses when a file changed since, and refuses to undo an operation
+	 *  that created files (nothing to restore — deleting them is the caller's call).
+	 */
+	historyUndo: (id: string) => typedError<string[], string>(__TAURI_INVOKE("history_undo", { id })),
+	/**
+	 *  Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
+	 *  Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
+	 */
+	syncConflicts: () => typedError<Report, string>(__TAURI_INVOKE("sync_conflicts")),
+	/**
+	 *  Compare a sync client's conflicted copy with its original: a directive-level
+	 *  merge plan whose base comes from the operation log. Must be called before
+	 *  [`conflict_resolve`] — the copy's bytes are what the resolve proves against.
+	 */
+	conflictCompare: (original: string, copy: string) => typedError<ConflictView, string>(__TAURI_INVOKE("conflict_compare", { original, copy })),
+	/**
+	 *  Apply the user's picks to the compared original, through the loader-verified
+	 *  write path, and retire the conflict copy when it is unchanged.
+	 */
+	conflictResolve: (original: string, picks: ([string, string])[]) => typedError<string, string>(__TAURI_INVOKE("conflict_resolve", { original, picks })),
+	/**
 	 *  Unified diff of the ledger's files against HEAD, index and working tree
 	 *  together, for the diff view: git's own patch text under a `=== path ===`
 	 *  header per changed file.
@@ -128,6 +342,408 @@ export type AccountBalance = {
 	modified: boolean,
 };
 
+/**
+ *  The assistant's settings as the panel shows and edits them: everything but
+ *  the key, plus whether one is stored.
+ * 
+ *  The key has no field here on purpose, so no command can return it by
+ *  accident; `ai.rs` serializes its own configuration into these same fields,
+ *  which is why the panel's view and the stored shape cannot disagree.
+ */
+export type AiSettingsView = {
+	/**  The endpoint's API root, e.g. `https://api.openai.com/v1`. */
+	base_url: string,
+	/**  The model id sent to the endpoint; empty until the user picks one. */
+	model: string,
+	/**  The per-answer token ceiling, when the user set one. */
+	max_tokens: number | null,
+	/**  The sampling temperature, when the user set one. */
+	temperature: number | null,
+	/**  Whether a key is stored. The key itself never crosses IPC. */
+	has_key: boolean,
+};
+
+/**
+ *  One envelope of a budget month, as the envelope plugin's own bookkeeping
+ *  reports it.
+ * 
+ *  Every figure is an exact decimal string in [`BudgetMonth::currency`], the
+ *  app's convention: nothing is a float and nothing is rounded here.
+ */
+export type BudgetEnvelope = {
+	/**
+	 *  The envelope's label inside its group — the account's path below the
+	 *  group, e.g. `Bread` for `Equity:Envelope:Food:Bread` in group `Food`.
+	 */
+	name: string,
+	/**
+	 *  The account the plugin writes this envelope's postings to, which is what
+	 *  names it in the ledger.
+	 */
+	full_name: string,
+	/**
+	 *  What the month put into the envelope, net: inherited funding, one-off
+	 *  `adjust`/`zero`/`pad` deltas, and the rollover sweep's own correction,
+	 *  which takes money back out and so reads negative.
+	 */
+	budgeted: string,
+	/**
+	 *  What the month spent out of it, the plugin's mirrored activity, reported
+	 *  as a positive figure.
+	 */
+	spent: string,
+	/**
+	 *  What the envelope held at the month's end, every earlier month carried
+	 *  into it — the subtree total the plugin's own `balance` assertions check.
+	 */
+	balance: string,
+};
+
+/**
+ *  One top-level branch of the plugin's envelope tree — a group in the budget
+ *  screen's sense — and its totals over its envelopes.
+ */
+export type BudgetGroup = {
+	/**  The branch's own name, the first account component below the namespace. */
+	name: string,
+	/**  Its envelopes' figures summed, exact decimal strings like theirs. */
+	budgeted: string,
+	spent: string,
+	balance: string,
+	/**  The envelopes below it, in the ledger's tree order. */
+	envelopes: BudgetEnvelope[],
+};
+
+/**  One month of the ledger's envelope budget, as the budget screen reads it. */
+export type BudgetMonth = {
+	/**  The month the figures belong to, `YYYY-MM`. */
+	month: string,
+	/**  Every month the plugin budgeted, oldest first — the screen's navigation. */
+	months: string[],
+	/**  The month's groups, alphabetically. */
+	groups: BudgetGroup[],
+	/**
+	 *  `Equity:Envelope:To-Be-Budgeted` at the month's end: what the
+	 *  configuration has not assigned to an envelope, per the plugin's rule
+	 *  `To-Be-Budgeted = on-budget money − Σ categories`.
+	 */
+	to_budget: string,
+	/**  The commodity every figure is in: the ledger's operating currency. */
+	currency: string,
+};
+
+/**
+ *  Several consecutive months of the ledger's envelope budget.
+ * 
+ *  The single-month [`BudgetMonth`] is the screen's *one* page; this is the
+ *  scroll: the same figures, month by month, so a chart can draw them and the
+ *  table can page without asking the backend per month. It is deliberately not
+ *  a second reader of the ledger — [`budget_range_of`] asks [`budget_month`]
+ *  for every month in the window and only sums what came back, so the two
+ *  surfaces cannot disagree about a month they both show.
+ */
+export type BudgetRange = {
+	/**  The first month in the window, `YYYY-MM`. */
+	from: string,
+	/**  The last month in the window, `YYYY-MM`. */
+	to: string,
+	/**  The commodity every figure is in, as [`BudgetMonth::currency`]. */
+	currency: string,
+	/**
+	 *  The window's months, oldest first, with no gaps: a month the plugin did
+	 *  not budget reports what stood at its end, exactly as
+	 *  [`budget_month`]'s own month-outside-the-data rule does.
+	 */
+	months: BudgetRangeMonth[],
+};
+
+/**
+ *  One month of a [`BudgetRange`]: the single-month payload's groups, plus the
+ *  month's own totals so a chart can draw a series without re-adding groups in
+ *  the frontend.
+ * 
+ *  The three totals are the group totals summed with the same exact decimal
+ *  arithmetic the single-month payload uses (never floats, never re-parsed from
+ *  a rounded figure); `to_budget` is passed through from
+ *  [`BudgetMonth::to_budget`].
+ */
+export type BudgetRangeMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  `Equity:Envelope:To-Be-Budgeted` at the month's end. */
+	to_budget: string,
+	/**
+	 *  Every group's `budgeted` added up — the month's funding over all
+	 *  envelopes, net of the rollover's corrections.
+	 */
+	budgeted: string,
+	/**  Every group's `spent` added up, as a positive figure. */
+	spent: string,
+	/**
+	 *  Every group's `balance` added up — what the envelopes held at the
+	 *  month's end.
+	 */
+	balance: string,
+	/**
+	 *  The month's groups, alphabetically, shaped exactly as
+	 *  [`BudgetMonth::groups`] is.
+	 */
+	groups: BudgetGroup[],
+};
+
+/**
+ *  A conflicted copy paired with the file it copies.
+ * 
+ *  Both paths are absolute when the scan was handed an absolute root — they are
+ *  the root as given, joined with what the walk found. `original` is always a
+ *  file that is actually on disk: pairing never invents a name.
+ */
+export type Candidate = {
+	/**  The file the client kept under its own name. */
+	original: string,
+	/**  The second copy, under the name the client made up. */
+	copy: string,
+	/**  Which client's naming produced `copy`. */
+	client: SyncClient,
+	/**
+	 *  The timestamp the name carries, exactly as written there, when it has
+	 *  one. The shapes (`(1)`, ` 2`, `-Alper`) carry none; clients differ in
+	 *  format (`2026-01-30`, `2026-01-30 120000`, `20260130-120000`, …), so this
+	 *  is the client's own spelling rather than a parsed date.
+	 */
+	stamp: string | null,
+};
+
+/**
+ *  How a file, an entry or an account stands against the ledger's last commit —
+ *  the one letter a git client would put beside it.
+ * 
+ *  The reference is HEAD's blob where git has one, and the text the session
+ *  started with otherwise (see [`Loaded::baseline`](crate::session::Loaded)):
+ *  a ledger that is not committed yet is not a change in itself, only what was
+ *  written to it is. Whether that change is *staged* is not distinguished —
+ *  every edit this app makes stages its file on the way out.
+ */
+export type Change = 
+/**  As committed, or a ledger with no commit to be measured against. */
+"unchanged" | 
+/**
+ *  New to git: the file is not in the last commit, or the entry's lines
+ *  were not there before.
+ */
+"added" | 
+/**
+ *  There and rewritten: the file is committed and differs from it, or the
+ *  entry's lines stand where committed lines were.
+ */
+"modified";
+
+/**
+ *  One turn of the conversation, in the shape the endpoint accepts.
+ * 
+ *  An assistant message that asked for tools keeps them in `tool_calls`; each
+ *  answer is a [`ChatRole::Tool`] message naming the call it answers in
+ *  `tool_call_id`. Sending them back verbatim is what makes a tool loop a
+ *  conversation rather than a re-prompt.
+ */
+export type ChatMessage = {
+	role: ChatRole,
+	/**
+	 *  The message's text. Empty is valid — an assistant turn that only calls
+	 *  tools has no prose.
+	 */
+	text?: string,
+	/**  The calls this message (an assistant turn) made. */
+	tool_calls?: ToolCall[],
+	/**  The call this message answers, for [`ChatRole::Tool`] messages. */
+	tool_call_id?: string | null,
+};
+
+/**  One turn's worth of input. */
+export type ChatRequest = {
+	/**  The conversation, oldest first. */
+	messages: ChatMessage[],
+	/**  The tools the model may call. */
+	tools?: ToolSchema[],
+	/**  Images for the newest user message. */
+	media?: MediaPart[],
+};
+
+/**  One finished turn. */
+export type ChatResponse = {
+	/**  The prose the model produced. */
+	text: string,
+	/**  The calls the model asked for. */
+	tool_calls: ToolCall[],
+	/**  Tokens used, when the endpoint said. */
+	usage: Usage | null,
+	/**
+	 *  Why generation stopped, in the endpoint's words (`stop`, `tool_calls`,
+	 *  `length`, …).
+	 */
+	finish_reason: string | null,
+	/**
+	 *  Whether the caller stopped the stream early. A cancelled response holds
+	 *  the deltas produced so far.
+	 */
+	cancelled: boolean,
+};
+
+/**  Who authored a message. */
+export type ChatRole = 
+/**  The application's instructions. */
+"system" | 
+/**  The person using the app. */
+"user" | 
+/**  The model. */
+"assistant" | 
+/**  A tool's answer to an earlier call. */
+"tool";
+
+/**
+ *  One conflicted copy as the merge UI shows it: the three texts, where the
+ *  base came from, and the decisions to answer.
+ */
+export type ConflictView = {
+	/**  The file the copy belongs to, as the caller named it. */
+	original: string,
+	/**  The conflicted copy, as the caller named it. */
+	copy: string,
+	/**
+	 *  The sync client whose naming produced the copy — "Google Drive",
+	 *  "Syncthing", … — or empty when the name is not one this app knows
+	 *  ([`crate::conflict_names`]).
+	 */
+	client: string,
+	/**
+	 *  Whether a base was found in the ledger's operation log. When `false`
+	 *  every directive reads as added and the UI should warn.
+	 */
+	base_found: boolean,
+	/**  The original's whole text — the merge's `ours`. */
+	ours: string,
+	/**  The copy's whole text — the merge's `theirs`. */
+	theirs: string,
+	/**  Counts for the header. */
+	summary: MergeSummaryDto,
+	/**  One entry per directive, in the order the merged file will have them. */
+	decisions: DecisionDto[],
+};
+
+/**
+ *  A conversation in full: the summary's fields, the frontmatter's remaining
+ *  fields, and every message.
+ */
+export type Conversation = {
+	id: string,
+	title: string,
+	created: string,
+	updated: string,
+	/**
+	 *  The model the conversation was started with, or empty when the caller
+	 *  did not say.
+	 */
+	model: string,
+	tags: string[],
+	messages: Message[],
+	/**  The file itself, as a display path. */
+	path: string,
+};
+
+/**
+ *  One saved dashboard page.
+ * 
+ *  The id is the page's route segment and its identity for
+ *  [`save`]/[`delete`]: stable once written, so a rename never leaves the old
+ *  page behind under a new id.
+ */
+export type Dashboard = {
+	id: string,
+	/**  The label the list and the page title show. */
+	name: string,
+	/**
+	 *  The page's widgets, in the order they were laid out. A page with no
+	 *  widgets is valid — an empty dashboard is one the user has not filled in
+	 *  yet, not a corrupt one.
+	 */
+	widgets: DashboardWidget[],
+};
+
+/**  One widget on a dashboard page. */
+export type DashboardWidget = {
+	/**
+	 *  Unique within its dashboard; the frontend's key for the widget and what
+	 *  a layout edit reorders.
+	 */
+	id: string,
+	/**
+	 *  The widget kind, a key in the frontend's registry (e.g. `net-worth`).
+	 *  Deliberately a string rather than an enum: the store's job is to keep
+	 *  what the frontend wrote, and a new widget must not need a backend
+	 *  change.
+	 */
+	kind: string,
+	/**
+	 *  The widget's own settings, a JSON value the backend never interprets —
+	 *  which accounts to show, comparison windows, and so on. Defaults are the
+	 *  widget's business.
+	 */
+	config: unknown,
+	/**
+	 *  How many columns of the page's grid the widget takes. The grid is four
+	 *  columns wide, so only 1, 2 and 4 fill a row evenly.
+	 */
+	span: number,
+	/**  Position in the page's reading order, ascending. */
+	order: number,
+};
+
+/**  One directive of the plan, as the merge UI shows it. */
+export type DecisionDto = {
+	/**
+	 *  The identity picks are keyed by: pass it back verbatim in
+	 *  [`resolve`]'s `picks`.
+	 */
+	key: string,
+	/**  Directive kind: `transaction`, `open`, `balance`, … `option`. */
+	kind: string,
+	/**  One-line human description, e.g. `2026-01-10 * "Groceries"`. */
+	label: string,
+	/**
+	 *  What happened to this directive, as a stable tag for the UI to style:
+	 *  `unchanged`, `only_ours`, `only_theirs`, `same_change`, `both_added`,
+	 *  `both_changed`, `deleted_ours`, `deleted_theirs`, `both_deleted`,
+	 *  `added_ours`, `added_theirs`.
+	 */
+	class: string,
+	/**  Whether [`resolve`] refuses until this key has a pick. */
+	needs_user: boolean,
+	/**  The directive's text as the original has it. */
+	ours: string | null,
+	/**  The directive's text as the copy has it. */
+	theirs: string | null,
+	/**
+	 *  The directive's text as the base has it — always `None` when
+	 *  [`ConflictView::base_found`] is `false`.
+	 */
+	base: string | null,
+};
+
+/**
+ *  One file of an operation, as it is stored.
+ * 
+ *  `path` is the ledger path exactly as the writer named it — the path
+ *  [`revert`] hands back, so undo lands on the same file even if the ledger is
+ *  opened from somewhere else. The hashes are the authority: `None` means the
+ *  file did not exist on that side of the write.
+ */
+export type FileOp = {
+	path: string,
+	before_hash: string | null,
+	after_hash: string | null,
+	hunks: Hunk[] | null,
+};
+
 /**  One folder in the in-app folder picker. */
 export type FolderEntry = {
 	name: string,
@@ -158,6 +774,205 @@ export type FolderListing = {
 	folders: FolderEntry[],
 };
 
+/**
+ *  One line the writer changed, in the terms a merge needs: the line hash it
+ *  was applied at (before the edit) and how many lines it took and made.
+ * 
+ *  Only the tools that edit lines know this; a whole-file write passes `None`,
+ *  and the operation is still exact — the hashes above it say everything a
+ *  revert needs.
+ */
+export type Hunk = {
+	/**  The hash of the line the edit was anchored at, before the edit. */
+	at: string,
+	removed: number,
+	added: number,
+};
+
+/**  How much detail the endpoint should spend on an image. */
+export type ImageDetail = 
+/**  Let the endpoint choose. */
+"auto" | 
+/**  A cheaper, coarser read. */
+"low" | 
+/**  The full image. */
+"high";
+
+/**
+ *  One published index point, dated the first of its month.
+ * 
+ *  `date` is `YYYY-MM-DD` and `value` a positive decimal string. The pair is
+ *  stored as the publisher gave it (after normalising the date and the decimal
+ *  spelling), so two loads produce the same JSON.
+ */
+export type IndexPoint = {
+	/**  The first day of the month the point belongs to, `YYYY-MM-DD`. */
+	date: string,
+	/**  The price level at that month, as an exact decimal string. */
+	value: string,
+};
+
+/**
+ *  What a provider publishes, without its points — the picker's fix, without
+ *  points: a stored series can be refreshed, but with nothing stored there is
+ *  still a list of series worth adding.
+ * 
+ *  `endpoint` is `Err` for the publishers that expose no stable download (TÜİK's
+ *  portal hands out short-lived signed links; ENAG prints a table), and the
+ *  reason is shown rather than a broken "refresh".
+ */
+export type IndexProviderInfo = {
+	id: string,
+	label: string,
+	source: string,
+	unofficial: boolean,
+	currency: string,
+	downloadable: boolean,
+	note: string,
+};
+
+/**
+ *  A complete monthly index series, as the store keeps it and the frontend
+ *  receives it.
+ */
+export type IndexSeries = {
+	/**  Stable identity, e.g. `us-cpi`; a ledger holds one series per id. */
+	id: string,
+	/**  Human label, e.g. `US CPI (FRED, CPIAUCSL)`. */
+	label: string,
+	/**  The publisher, e.g. `FRED` or `TÜİK`. */
+	source: string,
+	/**
+	 *  True for a series a non-official body publishes (ENAG in Türkiye): the
+	 *  report says so rather than presenting it as an official statistic.
+	 */
+	unofficial: boolean,
+	/**  [`MONTHLY`]; kept in the payload for the frontend's axis label. */
+	frequency?: string,
+	/**  ISO code of the money the index measures, e.g. `TRY`. */
+	currency: string,
+	/**  The points, oldest first and one per month after [`Self::normalised`]. */
+	points: IndexPoint[],
+};
+
+/**
+ *  One file of the loaded journal — the journal the session was opened with and
+ *  every file it pulls in with `include`. These are the files a new transaction
+ *  may be written into, and what the file explorer lists.
+ */
+export type JournalFile = {
+	/**
+	 *  The path as loaded, which is what a new entry sends back to say where to
+	 *  write. The frontend only ever echoes a path it was handed; it never
+	 *  builds one.
+	 */
+	path: string,
+	/**
+	 *  Name to show: the path relative to the journal's own directory when the
+	 *  file lives under it, else the path as it stands.
+	 */
+	label: string,
+	/**
+	 *  How many transactions the file itself writes — every entry in it, the
+	 *  ones the register hides included, since this is a fact about the file
+	 *  rather than about a view of the ledger.
+	 */
+	transactions: number,
+	/**
+	 *  How the file stands in git: [`Change::Modified`] when the file is in the
+	 *  last commit and differs from it, [`Change::Added`] when git does not
+	 *  have it and it has been written to. The same measure the entries inside
+	 *  it carry, read at file level.
+	 */
+	change: Change,
+};
+
+/**  One expense category in a lifestyle report. */
+export type LifestyleCategory = {
+	/**  The grouped account, e.g. `Expenses:Food:Groceries`. */
+	account: string,
+	/**  The branch's own path below `Expenses`, e.g. `Food:Groceries`. */
+	label: string,
+	/**  The commodity every figure is in. */
+	currency: string,
+	/**  One row per month of the range. */
+	months: LifestyleCategoryMonth[],
+	/**
+	 *  The latest month's nominal spending against the month before it, in
+	 *  percent; `None` when there is no previous month or it was zero.
+	 */
+	nominal_change: string | null,
+	/**  The same change measured in real terms. */
+	real_change: string | null,
+};
+
+/**  One month of one category's lifestyle figures. */
+export type LifestyleCategoryMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  Nominal spending in the category. */
+	nominal: string,
+	/**  The same spending in the earliest month's money. */
+	real: string,
+};
+
+/**  The index a lifestyle report restated its spending with. */
+export type LifestyleIndex = {
+	/**  The series id, e.g. `tr-cpi`. */
+	id: string,
+	/**  The series label. */
+	label: string,
+	/**
+	 *  The index's own change from the first month of the range to the last,
+	 *  in percent with two decimals; `None` when the range holds one month.
+	 */
+	change: string | null,
+};
+
+/**  The index value in force in one month. */
+export type LifestyleIndexMonth = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  The series value at that month, an exact decimal string. */
+	index_value: string,
+};
+
+/**  Spending across a range of months, nominal and inflation-adjusted. */
+export type LifestyleReport = {
+	/**  The index used and its own movement over the range. */
+	index: LifestyleIndex,
+	/**  The index value in force in each month. */
+	months: LifestyleIndexMonth[],
+	/**  Total spending per month, nominal and real. */
+	totals: LifestyleTotal[],
+	/**  Spending per expense category, nominal and real. */
+	categories: LifestyleCategory[],
+};
+
+/**  One month's spending, nominal and restated in the earliest month's money. */
+export type LifestyleTotal = {
+	/**  `YYYY-MM`. */
+	month: string,
+	/**  What was spent that month, nominal. */
+	nominal: string,
+	/**
+	 *  The same spending converted with [`real_amount`] into the earliest
+	 *  month's money.
+	 */
+	real: string,
+	/**  The commodity every figure is in. */
+	currency: string,
+};
+
+/**
+ *  Everything [`list`] found: the conversations, newest-updated first, and the
+ *  files it had to skip.
+ */
+export type Listing = {
+	sessions: Summary[],
+	errors: MalformedFile[],
+};
+
 /**  Summary of a successful ledger load. */
 export type LoadSummary = {
 	/**  Path of the loaded root journal. */
@@ -169,6 +984,153 @@ export type LoadSummary = {
 	 *  loaded and usable.
 	 */
 	error_count: number,
+};
+
+/**
+ *  A file the store could not read. One bad file must not hide the good ones,
+ *  so [`list`] hands these back beside the conversations it did read.
+ */
+export type MalformedFile = {
+	path: string,
+	/**  What is wrong with it, in the words a person can act on. */
+	error: string,
+};
+
+/**
+ *  One image attached to the turn being asked.
+ * 
+ *  The payload is base64 — the Tauri layer reads the file and encodes it — or a
+ *  complete `data:` URL in `data_base64`, which is passed through when the
+ *  caller already has one.
+ */
+export type MediaPart = {
+	/**  The image's media type, e.g. `image/png`. */
+	mime: string,
+	/**  The image as base64, or a full `data:` URL. */
+	data_base64: string,
+	/**  How much detail to spend on it. */
+	detail?: ImageDetail | null,
+};
+
+/**  [`crate::conflict::MergeSummary`] as the frontend reads it. */
+export type MergeSummaryDto = {
+	/**  Directives neither side touched. */
+	unchanged: number,
+	/**  Directives the merge settled on its own, other than unchanged ones. */
+	auto: number,
+	/**  Directives that need a pick. */
+	needs_user: number,
+	/**  Decisions whose pairing rests on occurrence order rather than identity. */
+	ambiguous: number,
+	/**  All decisions. */
+	total: number,
+	/**
+	 *  Decisions per directive kind, by kind name (`transaction`, `open`, …),
+	 *  in name order. `u32` because a JS number cannot carry `usize`.
+	 */
+	kinds: ([string, number])[],
+};
+
+/**
+ *  One message of a conversation.
+ * 
+ *  `data` is a tool message's structured payload — the rows a query returned,
+ *  say — kept beside the prose rather than in it, so the frontend can render the
+ *  result instead of re-reading a fenced block.
+ */
+export type Message = {
+	role: Role,
+	text: string,
+	/**
+	 *  Arbitrary JSON for a [`Role::Tool`] message. Described to TypeScript as
+	 *  `any`: specta's own `serde_json::Value` support is off in this crate (it
+	 *  is a feature of `specta` that nothing else here needs), and the payload
+	 *  is a tool's own shape, which no generated type could say better.
+	 */
+	data: any | null,
+};
+
+/**  One model the endpoint offers. */
+export type ModelInfo = {
+	/**  The id to put in [`AiConfig::with_model`]. */
+	id: string,
+	/**  The context window, when the endpoint publishes one. */
+	context_window: number | null,
+	/**  Whether the model takes images, when the endpoint says. */
+	vision: boolean | null,
+};
+
+/**  One posting of a new transaction: the account, and what it is worth. */
+export type NewPosting = {
+	account: string,
+	/**
+	 *  The units figure as typed. `None` (or empty) writes the account alone and
+	 *  leaves the amount to be interpolated at load time.
+	 */
+	units: string | null,
+	/**
+	 *  The commodity. `None` (or empty) writes the ledger's first
+	 *  `option "operating_currency"`.
+	 */
+	currency: string | null,
+};
+
+/**
+ *  A transaction that is not in the ledger yet, as the new-entry form fills it
+ *  out: the shape of a [`TransactionEdit`] plus the file to write it into, and
+ *  with the amounts optional — a posting left without a figure is the leg
+ *  beancount interpolates.
+ */
+export type NewTransaction = {
+	/**  Path of the journal file to append to, as `journal_files` reported it. */
+	file: string,
+	date: string,
+	flag: string,
+	payee: string | null,
+	narration: string,
+	postings: NewPosting[],
+};
+
+/**  One write, as the log remembers it: one line of `<device>.jsonl`. */
+export type Operation = {
+	/**  Unique across devices: `2026-10-29T12-34-56Z-1a2b-0000`. */
+	id: string,
+	/**
+	 *  RFC 3339 in UTC with nanoseconds, e.g. `2026-10-29T12:34:56.123456789Z`.
+	 *  Newest-first order is this field, so it must sort like a timestamp.
+	 */
+	at: string,
+	/**  The device that wrote it: this log's `device` file. */
+	device: string,
+	origin: Origin,
+	/**
+	 *  What the write was, in the writer's words ("assistant edit", "import
+	 *  from bank.csv"). Shown in the history list, never parsed.
+	 */
+	summary: string,
+	ops: FileOp[],
+};
+
+/**
+ *  Who made the write. The log is only useful if a reader can tell an
+ *  assistant's edit from the user's own, so the writer names itself.
+ */
+export type Origin = "user" | "ai" | "importer";
+
+/**
+ *  A copy whose name proves it is one, but whose original is not in the folder.
+ * 
+ *  Reported apart from [`Candidate`] on purpose: an original can be deleted by
+ *  the user between the two devices, and a UI that offered to merge "into" a
+ *  file that does not exist would be inventing one.
+ */
+export type Orphan = {
+	/**  The copy, as the walk found it. */
+	copy: string,
+	/**  Which client's naming identifies it. */
+	client: SyncClient,
+	/**  The timestamp the name carries, when it has one. */
+	stamp: string | null,
 };
 
 /**
@@ -186,6 +1148,220 @@ export type PostingView = {
 	/**  Exact units as a decimal string. */
 	units: string,
 	currency: string,
+};
+
+/**
+ *  A request that produced no quote, kept per-request so a row can show its own
+ *  error while the rows around it show prices.
+ */
+export type PriceFailure = {
+	/**  The requested commodity, as asked for. */
+	commodity: string,
+	/**  The requested currency, as asked for — possibly empty. */
+	currency: string,
+	/**
+	 *  The source that was asked, as resolved (the registry default when the
+	 *  request named none).
+	 */
+	source: string,
+	/**  What went wrong, ready to show. */
+	message: string,
+};
+
+/**  What became of one request — see the module docs on [`fetch`]'s shape. */
+export type PriceFetch = 
+/**  The quote that request produced. */
+({ quote: PriceQuote }) & { failed?: never } | 
+/**  Why that request produced none. */
+({ failed: PriceFailure }) & { quote?: never };
+
+/**
+ *  One quote: one commodity, one currency, one day, one exact decimal price.
+ * 
+ *  Amounts are decimal strings throughout — the frontend never parses a price
+ *  into a float, and neither does the ledger (see [`write_to_file`]).
+ */
+export type PriceQuote = {
+	/**  The commodity being priced, e.g. `AFA` or `AAPL`. */
+	commodity: string,
+	/**  The currency the price is in, e.g. `TRY`. */
+	currency: string,
+	/**  The quote's own day, `YYYY-MM-DD` — never the day it was fetched. */
+	date: string,
+	/**  The exact price as a decimal string. */
+	price: string,
+	/**
+	 *  The source that supplied it, or `"ledger"` for a quote read back from
+	 *  the ledger itself (see [`PriceTarget::latest`]).
+	 */
+	source: string,
+};
+
+/**  One source of quotes, as the picker shows it. */
+export type PriceSourceInfo = {
+	/**  The registry name, lowercase — what a [`QuoteRequest::source`] names. */
+	name: string,
+	/**  What the source covers, in the provider's own words. */
+	description: string,
+	/**  See [`is_official`]. */
+	official: boolean,
+};
+
+/**
+ *  Something the ledger holds or quotes, and what is already known about its
+ *  price.
+ */
+export type PriceTarget = {
+	/**  The commodity code as the ledger writes it. */
+	commodity: string,
+	/**
+	 *  The currency to price it in: the quote currency of its newest `price`
+	 *  directive, else the `quote_currency:`/`price:` metadata, else the
+	 *  ledger's first `operating_currency`. `None` when the ledger says none —
+	 *  a fetch then has to carry a currency, or the source has to publish one.
+	 */
+	currency: string | null,
+	/**  `"currency"`, `"commodity"` or `"fund"`; see the module docs. */
+	kind: string,
+	/**
+	 *  The newest `price` directive for this commodity already in the ledger,
+	 *  read from the loaded ledger and not fetched. `None` when the ledger has
+	 *  priced it never.
+	 */
+	latest: PriceQuote | null,
+};
+
+/**
+ *  One fetch: a commodity, the currency to quote it in, and the source to ask,
+ *  with an optional date for a source that serves history.
+ * 
+ *  An empty `currency` means "the source decides": [`fixed_quote_currency`]
+ *  answers for a source that publishes exactly one, and every other source is
+ *  refused with a message naming the missing currency rather than guessing
+ *  one.
+ */
+export type QuoteRequest = {
+	/**  The commodity to price. */
+	commodity: string,
+	/**  The currency to quote it in; empty asks the source to decide. */
+	currency: string,
+	/**  The source name; empty means the registry's default (`yahoo`). */
+	source: string | null,
+	/**  `YYYY-MM-DD` for a dated quote; `None` for the newest. */
+	date: string | null,
+};
+
+/**
+ *  What the settings view shows about the ledger's repository: whether it exists,
+ *  where it starts, and the identity commits would be attributed to.
+ * 
+ *  `repo: false` covers both "this directory is not under version control" and
+ *  "git is not available for this storage" — the settings view offers to create a
+ *  repository in the first case, and nothing at all in the second.
+ */
+export type RepoState = {
+	repo: boolean,
+	/**
+	 *  The repository's working-tree root, as a path string; `None` when there
+	 *  is no repository.
+	 */
+	root: string | null,
+	/**  `user.name` from the repository's own config, when it has one. */
+	user_name: string | null,
+	/**  `user.email` from the repository's own config, when it has one. */
+	user_email: string | null,
+};
+
+/**
+ *  One scan's answer: the pairs, and the copies that had no original to pair
+ *  with.
+ */
+export type Report = {
+	/**  Sorted by `copy`. */
+	candidates: Candidate[],
+	/**  Sorted by `copy`. */
+	orphans: Orphan[],
+};
+
+/**  Who said a message. */
+export type Role = "user" | "assistant" | "tool";
+
+/**
+ *  A conversation as the list shows it: enough to draw a row and to find the
+ *  file, without reading every message.
+ */
+export type Summary = {
+	id: string,
+	title: string,
+	/**  RFC 3339, UTC. */
+	created: string,
+	/**  RFC 3339, UTC — the field the listing is ordered by. */
+	updated: string,
+	/**  How many messages the file holds. */
+	messages: number,
+	/**  The file itself, as a display path. */
+	path: string,
+};
+
+/**  A cloud client whose conflict-copy naming this app knows. */
+export type SyncClient = 
+/**
+ *  Google Drive: `name (1).bean` and `name's conflicted copy 2026-01-30.bean`,
+ *  plus the owner-qualified `name (Alper's conflicted copy 2026-01-30).bean`
+ *  shape, which Dropbox writes too — see [`SyncClient::Dropbox`].
+ */
+"drive" | 
+/**
+ *  Dropbox. Its documented conflict name is the owner-qualified
+ *  `name (Alper's conflicted copy 2026-01-30).bean`, which Drive's clients
+ *  also leave behind, so a name alone cannot say which of the two wrote it:
+ *  [`classify_name`] reports that shape as [`SyncClient::Drive`], and this
+ *  variant is for a caller that knows the client from somewhere else.
+ */
+"dropbox" | 
+/**  OneDrive: `name-Alper.bean`, `name-Alper-PC.bean` — account and machine. */
+"one_drive" | 
+/**  Nextcloud (and ownCloud): `name (conflicted copy 2026-01-30 120000).bean`. */
+"nextcloud" | 
+/**  Syncthing: `name.sync-conflict-20260130-120000-ABCDEFG.bean`. */
+"syncthing" | 
+/**  Seafile: `name (SFConflict alper 2026-01-30-12-00-00).bean`. */
+"seafile" | 
+/**  iCloud Drive: `name 2.bean` — the lowest number a conflicted copy gets. */
+"icloud";
+
+/**
+ *  One call the model asked for, or one the caller replays back.
+ * 
+ *  `arguments` stays the JSON *text* the wire carries, not a parsed value: a
+ *  replayed call must be byte-identical to what the model produced, and a
+ *  model's arguments can be malformed JSON that still has to round-trip so the
+ *  caller can show the failure.
+ */
+export type ToolCall = {
+	/**  The provider's id for this call, echoed back with the result. */
+	id: string,
+	/**  The tool's name. */
+	name: string,
+	/**  The arguments as JSON text. */
+	arguments: string,
+};
+
+/**  One tool the model may call. */
+export type ToolSchema = {
+	/**  The dispatch name the model emits. */
+	name: string,
+	/**  What the tool does, for the model to read. */
+	description: string,
+	/**
+	 *  The tool's arguments as a JSON Schema object.
+	 * 
+	 *  `specta` has no JSON-value type of its own — its `serde_json` feature
+	 *  would describe `Value` as serde's *internally tagged* enum, a shape this
+	 *  field never puts on the wire — so the generated TypeScript says
+	 *  `unknown` and the panel hands the object through as it received it.
+	 */
+	parameters: unknown,
 };
 
 /**
@@ -237,6 +1413,16 @@ export type TransactionView = {
 	 *  repository or nothing changed — the register never fails over git.
 	 */
 	modified: boolean,
+};
+
+/**  Token accounting, when the endpoint reports it. */
+export type Usage = {
+	/**  Prompt-side tokens. */
+	prompt_tokens: number,
+	/**  Generated tokens. */
+	completion_tokens: number,
+	/**  Both, as the endpoint counted them. */
+	total_tokens: number,
 };
 
 /* Tauri Specta runtime */

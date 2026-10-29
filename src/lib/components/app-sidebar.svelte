@@ -9,13 +9,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { onMount } from "svelte";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
 	import {
+		AiChat01Icon,
+		AlertCircleIcon,
 		ChevronRightIcon,
+		CoinsIcon,
+		DashboardSquare01Icon,
 		FileDiffIcon,
 		FolderOpenIcon,
 		GitCommitIcon,
+		HistoryIcon,
 		Settings01Icon,
+		TrendingUpIcon,
+		Wallet01Icon,
 	} from "@hugeicons/core-free-icons";
-	import { commands, type AccountBalance } from "../../bindings";
+	import { commands, type AccountBalance, type JournalFile } from "../../bindings";
 	import * as Sidebar from "$lib/components/ui/sidebar/index.js";
 	import {
 		ACCOUNT_SECTIONS,
@@ -23,14 +30,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		buildAccountTree,
 		type AccountNode,
 	} from "$lib/accounts.js";
+	import GitStatus from "$lib/components/git-status.svelte";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
-	import { ledger, openFolderPicker, refreshLedger } from "$lib/ledger.svelte.js";
+	import { git, refreshGit } from "$lib/git.svelte.js";
+	import { chooseLedger, ledger, refreshLedger } from "$lib/ledger.svelte.js";
 	import { ledgerRevision } from "$lib/ledger-revision.svelte.js";
 	import { setSidebarWidth, sidebarWidth } from "$lib/sidebar-width.svelte.js";
 	import { cn } from "$lib/utils.js";
 
 	let accounts = $state<AccountBalance[]>([]);
+
+	/**
+	 * The journal's own files — the root the session was opened with and every
+	 * `include` it pulls in — newest list from the backend. Each row carries what
+	 * the file writes and how it stands in git, which is what makes the tree say
+	 * where an edit landed.
+	 */
+	let files = $state<JournalFile[]>([]);
 
 	const sidebar = Sidebar.useSidebar();
 
@@ -61,6 +78,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{ href: "/commit", label: "Commit", icon: GitCommitIcon },
 	] as const;
 
+	/** The ledger-wide views beside the accounts. */
+	const LEDGER_VIEWS = [
+		{ href: "/budget", label: "Budget", icon: Wallet01Icon },
+		{ href: "/dashboards", label: "Dashboards", icon: DashboardSquare01Icon },
+		{ href: "/inflation", label: "Inflation", icon: TrendingUpIcon },
+		{ href: "/prices", label: "Prices", icon: CoinsIcon },
+		{ href: "/conflicts", label: "Conflicts", icon: AlertCircleIcon },
+		{ href: "/history", label: "History", icon: HistoryIcon },
+		{ href: "/assistant", label: "Assistant", icon: AiChat01Icon },
+	] as const;
+
 	/**
 	 * Balances, or an empty list if the backend cannot answer — a rejected or
 	 * failing command must leave the sidebar standing, not throw out of the
@@ -68,9 +96,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 */
 	async function loadAccounts() {
 		try {
-			return await commands.accounts();
+			return (await commands.accounts()) ?? [];
 		} catch (cause) {
 			console.error("accounts failed", cause);
+			return [];
+		}
+	}
+
+	/** The journal's files, or none when the backend cannot answer (same rule). */
+	async function loadFiles() {
+		try {
+			// `?? []`: a bridge that answers nothing at all (a plain browser, a
+			// backend mid-restart) must leave the tree standing.
+			return (await commands.journalFiles()) ?? [];
+		} catch (cause) {
+			console.error("journalFiles failed", cause);
 			return [];
 		}
 	}
@@ -114,16 +154,28 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	onMount(async () => {
 		accounts = await loadAccounts();
+		files = await loadFiles();
 		// Which journal the app opened (the CLI argument, LEDGER_PATH or
 		// main.bean), so Settings can name it before a folder is picked.
 		refreshLedger();
+		// Whether it is under git decides if the Diff/Commit views exist at all.
+		refreshGit();
 	});
 
 	$effect(() => {
-		// Balances are fetched once per page load, so an edit saved elsewhere (or a
-		// commit) has to bump the revision to bring this list back in step.
-		if (ledgerRevision.value === 0) return;
-		loadAccounts();
+		// Balances and files are fetched once per page load, so an edit saved
+		// elsewhere, a commit, or another ledger being opened has to bump the
+		// revision to bring both lists back in step.
+		const revision = ledgerRevision.value;
+		if (revision === 0) return;
+		// The fetches are async, so a slower older answer must not overwrite a
+		// newer one: only the latest revision is allowed to land.
+		void loadAccounts().then((next) => {
+			if (revision === ledgerRevision.value) accounts = next;
+		});
+		void loadFiles().then((next) => {
+			if (revision === ledgerRevision.value) files = next;
+		});
 	});
 </script>
 
@@ -237,11 +289,44 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</Sidebar.Header>
 
 	<Sidebar.Content>
+		<!--
+			Git views only exist when the ledger is a repository: a ledger that is
+			not under git has no diff to show and nothing to commit, and offering
+			the two links would only lead to a page that says so.
+		-->
+		{#if git.repo}
+			<Sidebar.Group>
+				<Sidebar.GroupLabel class="rounded-none">Git</Sidebar.GroupLabel>
+				<Sidebar.GroupContent>
+					<Sidebar.Menu>
+						{#each GIT_VIEWS as item (item.href)}
+							<Sidebar.MenuItem>
+								<Sidebar.MenuButton
+									size="sm"
+									class="rounded-none"
+									isActive={page.url.pathname === resolve(item.href)}
+								>
+									{#snippet child({ props })}
+										<a {...props} href={resolve(item.href)}>
+											<HugeiconsIcon
+												icon={item.icon}
+												strokeWidth={2}
+												data-icon="inline-start"
+											/>
+											<span class="min-w-0 flex-1 truncate">{item.label}</span>
+										</a>
+									{/snippet}
+								</Sidebar.MenuButton>
+							</Sidebar.MenuItem>
+						{/each}
+					</Sidebar.Menu>
+				</Sidebar.GroupContent>
+			</Sidebar.Group>
+		{/if}
 		<Sidebar.Group>
-			<Sidebar.GroupLabel class="rounded-none">Git</Sidebar.GroupLabel>
 			<Sidebar.GroupContent>
 				<Sidebar.Menu>
-					{#each GIT_VIEWS as item (item.href)}
+					{#each LEDGER_VIEWS as item (item.href)}
 						<Sidebar.MenuItem>
 							<Sidebar.MenuButton
 								size="sm"
@@ -264,6 +349,46 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Sidebar.Menu>
 			</Sidebar.GroupContent>
 		</Sidebar.Group>
+
+		<!--
+			The journal's own files: the root the session was opened with and
+			every `include` it pulls in, each with what git says about it and how
+			many entries it writes. A file is opened by path in the register's
+			file view, so this is also how a new entry reaches a file other than
+			the one it would otherwise be filed into.
+		-->
+		{#if files.length > 0}
+			<Sidebar.Group>
+				<Sidebar.GroupLabel class="rounded-none">Journal files</Sidebar.GroupLabel>
+				<Sidebar.GroupContent>
+					<Sidebar.Menu>
+						{#each files as file (file.path)}
+							{@const href = `/files/${encodeURIComponent(file.path)}`}
+							<Sidebar.MenuItem>
+								<Sidebar.MenuButton
+									size="sm"
+									class="rounded-none"
+									isActive={page.url.pathname === href}
+								>
+									{#snippet child({ props })}
+										<a {...props} {href} title={file.path}>
+											<!-- The letter is absent when nothing changed; the slot keeps the labels aligned. -->
+											<span class="flex w-3 shrink-0 justify-center">
+												<GitStatus change={file.change} />
+											</span>
+											<span class="min-w-0 flex-1 truncate">{file.label}</span>
+											<span class="text-muted-foreground shrink-0 text-xs tabular-nums">
+												{file.transactions}
+											</span>
+										</a>
+									{/snippet}
+								</Sidebar.MenuButton>
+							</Sidebar.MenuItem>
+						{/each}
+					</Sidebar.Menu>
+				</Sidebar.GroupContent>
+			</Sidebar.Group>
+		{/if}
 		{#each sections as entry (entry.section.label)}
 			<Sidebar.Group>
 				<Sidebar.GroupContent>
@@ -325,17 +450,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<Sidebar.Footer>
 		<Sidebar.Menu>
 			<!--
-				Pointing the app at another ledger: the in-app folder picker whose
-				choice is loaded as the session's journal. In the sidebar (and so
-				in the mobile sheet) because it is app-wide, like Settings;
-				`+layout.svelte` mounts the picker itself.
+				Pointing the app at another ledger: the desktop's own folder
+				chooser, whose choice is loaded as the session's journal (the
+				in-app picker stands in on runtimes that cannot draw one). In the
+				sidebar (and so in the mobile sheet) because it is app-wide, like
+				Settings; `+layout.svelte` mounts the picker itself.
 			-->
 			<Sidebar.MenuItem>
 				<Sidebar.MenuButton
 					size="sm"
 					class="rounded-none"
 					aria-disabled={ledger.opening}
-					onclick={openFolderPicker}
+					onclick={chooseLedger}
 				>
 					<HugeiconsIcon icon={FolderOpenIcon} strokeWidth={2} data-icon="inline-start" />
 					<span class="min-w-0 flex-1 truncate">

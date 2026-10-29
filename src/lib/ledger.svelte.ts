@@ -36,10 +36,32 @@ export async function refreshLedger() {
 }
 
 /**
- * Open the folder picker. There is no native dialog behind it: under the Qt
- * runtime neither a plugin dialog nor an in-process GTK one can open (see
- * `folders.rs`), so the picker is part of the app and lists directories
- * through `list_folders`.
+ * Open a ledger with the desktop's own folder chooser: Tauri's dialog plugin
+ * behind `pick_ledger_folder` — the xdg-desktop-portal on Linux, the system
+ * dialog on Windows and macOS. This is the normal way in.
+ *
+ * A cancelled chooser does nothing. A platform with no chooser (phones, today)
+ * answers with an error, and the in-app picker opens instead, so the button
+ * never ends in a dead end.
+ */
+export async function chooseLedger() {
+	ledger.error = "";
+	try {
+		const result = await commands.pickLedgerFolder();
+		if (result.status === "error") {
+			openFolderPicker();
+			return;
+		}
+		if (result.data) await openLedgerPath(result.data);
+	} catch (cause) {
+		ledger.error = messageOf(cause);
+	}
+}
+
+/**
+ * Open the in-app folder picker. This is the fallback for runtimes whose window
+ * stack cannot show a native chooser; it lists directories through
+ * `list_folders` (see `folders.rs`).
  */
 export function openFolderPicker() {
 	ledger.error = "";

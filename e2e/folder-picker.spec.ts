@@ -39,4 +39,27 @@ test("the folder picker walks folders, marks journals, and opens the choice", as
 	expect(calls.filter((call) => call.cmd === "load_ledger").at(-1)?.args).toEqual({
 		path: "/ledger/Books",
 	});
+
+	// Opening another ledger brings the sidebar's balances with it: the tree
+	// still showing the previous journal's money makes the switch look like it
+	// did nothing.
+	const sidebar = page.locator('[data-slot="sidebar"]');
+	await expect(sidebar).toContainText("999.00");
+	await expect(sidebar).not.toContainText("1,500.00");
+});
+
+test("the desktop's own chooser opens the folder it returned, without the sheet", async ({ page }) => {
+	// `?native=folder` models the Qt runtime: it draws a chooser and the user
+	// picked `Books`.
+	await page.goto("/settings?native=folder");
+	await page.locator("main").getByRole("button", { name: "Open folder…" }).click();
+
+	// No in-app sheet, and the chosen folder went through `load_ledger`.
+	await expect(page.getByRole("dialog", { name: "Open ledger folder" })).toHaveCount(0);
+	await expect(page.getByText("/ledger/Books/main.bean")).toBeVisible();
+	const calls = await invokes(page);
+	expect(calls.filter((call) => call.cmd === "pick_ledger_folder")).toHaveLength(1);
+	expect(calls.filter((call) => call.cmd === "load_ledger").at(-1)?.args).toEqual({
+		path: "/ledger/Books",
+	});
 });

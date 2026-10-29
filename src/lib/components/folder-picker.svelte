@@ -19,9 +19,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	 * at a time and opens the folder it is standing in.
 	 *
 	 * The backend lists the folders (`list_folders`) and flags the ones holding
-	 * a root journal, so the tree itself says where a ledger starts. There is no
-	 * native dialog: under the Qt runtime a plugin dialog is dropped before it
-	 * opens and an in-process GTK one segfaults (see `src-tauri/src/folders.rs`).
+	 * a root journal, so the tree itself says where a ledger starts. Desktop
+	 * opens the system chooser instead (`chooseLedger` in `ledger.svelte.ts` →
+	 * `pick_ledger_folder`); this sheet is the fallback where no such chooser
+	 * exists, and the reason `folders.rs` exists at all.
 	 */
 	let listing = $state<FolderListing | null>(null);
 	/** Why the last listing failed; a folder that cannot be read, usually. */
