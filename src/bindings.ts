@@ -321,6 +321,12 @@ export const commands = {
 	 */
 	historyUndo: (id: string) => typedError<string[], string>(__TAURI_INVOKE("history_undo", { id })),
 	/**
+	 *  Files the ledger's folder changed behind the app (another device, a cloud
+	 *  client): the app should offer a reload rather than keep serving what it
+	 *  loaded. Empty when nothing moved or when the ledger is not in a synced folder.
+	 */
+	syncChanges: () => typedError<ExternalChange[], string>(__TAURI_INVOKE("sync_changes")),
+	/**
 	 *  Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
 	 *  Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
 	 */
@@ -966,6 +972,16 @@ export type DecisionDto = {
 	 *  [`ConflictView::base_found`] is `false`.
 	 */
 	base: string | null,
+};
+
+/**  One file whose bytes on disk are not the bytes this device last recorded. */
+export type ExternalChange = {
+	/**  The path as the log names it (absolute, as the ledger knows it). */
+	path: string,
+	/**  The hash recorded the last time this device wrote or loaded the file. */
+	seen: string,
+	/**  The hash on disk now. */
+	disk: string,
 };
 
 /**

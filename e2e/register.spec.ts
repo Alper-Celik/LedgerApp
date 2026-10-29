@@ -179,3 +179,16 @@ test("the new screens mount with their empty states", async ({ page }) => {
 	await page.goto("/history");
 	await expect(page.getByText("No writes recorded yet")).toBeVisible();
 });
+
+test("a commit in the branches screen opens its patch", async ({ page }) => {
+	await page.goto("/branches");
+
+	// The log row is the fixture commit; clicking it loads the patch.
+	const row = page.getByText("weekly groceries for January").first();
+	await expect(row).toBeVisible();
+	await row.click();
+	await expect(page.getByText(/Assets:Bank:Checking\s+-123\.45 TRY/)).toBeVisible();
+
+	// Both branches the fixture reports are listed, the current one marked.
+	await expect(page.getByText("main").first()).toBeVisible();
+});

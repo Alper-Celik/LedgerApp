@@ -37,6 +37,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   and ranked categories), `tools/` (hashline read/edit, grep, glob, one registry rendered twice: OpenAI
   tools and a Python stub), `attachments.rs` (MuPDF pages, calamine sheets, CSV),
   `conversations.rs` (markdown conversations inside the ledger, so they sync with it).
+- **CLI** — `api.rs` (a `pub`, Tauri-free façade over the same modules) and `src/bin/ledger.rs` (the
+  `ledger` binary: check/query/budget/report/prices/index/ask/chart); `sync.rs` reports files a synced
+  folder changed behind the app.
 - `lsp.rs` — the embedded language server; `model.rs` — the original register/session payload types
   (newer payload types live beside their module); `folders.rs` — the in-app picker's listing;
   `testing.rs` — shared fixtures (temp dirs, throwaway repos, loaded `AppState`); tests sit beside their module.

@@ -767,7 +767,6 @@ pub fn device_id(root: &Path) -> Result<String, String> {
 /// neither what we last saw nor what our newest operation left there. A state
 /// file that cannot be parsed reads as empty: it is a cache, and the log lines
 /// are the record.
-#[cfg(test)]
 pub fn last_seen(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let device = device_id(root)?;
     let state = read_state(root);

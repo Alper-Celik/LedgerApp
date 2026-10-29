@@ -18,14 +18,22 @@
  * spelling: snake_case, camelCase, or with a `ledger`/namespace prefix. An
  * unknown name is answered as an error the model can read and correct, never
  * thrown.
+ *
+ * `run_python` is the one tool that is not a backend command: it runs a script
+ * in a worker (see `python/sandbox.ts`), and every `ledger.*` call that script
+ * makes arrives back here as an RPC, so a sandboxed figure is read by this
+ * same dispatcher and cannot disagree with a tool's.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { commands } from "../../bindings";
 import { messageOf } from "../errors.js";
-import type { ToolCall } from "./api.js";
+import type { PythonRun } from "./artifacts/types.js";
+import { runPython } from "./python/sandbox.js";
+import type { PythonRpcAnswer } from "./python/protocol.js";
+import type { ToolCall, ToolSchema } from "./api.js";
 
 export type DispatchOutcome = {
-	/** Whether the tool actually ran. False whenever `result` is `{ error }`. */
+	/** Whether the tool actually ran: false on a refusal, or on a script that raised. */
 	ok: boolean;
 	/** The JSON text handed back to the model, and shown in the card's details. */
 	text: string;
@@ -60,6 +68,8 @@ const ALIASES: Record<string, string> = {
 	bql: "query",
 	sql: "query",
 	run_query: "query",
+	python: "run_python",
+	run_code: "run_python",
 };
 
 /** The tool names this panel can answer, for the unknown-name error. */
@@ -73,7 +83,77 @@ const NAMES = [
 	"lifestyle_report",
 	"price_targets",
 	"query",
+	"run_python",
 ];
+
+/**
+ * The reads a sandboxed script may make. `run_python` is not one of them: a
+ * script cannot start another sandbox through its own `ledger` module.
+ */
+const PYTHON_RPC: Record<string, true> = {
+	accounts: true,
+	account_transactions: true,
+	journal_files: true,
+	file_text: true,
+	budget_range: true,
+	index_series: true,
+	lifestyle_report: true,
+	price_targets: true,
+	query: true,
+};
+
+/**
+ * The tools this panel offers on its own, beside the backend's catalogue.
+ *
+ * `run_python` is the panel's own: the script runs in a worker here, and every
+ * `ledger` call it makes comes back through [`dispatchTool`], so a sandboxed
+ * figure is the same figure the model would have read from a tool.
+ */
+const LOCAL_TOOLS: ToolSchema[] = [
+	{
+		name: "run_python",
+		description:
+			"Run Python 3.14 in a sandboxed worker with the ledger exposed as the `ledger` module. " +
+			"Every `ledger` function is a coroutine that reads through the same commands as the other tools: " +
+			"`await ledger.accounts()`, `await ledger.account_transactions(account)`, `await ledger.journal_files()`, " +
+			"`await ledger.file_text(path)`, `await ledger.budget_range('2026-01', '2026-06')`, " +
+			"`await ledger.index_series()`, `await ledger.lifestyle_report(months, index)`, " +
+			"`await ledger.price_targets()`, `await ledger.query(bql, max_rows=200)`; each answers the same JSON as the tool of that name. " +
+			"`await ledger.df(bql)` answers a pandas DataFrame (pandas is downloaded on first use, so it needs a network connection; `ledger.query` works offline). " +
+			"`ledger.table(name, data)` puts a table in the transcript (a DataFrame, a list of dicts/rows, or a dict of columns); " +
+			"`ledger.chart({...})` puts one chart there: `kind` line|bar|area|donut, `currency`, and `series: [{name, points: [{label, value}]}]` with amounts as decimal strings (a donut draws the first series as its slices). " +
+			"Use print() for prose; stdout, tables and the chart come back with the run. " +
+			"The sandbox has no real filesystem, network, subprocess or socket access (Pyodide's `os` sees an in-memory filesystem only). " +
+			"One run may take 20 s and keep 200 000 characters of output.",
+		parameters: {
+			type: "object",
+			properties: {
+				code: {
+					type: "string",
+					description:
+						"The Python source to run. Use top-level `await` for ledger calls, e.g. `rows = await ledger.query('SELECT account, sum(position) GROUP BY account')`.",
+				},
+			},
+			required: ["code"],
+			additionalProperties: false,
+		},
+	},
+];
+
+/**
+ * The backend's catalogue plus the panel's own tools, without duplicates: a
+ * backend that learns `run_python` later wins, and the local schema is only a
+ * fallback for a panel whose command list is older.
+ */
+export function offeredTools(remote: ToolSchema[]): ToolSchema[] {
+	const names = new Set(remote.map((tool) => tool.name));
+	return [...remote, ...LOCAL_TOOLS.filter((tool) => !names.has(tool.name))];
+}
+
+/** Whether a call names the sandbox, in any spelling the endpoint may use. */
+export function isRunPython(name: string): boolean {
+	return canonical(name) === "run_python";
+}
 
 /**
  * How many rows a `query` asks for when the model does not say. The answer says
@@ -99,6 +179,90 @@ type QueryAnswer = {
  */
 function queryRows(bql: string, maxRows: number): Promise<QueryAnswer> {
 	return invoke<QueryAnswer>("query", { bql, maxRows });
+}
+
+/**
+ * One `ledger.*` call from the sandbox, run through this same dispatcher.
+ *
+ * Only the read tools are reachable: a script cannot ask for `run_python` or
+ * for a name the panel does not know. The answer is the executor's own JSON
+ * text and its `ok`, which `ledger.py` turns back into a Python value — or
+ * raises as `LedgerError` with the app's sentence.
+ */
+async function ledgerRpc(name: string, argsJson: string): Promise<PythonRpcAnswer> {
+	if (!PYTHON_RPC[name]) {
+		return {
+			ok: false,
+			text: JSON.stringify({ error: `the sandbox has no \`${name}\` ledger function` }),
+		};
+	}
+	const outcome = await dispatchTool({ id: "python", name, arguments: argsJson });
+	return { ok: outcome.ok, text: outcome.text };
+}
+
+/**
+ * A finished run as a tool outcome.
+ *
+ * `result` is the sandbox's full answer — stdout, traceback, tables, chart —
+ * because that is what the transcript draws. `text`, which is what the model
+ * reads, is the same answer with the bulky parts clipped to a size a context
+ * window can take; a script that raised is `ok: false` so the card says
+ * `error`, and its traceback goes back as text the model can act on.
+ */
+function runOutcome(run: PythonRun): DispatchOutcome {
+	return { ok: run.error === "", result: run, text: runText(run) };
+}
+
+/** The run as the model reads it, shrunk until it fits one tool answer. */
+function runText(run: PythonRun): string {
+	const compact = (stdoutLimit: number, rowLimit: number) =>
+		JSON.stringify({
+			stdout: clip(run.stdout, stdoutLimit),
+			error: run.error,
+			tables: run.tables.map((table) => ({
+				name: table.name,
+				columns: table.columns,
+				rows: table.rows.slice(0, rowLimit),
+				truncated: table.truncated === true || table.rows.length > rowLimit,
+			})),
+			chart: run.chart,
+		});
+
+	let text = compact(60_000, 100);
+	if (text.length <= MAX_TEXT) return text;
+	text = compact(10_000, 20);
+	if (text.length <= MAX_TEXT) return text;
+
+	return JSON.stringify({
+		stdout: clip(run.stdout, 4_000),
+		error: clip(run.error, 4_000),
+		tables: run.tables.map((table) => ({
+			name: clip(table.name, 120),
+			columns: table.columns.slice(0, 10).map((column) => clip(column, 80)),
+			rows: [],
+			truncated: true,
+		})),
+		chart: run.chart
+			? {
+					kind: run.chart.kind,
+					currency: run.chart.currency,
+					title: run.chart.title ? clip(run.chart.title, 120) : undefined,
+					series: run.chart.series.slice(0, 3).map((series) => ({
+						name: clip(series.name, 120),
+						points: series.points.slice(0, 50).map((point) => ({
+							label: clip(point.label, 120),
+							value: clip(point.value, 60),
+						})),
+					})),
+				}
+			: null,
+		note: "the result was too large to send in full; print less and read a narrower frame",
+	});
+}
+
+/** Text cut to `limit` characters, with a note that it was cut. */
+function clip(text: string, limit: number): string {
+	return text.length <= limit ? text : `${text.slice(0, limit)}\n… truncated`;
 }
 
 /** Run one call from the model. */
@@ -163,6 +327,12 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 					optionalPositiveInt(args, "maxRows") ??
 					DEFAULT_QUERY_ROWS;
 				return success(await queryRows(bql, maxRows));
+			}
+
+			case "run_python": {
+				const code = stringArg(args, "code", "source");
+				if (!code.trim()) throw new Error("`code` must be Python source");
+				return runOutcome(await runPython(code, {}, ledgerRpc));
 			}
 
 			default:

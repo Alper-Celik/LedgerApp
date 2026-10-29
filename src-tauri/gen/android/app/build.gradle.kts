@@ -14,8 +14,47 @@ val tauriProperties = Properties().apply {
     }
 }
 
+/*
+ * Release signing, from `keystore.properties` beside this file (git-ignored) or
+ * the same names as environment variables. Without it a release build stays
+ * unsigned — `assembleRelease` then produces `…-unsigned.apk`, which is exactly
+ * what a store wants you to fail on, rather than a silently debug-signed APK.
+ *
+ *   storeFile=/absolute/path/to/upload.jks
+ *   storePassword=…
+ *   keyAlias=upload
+ *   keyPassword=…
+ */
+val keystoreProperties = Properties()
+run {
+    val propFile = file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { keystoreProperties.load(it) }
+    }
+}
+mapOf(
+    "storeFile" to "STORE_FILE",
+    "storePassword" to "STORE_PASSWORD",
+    "keyAlias" to "KEY_ALIAS",
+    "keyPassword" to "KEY_PASSWORD",
+).forEach { (property, variable) ->
+    System.getenv(variable)?.let { value -> keystoreProperties.setProperty(property, value) }
+}
+val hasReleaseSigning = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+    .all { !keystoreProperties.getProperty(it).isNullOrBlank() }
+
 android {
     compileSdk = 37
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
     namespace = "dev.alper_celik.ledger_app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -41,6 +80,11 @@ android {
         getByName("release") {
             optimization {
                enable = true
+            }
+            // Only when a keystore was configured: an unsigned release is a
+            // build error at install time, not something to paper over.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
             }
             proguardFiles(
                 *fileTree(".") {

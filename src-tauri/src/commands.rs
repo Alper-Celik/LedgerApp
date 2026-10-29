@@ -741,6 +741,41 @@ pub fn quick_add_suggestions(
     Ok(crate::suggest::quick_add(&loaded.ledger, &accounts, days))
 }
 
+/// Android: reopen the tree the app was last pointed at, before the window
+/// shows. A phone cannot resolve a folder by path, so the URI the picker stored
+/// is the only way back to the ledger; the mirror is rebuilt from it and the
+/// ledger loaded from the mirror.
+///
+/// Runs from `setup` and never fails the launch: a revoked grant, a deleted
+/// folder or a tree without a journal leaves the app open with whatever the
+/// local fallback found, which is what `pick_ledger_folder` can then fix.
+#[cfg(target_os = "android")]
+pub fn restore_tree(app: &tauri::AppHandle<AppRuntime>) {
+    let Ok(config) = app_config_dir(app) else {
+        return;
+    };
+    let Ok(json) = std::fs::read_to_string(config.join("storage.json")) else {
+        return;
+    };
+    let Ok(tree) = crate::storage::AndroidTree::from_json(app, json.trim()) else {
+        return;
+    };
+    let mirror = config.join("tree");
+    if let Err(error) = crate::storage::mirror_into(&tree, &mirror) {
+        eprintln!("tree restore: {error}");
+        return;
+    }
+    crate::storage::set_tree_active(true);
+    // The journal inside the mirror, resolved the same way a picked folder is.
+    match crate::session::load_baselined(&mirror) {
+        Ok(loaded) => {
+            let state = app.state::<AppState>();
+            *state.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
+        }
+        Err(error) => eprintln!("tree restore: {}: {error}", mirror.display()),
+    }
+}
+
 // ---------------------------------------------------------------- indexes ---
 
 /// Where price indexes live: beside the dashboards in the app's config dir, so
@@ -1311,6 +1346,15 @@ pub fn git_revert_commit(id: String, state: State<'_, AppState>) -> Result<Strin
     crate::git_ops::revert_commit(&ledger_dir(&state)?, &id)
 }
 
+/// Files the ledger's folder changed behind the app (another device, a cloud
+/// client): the app should offer a reload rather than keep serving what it
+/// loaded. Empty when nothing moved or when the ledger is not in a synced folder.
+#[tauri::command]
+#[specta::specta]
+pub fn sync_changes(state: State<'_, AppState>) -> Result<Vec<crate::sync::ExternalChange>, String> {
+    crate::sync::changed(&crate::sync::log_dir(&ledger_dir(&state)?))
+}
+
 /// Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
 /// Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
 #[tauri::command]
@@ -1401,6 +1445,7 @@ mod tests {
                 conversation_delete,
                 history,
                 history_undo,
+                sync_changes,
                 sync_conflicts,
                 conflict_compare,
                 conflict_resolve,

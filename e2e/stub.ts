@@ -123,6 +123,29 @@ export const journalFiles = [
 	{ path: "/ledger/2026/01.bean", label: "2026/01.bean", transactions: 0, change: "unchanged" },
 ];
 
+/** The repository's history, for the branches screen. */
+export const commits = [
+	{
+		id: "3f2a1c9d8b7e6a5f4c3d2e1b0a9f8e7d6c5b4a39",
+		short: "3f2a1c9",
+		summary: "weekly groceries for January",
+		author: "Alper Çelik",
+		email: "alper@example.com",
+		time: 1767225600,
+		files: 1,
+	},
+];
+
+/** One commit's patch, in the diff view's own rendering. */
+export const commitDiff = `=== main.bean ===
+diff --git a/main.bean b/main.bean
+--- a/main.bean
++++ b/main.bean
+@@ -1 +1,2 @@
+ 2026-01-10 * "Migros" "weekly groceries"
++  Assets:Bank:Checking  -123.45 TRY
+`;
+
 /** The root journal's text, which the editor's whole-file mode loads. */
 export const fileText = `2026-01-10 * "Migros" "weekly groceries"
   Assets:Bank:Checking   -123.45 TRY
@@ -391,7 +414,9 @@ export async function stubIpc(page: Page) {
 								{ name: "main", is_current: true, is_remote: false, upstream: null },
 							]);
 						case "git_log":
-							return Promise.resolve([]);
+							return Promise.resolve(fixtures.commits);
+						case "git_commit_diff":
+							return Promise.resolve(fixtures.commitDiff);
 						case "git_state":
 							return Promise.resolve(fixtures.gitState);
 						case "storage_kind":
@@ -452,6 +477,8 @@ export async function stubIpc(page: Page) {
 			priceSources,
 			priceTargets,
 			priceQuotes,
+			commits,
+			commitDiff,
 		}
 	);
 }

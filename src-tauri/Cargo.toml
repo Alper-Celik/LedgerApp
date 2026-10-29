@@ -19,6 +19,13 @@ edition = "2024"
 name = "ledger_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The headless CLI: the app's backend over `api.rs`, with no Tauri runtime. It
+# links this lib, so it runs the same loader, BQL executor, budget reader and
+# report writer the window does.
+[[bin]]
+name = "ledger"
+path = "src/bin/ledger.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -91,6 +98,12 @@ git2 = { version = "0.21", default-features = false }
 # prove the file still holds what the operation left there. Fast enough to hash
 # whole files on every write, pure Rust, no system library.
 blake3 = "1"
+# The `ledger` CLI's flags. Derive keeps the subcommand table in the type
+# system, so `--help` and the parser cannot drift from the arms that run them.
+clap = { version = "4", features = ["derive"] }
+# The `ledger chart` renderer: the same crate the app's charts come from, so a
+# terminal chart is one implementation rather than a second table printer.
+chart-render = { path = "../crates/chart-render" }
 
 # PDF pages are rasterised by MuPDF, whose licence is AGPL-3.0 — the same one
 # this app carries. `mupdf-sys` compiles the MuPDF source it vendors, so the

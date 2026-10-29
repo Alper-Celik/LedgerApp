@@ -59,3 +59,12 @@ playwright-report/
 # Cargo artifacts from the standalone chart crate (it has no workspace root to
 # share a target dir with, so it builds in place).
 crates/chart-render/target/
+
+# Release signing material (see app/build.gradle.kts).
+src-tauri/gen/android/app/keystore.properties
+**/*.jks
+**/*.keystore
+
+# Python bytecode from exercising the sandbox module under CPython.
+__pycache__/
+*.pyc

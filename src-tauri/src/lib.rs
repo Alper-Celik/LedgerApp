@@ -15,6 +15,9 @@ mod accounts;
 mod ai;
 mod ai_cmd;
 mod ai_stream;
+// The Tauri-free façade the `ledger` binary (and anything else headless)
+// drives: the same backend the commands wrap, returning plain data.
+pub mod api;
 pub mod attachments;
 mod budget;
 pub mod commands;
@@ -42,6 +45,7 @@ mod rewrite;
 mod session;
 mod source;
 mod storage;
+mod sync;
 mod suggest;
 mod tools;
 
@@ -128,6 +132,7 @@ pub fn run() {
         conversation_delete,
         history,
         history_undo,
+        sync_changes,
         sync_conflicts,
         conflict_compare,
         conflict_resolve,
@@ -180,7 +185,14 @@ pub fn run() {
     // URI, and this plugin is the JNI bridge to it (`storage` mirrors the tree
     // into app-private files, which is what the loader and git can open).
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_android_fs::init());
+    let builder = builder
+        .plugin(tauri_plugin_android_fs::init())
+        // A phone has no folder path to open at launch: the tree the user picked
+        // last is mirrored back and loaded before the window appears.
+        .setup(|app| {
+            commands::restore_tree(app.handle());
+            Ok(())
+        });
 
     // QtWebEngine never hands over custom-protocol POST bodies, so the Qt
     // runtime carries the invoke payload in a header instead. Without this,

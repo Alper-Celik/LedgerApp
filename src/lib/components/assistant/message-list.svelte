@@ -5,12 +5,26 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { HugeiconsIcon } from "@hugeicons/svelte";
-	import { SparklesIcon } from "@hugeicons/core-free-icons";
+	import { PythonIcon, SparklesIcon } from "@hugeicons/core-free-icons";
 	import { Alert } from "$lib/components/ui/alert/index.js";
+	import { pythonRunOf, type PythonRun } from "$lib/assistant/artifacts/types.js";
+	import { isRunPython } from "$lib/assistant/tools.js";
+	import ChartArtifact from "./chart-artifact.svelte";
 	import ToolCard from "./tool-card.svelte";
 	import type { Assistant } from "$lib/assistant/store.svelte.js";
 
 	let { assistant }: { assistant: Assistant } = $props();
+
+	/** What a run's one-line header says: tables, a chart, or an error. */
+	function pythonSummary(run: PythonRun): string {
+		const parts: string[] = [];
+		if (run.error) parts.push("error");
+		if (run.tables.length === 1) parts.push("1 table");
+		else if (run.tables.length > 1) parts.push(`${run.tables.length} tables`);
+		if (run.chart) parts.push("1 chart");
+		if (parts.length === 0) parts.push(run.stdout.trim() ? "text output" : "no output");
+		return parts.join(", ");
+	}
 
 	let scroller = $state<HTMLElement | null>(null);
 	/** Whether the transcript is close enough to its end to follow new output. */
@@ -82,6 +96,82 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						{entry.text}
 					</div>
 				{/if}
+			{:else if isRunPython(entry.name)}
+				{@const run = pythonRunOf(entry.result)}
+				<div class="bg-card/60 w-full min-w-0 rounded-lg border">
+					<div class="flex items-center gap-2 px-2 py-1.5 text-xs">
+						<span
+							class="bg-muted text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded-md"
+						>
+							<HugeiconsIcon icon={PythonIcon} strokeWidth={2} class="size-3" />
+						</span>
+						<span class="min-w-0 flex-1 truncate">
+							ran <code class="font-mono text-[0.6875rem]">Python</code>
+							{#if run}
+								<span class="text-muted-foreground">→ {pythonSummary(run)}</span>
+							{/if}
+						</span>
+					</div>
+
+					<div class="space-y-2 border-t p-2">
+						{#if run === null}
+							<pre
+								class="text-destructive max-h-64 overflow-auto font-mono text-[0.625rem] leading-relaxed break-words whitespace-pre-wrap">{entry.text}</pre>
+						{:else}
+							{#if run.error}
+								<pre
+									class="text-destructive max-h-64 overflow-auto font-mono text-[0.625rem] leading-relaxed break-words whitespace-pre-wrap">{run.error}</pre>
+							{/if}
+							{#if run.stdout.trim()}
+								<pre
+									class="bg-muted/40 max-h-64 overflow-auto rounded-md border p-1.5 font-mono text-[0.625rem] leading-relaxed break-words whitespace-pre-wrap">{run.stdout}</pre>
+							{/if}
+
+							{#each run.tables as table, index (index)}
+								<div class="min-w-0">
+									<div
+										class="text-muted-foreground mb-1 flex items-center justify-between gap-2 text-[0.6875rem]"
+									>
+										<span class="truncate">{table.name}</span>
+										{#if table.truncated}
+											<span class="shrink-0">truncated</span>
+										{/if}
+									</div>
+									<div class="max-h-56 overflow-auto rounded-md border">
+										<table class="w-full border-collapse text-left font-mono text-[0.6875rem]">
+											<thead class="bg-muted sticky top-0">
+												<tr>
+													{#each table.columns as column}
+														<th scope="col" class="px-1.5 py-1 font-medium whitespace-nowrap">
+															{column}
+														</th>
+													{/each}
+												</tr>
+											</thead>
+											<tbody>
+												{#each table.rows as row, rowIndex (rowIndex)}
+													<tr class="border-t">
+														{#each row as cell}
+															<td class="px-1.5 py-0.5 whitespace-nowrap">{cell}</td>
+														{/each}
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								</div>
+							{/each}
+
+							{#if run.chart}
+								<ChartArtifact spec={run.chart} />
+							{/if}
+
+							{#if !run.error && !run.stdout.trim() && run.tables.length === 0 && !run.chart}
+								<p class="text-muted-foreground text-xs">Ran with no output.</p>
+							{/if}
+						{/if}
+					</div>
+				</div>
 			{:else}
 				<ToolCard name={entry.name} result={entry.result} text={entry.text} ok={entry.ok} />
 			{/if}

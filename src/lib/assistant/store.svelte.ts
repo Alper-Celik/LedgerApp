@@ -45,7 +45,7 @@ import {
 	type ToolSchema,
 } from "./api.js";
 import { mediaPartsOf, visionOf, type Attachment } from "./media.js";
-import { dispatchTool } from "./tools.js";
+import { dispatchTool, offeredTools } from "./tools.js";
 
 /** How many tool rounds one turn may run before the panel stops. */
 export const MAX_ROUNDS = 6;
@@ -201,10 +201,12 @@ export class Assistant {
 
 	async loadTools(): Promise<void> {
 		try {
-			this.tools = await aiTools();
+			this.tools = offeredTools(await aiTools());
 			this.toolsError = "";
 		} catch (cause) {
-			this.tools = [];
+			// The backend's catalogue failing must not hide the sandbox: the panel
+			// offers `run_python` itself, and its reads fail on their own terms.
+			this.tools = offeredTools([]);
 			this.toolsError = messageOf(cause);
 		}
 	}

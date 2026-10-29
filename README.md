@@ -43,11 +43,33 @@ scripts/android-build.sh --apk            # release APK (release is the default)
 which runs `npm run tauri android build` inside `nix develop .#android` (SDK, NDK, JDK 17 and a
 rustc with the Android std targets). No device or emulator is needed to build it.
 
+## Command line
+
+`src-tauri` also builds a `ledger` binary over the same backend — no Tauri runtime, no second
+loader: every subcommand calls `api.rs`, the Tauri-free façade the commands wrap.
+
+```sh
+cargo build --bin ledger            # inside src-tauri
+./target/debug/ledger check books/main.bean
+./target/debug/ledger query 'SELECT account, sum(number) GROUP BY account' --limit 5
+./target/debug/ledger budget --months 3
+./target/debug/ledger report net-worth --months 6
+./target/debug/ledger chart spec.json --width 80
+```
+
+The journal is `--ledger PATH` (a file or a folder holding one), else `LEDGER_PATH`, else
+`./main.bean`. The app's config directory (indexes, assistant settings) is `--config-dir DIR`, else
+`LEDGER_CONFIG_DIR`, else the platform's app-config path for `dev.alper-celik.ledger-app`.
+Every read command takes `--json`; money is always the backend's exact decimal string.
+Exit codes: `0` answered, `1` failed (reason on stderr), `2` misuse.
+
 ## Layout
 
 | Path | What lives there |
 |---|---|
 | `src-tauri/src/commands.rs` | the Tauri/specta command surface |
+| `src-tauri/src/api.rs` | the Tauri-free façade over the same modules, plain data out; the `ledger` binary's whole backend |
+| `src-tauri/src/bin/ledger.rs` | the `ledger` CLI (`check`, `query`, `budget`, `report`, `prices`, `index`, `ask`, `chart`) |
 | `src-tauri/src/` | one module per concern: ledger views (`accounts`, `source`, `files`, `budget`, `reports`), edits (`editing`, `rewrite`, `conflict*`), storage and history (`session`, `storage`, `repo`, `git`, `git_ops`, `history`), fetchers (`prices`, `index*`), assistant (`ai`, `ai_cmd`, `attachments`, `tools`, `conversations`), `lsp` (see `AGENTS.md`) |
 | `src/lib/components/` | register, sidebar, source editor, diff, folder picker, assistant, budget, dashboards, inflation, prices, conflicts |
 | `src/lib/*.svelte.ts` | shared stores (filters, editor scope, ledger, git state, sidebar width) |
