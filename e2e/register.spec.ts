@@ -160,3 +160,22 @@ test("the ledger-wide views the sidebar links to render", async ({ page }) => {
 	await expect(page.getByRole("heading", { name: "main.bean" })).toBeVisible();
 	await expect(page.getByText("weekly groceries").first()).toBeVisible();
 });
+
+test("the new screens mount with their empty states", async ({ page }) => {
+	// Branches: the stub's repository has no commits yet.
+	await page.goto("/branches");
+	await expect(page.getByRole("heading", { name: "Branches", level: 1 })).toBeVisible();
+
+	// Inflation: the fixture's stored series is listed, with its own controls.
+	await page.goto("/inflation");
+	await expect(page.getByRole("heading", { name: /TÜİK CPI/ })).toBeVisible();
+	await expect(page.getByRole("button", { name: /Refresh/ }).first()).toBeVisible();
+
+	// Conflicts: the sync client left nothing behind.
+	await page.goto("/conflicts");
+	await expect(page.getByText("No conflict copies")).toBeVisible();
+
+	// History: the operation log is empty on a fresh ledger.
+	await page.goto("/history");
+	await expect(page.getByText("No writes recorded yet")).toBeVisible();
+});

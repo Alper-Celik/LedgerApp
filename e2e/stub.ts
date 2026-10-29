@@ -386,6 +386,30 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.priceQuotes);
 						case "write_prices":
 							return Promise.resolve(null);
+						case "git_branches":
+							return Promise.resolve([
+								{ name: "main", is_current: true, is_remote: false, upstream: null },
+							]);
+						case "git_log":
+							return Promise.resolve([]);
+						case "git_state":
+							return Promise.resolve(fixtures.gitState);
+						case "storage_kind":
+							return Promise.resolve("local");
+						case "sync_conflicts":
+							return Promise.resolve({ candidates: [], orphans: [] });
+						case "history":
+							return Promise.resolve([]);
+						case "index_series":
+							return Promise.resolve([]);
+						case "index_provider_list":
+							return Promise.resolve([
+								{ id: "us-cpi", label: "US CPI", source: "FRED", unofficial: false, currency: "USD", downloadable: true, note: "" },
+							]);
+						case "report_net_worth":
+						case "report_cashflow":
+						case "report_categories":
+							return Promise.resolve([]);
 						case "pick_ledger_folder":
 							// The desktop's own chooser (`typedError`: reject models
 							// `Err`). `?native=folder` models a runtime that draws one and
