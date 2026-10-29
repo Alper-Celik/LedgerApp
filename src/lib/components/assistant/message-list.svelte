@@ -10,6 +10,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { pythonRunOf, type PythonRun } from "$lib/assistant/artifacts/types.js";
 	import { isRunPython } from "$lib/assistant/tools.js";
 	import ChartArtifact from "./chart-artifact.svelte";
+	import ProposalCard from "./proposal-card.svelte";
 	import ToolCard from "./tool-card.svelte";
 	import type { Assistant } from "$lib/assistant/store.svelte.js";
 
@@ -96,6 +97,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						{entry.text}
 					</div>
 				{/if}
+			{:else if entry.kind === "proposal"}
+				<ProposalCard
+					proposal={entry.proposal}
+					status={entry.status}
+					error={entry.error}
+					disabled={assistant.busy}
+					onapply={() => assistant.approveProposal(entry)}
+					onreject={() => assistant.rejectProposal(entry)}
+				/>
 			{:else if isRunPython(entry.name)}
 				{@const run = pythonRunOf(entry.result)}
 				<div class="bg-card/60 w-full min-w-0 rounded-lg border">

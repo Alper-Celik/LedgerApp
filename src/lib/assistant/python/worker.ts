@@ -9,14 +9,12 @@
  * likes without freezing the app, and the only way out of a runaway loop —
  * `terminate()` — costs nothing but a fresh worker. The runtime is served from
  * the app's own `/pyodide/` assets, which the Vite plugin in `vite.config.js`
- * copies from the installed `pyodide` package; only when those are absent does
- * this fall back to the jsDelivr CDN, and it says so on the console.
+ * copies from the installed `pyodide` package and from the vendored wheels.
  *
  * Everything needed to start — the loader, the wasm interpreter, the standard
- * library and the lockfile — is in those assets, so the sandbox runs offline.
- * The CSP's one remote origin, jsDelivr, exists solely for wheels the npm
- * distribution does not ship (pandas and its dependencies); vendoring those
- * wheels beside the runtime would remove the last network use.
+ * library, the lockfile and the wheels `pandas` and the `ledger` helpers import
+ * (`numpy`, `python-dateutil`, `pytz`, `six`) — is in those assets, so the
+ * sandbox has no network use at all and the CSP has no third-party origin.
  *
  * The `ledger` module is installed once from `ledger.py`. Its functions are
  * coroutines that post an RPC to the main thread and await the answer, because
@@ -27,7 +25,6 @@
  * exist, and nothing here can reach the app's process or its ledger files — the
  * RPC is the only way to a figure.
  */
-import pyodideManifest from "pyodide/package.json";
 import type { PyodideAPI } from "pyodide";
 import type { PyProxy } from "pyodide/ffi";
 import type {
@@ -150,30 +147,15 @@ function emit(text: string): void {
 }
 
 /**
- * Load the runtime from `indexURL`, falling back to the CDN when it is absent.
+ * Load the runtime from `indexURL` — the app's own asset directory, which the
+ * Vite plugin fills with the loader, the interpreter, the standard library,
+ * the lockfile and the vendored wheels (see `ledger-pyodide-assets`). Nothing
+ * here reaches the network.
  *
- * The specifier is chosen at runtime — the app's own asset directory, or the
- * CDN — so a static import cannot name it; that is the whole point of the
- * fallback.
+ * The specifier is chosen at runtime, so a static import cannot name it.
  */
-async function load(indexURL: string): Promise<{ loader: Loader; indexURL: string; cdn: string }> {
-	try {
-		const loader = (await import(/* @vite-ignore */ `${indexURL}pyodide.mjs`)) as Loader;
-		return { loader, indexURL, cdn: cdnURL() };
-	} catch (cause) {
-		const cdn = cdnURL();
-		console.warn(
-			`Pyodide was not found at ${indexURL}; loading it from ${cdn} instead, which needs a network connection.`,
-			cause
-		);
-		const loader = (await import(/* @vite-ignore */ `${cdn}pyodide.mjs`)) as Loader;
-		return { loader, indexURL: cdn, cdn };
-	}
-}
-
-/** The jsDelivr directory matching this package's version. */
-function cdnURL(): string {
-	return `https://cdn.jsdelivr.net/pyodide/v${pyodideManifest.version}/full/`;
+async function load(indexURL: string): Promise<Loader> {
+	return (await import(/* @vite-ignore */ `${indexURL}pyodide.mjs`)) as Loader;
 }
 
 /** Boot Pyodide once and install the `ledger` module. */
@@ -181,11 +163,14 @@ function boot(indexURL: string): Promise<PyodideAPI> {
 	if (runtime) return Promise.resolve(runtime);
 	if (booting) return booting;
 	booting = (async () => {
-		const { loader, indexURL: resolved, cdn } = await load(indexURL);
-		// The runtime and the standard library come from the app's assets; the
-		// optional wheels (`pandas`) are only in the distribution, so packages
-		// are fetched from the same CDN the runtime would have come from.
-		const py = await loader.loadPyodide({ indexURL: resolved, packageBaseUrl: cdn });
+		const loader = await load(indexURL);
+		// The wheels (`pandas`, `numpy` and their dependencies) ship with the app
+		// under `packages/` next to these runtime files, so package installs read
+		// local files too.
+		const py = await loader.loadPyodide({
+			indexURL,
+			packageBaseUrl: `${indexURL}packages/`,
+		});
 		py.setStdout({ write });
 		py.setStderr({ write });
 		py.registerJsModule("ledger_rpc", { call: rpc });

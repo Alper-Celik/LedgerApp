@@ -52,15 +52,18 @@ class LedgerError(RuntimeError):
 
 async def _call(name, **args):
     """Run one read through the app and return its parsed answer."""
-    answer = json.loads(await ledger_rpc.call(name, json.dumps(args, default=str)))
-    if not answer.get("ok"):
-        text = answer.get("text") or ""
+    # The bridge hands back a JS object, so its fields are JsProxy values: read
+    # `ok` as a bool and the payload as native text before parsing it. (`str()` of
+    # the object itself would be "[object Object]".)
+    answer = await ledger_rpc.call(name, json.dumps(args, default=str))
+    text = str(answer.text)
+    if not bool(answer.ok):
         try:
             message = json.loads(text).get("error", text)
         except (TypeError, ValueError):
             message = text
         raise LedgerError(message or "`%s` failed" % name)
-    return json.loads(answer["text"])
+    return json.loads(text)
 
 
 async def accounts():
@@ -125,9 +128,9 @@ async def query(bql, max_rows=200):
 async def df(bql, max_rows=200):
     """Run one BQL statement and return the answer as a pandas DataFrame.
 
-    pandas is loaded on demand. The wheel is fetched from the Pyodide CDN the
-    first time it is used, so a sandbox with no network raises a
-    `RuntimeError` that says so; `query` and `table` work without it.
+    pandas is loaded on demand from the wheel vendored beside the runtime the
+    first time it is used, so this works offline; a sandbox that cannot load it
+    raises a `RuntimeError`, and `query` and `table` work without it.
     """
     pandas = await _pandas()
     answer = await query(bql, max_rows=max_rows)
@@ -151,9 +154,9 @@ async def _pandas():
         return pandas
     except Exception as cause:
         raise RuntimeError(
-            "pandas is not available in this sandbox (%s). The wheel is fetched from the "
-            "Pyodide CDN the first time it is used, so it needs a network connection; use "
-            "ledger.query() and ledger.table() instead." % cause
+            "pandas is not available in this sandbox (%s); the wheel is shipped with the "
+            "app, so this is a local failure, not a network one. Use ledger.query() and "
+            "ledger.table() instead." % cause
         ) from cause
 
 

@@ -13,7 +13,7 @@
 //! sits above that and is specific to *this* app — which directory the
 //! configuration is read from, the settings view that never carries the key,
 //! the prompt that tells the model what kind of books it is looking at, and the
-//! table of read tools the panel offers. Keeping the two apart leaves `ai.rs`
+//! table of tools the panel offers. Keeping the two apart leaves `ai.rs`
 //! testable without a configuration directory and leaves this file's tests
 //! free of the network.
 //!
@@ -39,9 +39,13 @@
 //! sends those schemas to the model and executes the calls the model makes, so
 //! a second hand-written copy of a tool's name or arguments — a Python stub, a
 //! paragraph in a prompt — is exactly the drift the table exists to prevent;
-//! anything else that needs the tools should walk `tools()` too. Only read
-//! tools are listed: the panel has no way to apply a write, and the prompt says
-//! an edit is proposed, never applied.
+//! anything else that needs the tools should walk `tools()` too.
+//!
+//! Most tools are reads ([`is_read_only`]); the two writes, `add_transaction`
+//! and `write_file`, only *stage a proposal*: the panel renders the exact entry
+//! or text and lets the user approve or reject it, and the CLI prints it. A
+//! call to one never touches a file, which is why the model is told the change
+//! is pending rather than applied.
 
 use std::path::Path;
 
@@ -151,14 +155,15 @@ pub fn chat(dir: &Path, request: ChatRequest) -> Result<ChatResponse, String> {
 /// `ai.rs`'s own tests script its HTTP transport; everything this module does
 /// is above that wire — load the directory's configuration, hand it to one of
 /// two calls, return what came back — so the seam a test scripts here is the
-/// calls themselves. [`Endpoint`] is the real one.
-trait Backend {
+/// calls themselves. [`Endpoint`] is the real one; `api.rs`'s assistant loop
+/// takes any [`Backend`], which is how a scripted model drives it.
+pub(crate) trait Backend {
     fn models(&self, config: &AiConfig) -> Result<Vec<ModelInfo>, String>;
     fn chat(&self, config: &AiConfig, request: ChatRequest) -> Result<ChatResponse, String>;
 }
 
 /// The real backend: `ai.rs`, over the network.
-struct Endpoint;
+pub(crate) struct Endpoint;
 
 impl Backend for Endpoint {
     fn models(&self, config: &AiConfig) -> Result<Vec<ModelInfo>, String> {
@@ -175,7 +180,7 @@ fn models_with(backend: &impl Backend, dir: &Path) -> Result<Vec<ModelInfo>, Str
     backend.models(&config)
 }
 
-fn chat_with(
+pub(crate) fn chat_with(
     backend: &impl Backend,
     dir: &Path,
     request: ChatRequest,
@@ -207,15 +212,17 @@ books as Beancount text files and the app has loaded them.
   commodity. Never sum, average or otherwise compute with those values as
   floating point numbers, and never restate an amount from memory: ask a tool
   for the total and copy the string it returns, sign and commodity included.
-- You may propose a change to the books, as Beancount text or as a described
-  edit, but you never apply one and you never say that one has been applied.
-  The user reviews and applies every change.
+- You may propose a change to the books with `add_transaction` (one new entry)
+  or `write_file` (a journal file's whole new text). Those tools only stage a
+  proposal: the user reads it and approves or rejects it, and nothing is
+  written until they do. Never say a change has been applied, and never repeat
+  a proposal unless the user asks for it again.
 - Answer in the language the user writes in.
 ";
 
-// -- the read tools ----------------------------------------------------------
+// -- the tools ---------------------------------------------------------------
 
-/// One argument of a read tool, as both the schema and a stub need it.
+/// One tool argument, as both the schema and a dispatcher need it.
 #[derive(Debug, Clone, Copy)]
 struct ToolArg {
     /// The name the model passes it under.
@@ -228,7 +235,7 @@ struct ToolArg {
     required: bool,
 }
 
-/// The argument types the read tools take. An enum rather than a string, so a
+/// The argument types the tools take. An enum rather than a string, so a
 /// misspelled type cannot reach a model.
 #[derive(Debug, Clone, Copy)]
 enum ArgKind {
@@ -236,6 +243,8 @@ enum ArgKind {
     Text,
     /// `"integer"`: a count of months.
     Whole,
+    /// `"array"` of posting objects, each `{account, units, currency}`.
+    Postings,
 }
 
 impl ArgKind {
@@ -244,11 +253,12 @@ impl ArgKind {
         match self {
             Self::Text => "string",
             Self::Whole => "integer",
+            Self::Postings => "array",
         }
     }
 }
 
-/// One read tool, before it becomes a [`ToolSchema`].
+/// One tool, before it becomes a [`ToolSchema`].
 #[derive(Debug, Clone, Copy)]
 struct ToolSpec {
     /// The dispatch name: what the model calls and the panel matches on.
@@ -257,13 +267,19 @@ struct ToolSpec {
     description: &'static str,
     /// The arguments, in the order the panel offers them.
     args: &'static [ToolArg],
+    /// Whether the tool only reads. A write tool stages a proposal instead of
+    /// touching a file, and the panel and CLI both ask this before running one.
+    read_only: bool,
 }
 
-/// The read tools the panel can execute, in the order they are offered.
+/// The tools the panel offers, in the order they are offered: the reads first,
+/// then the two writes.
 ///
-/// Each is a whole call the panel already makes over IPC, so the model's
+/// Each read is a whole call the panel already makes over IPC, so the model's
 /// request is served by the same code path as the screens': the figures it
-/// reads are the figures the user sees.
+/// reads are the figures the user sees. The writes are deliberately last and
+/// marked [`ToolSpec::read_only`] false: naming one stages a proposal, never a
+/// write.
 const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "query",
@@ -274,11 +290,13 @@ const TOOLS: &[ToolSpec] = &[
             description: "One BQL statement, e.g. `SELECT payee, sum(position) WHERE account ~ \"^Expenses:Food\" GROUP BY payee`.",
             required: true,
         }],
+        read_only: true,
     },
     ToolSpec {
         name: "accounts",
         description: "Every account with its exact balance as a decimal string, its commodity, and whether its subtree has uncommitted changes. Balances follow beancount `bal` semantics: a parent is already the sum of its whole subtree, so never add a parent to its children.",
         args: &[],
+        read_only: true,
     },
     ToolSpec {
         name: "transactions",
@@ -289,6 +307,7 @@ const TOOLS: &[ToolSpec] = &[
             description: "The account to read, e.g. `Expenses:Food`.",
             required: true,
         }],
+        read_only: true,
     },
     ToolSpec {
         name: "grep",
@@ -307,23 +326,24 @@ const TOOLS: &[ToolSpec] = &[
                 required: false,
             },
         ],
+        read_only: true,
     },
     ToolSpec {
         name: "read_lines",
-        description: "Read a journal file as numbered lines, each with a short content hash. Use `edit_lines` with those hashes to change the file; reading the same file again after an edit gives fresh hashes.",
-        args: &[
-            ToolArg {
-                name: "path",
-                kind: ArgKind::Text,
-                description: "A path from the `files` tool, relative to the ledger's directory.",
-                required: true,
-            },
-        ],
+        description: "Read a journal file as numbered lines, each with a short content hash. To change the file, read all of it and propose the new text with `write_file`; reading the file again gives fresh hashes.",
+        args: &[ToolArg {
+            name: "path",
+            kind: ArgKind::Text,
+            description: "A path from the `files` tool, relative to the ledger's directory.",
+            required: true,
+        }],
+        read_only: true,
     },
     ToolSpec {
         name: "files",
         description: "The journal files the loaded ledger includes, each with the path as loaded, the label to show, how many transactions it writes and how it stands in git. Use a path from here when pointing at where an entry lives.",
         args: &[],
+        read_only: true,
     },
     ToolSpec {
         name: "budget_range",
@@ -342,11 +362,13 @@ const TOOLS: &[ToolSpec] = &[
                 required: false,
             },
         ],
+        read_only: true,
     },
     ToolSpec {
         name: "index_series",
         description: "The price index series imported into the app, each with its id, label, publisher, currency and monthly points as decimal strings. `lifestyle_report` needs one of these ids.",
         args: &[],
+        read_only: true,
     },
     ToolSpec {
         name: "lifestyle_report",
@@ -365,17 +387,89 @@ const TOOLS: &[ToolSpec] = &[
                 required: true,
             },
         ],
+        read_only: true,
     },
     ToolSpec {
         name: "price_targets",
         description: "Every commodity the loaded ledger holds or quotes, with the newest `price` directive for it when the ledger has one. These are the ledger's own prices, never a fetched quote; amounts are decimal strings.",
         args: &[],
+        read_only: true,
+    },
+    ToolSpec {
+        name: "add_transaction",
+        description: "Propose one new transaction in a journal file. The app stages this as a proposal: the user sees the exact entry and approves or rejects it, so nothing is written by this call. The answer says the proposal is pending — never report the entry as added until the user approves it.",
+        args: &[
+            ToolArg {
+                name: "file",
+                kind: ArgKind::Text,
+                description: "The journal file to append to: a `path` from the `files` tool, e.g. `main.bean`.",
+                required: true,
+            },
+            ToolArg {
+                name: "date",
+                kind: ArgKind::Text,
+                description: "The entry's date as `YYYY-MM-DD`.",
+                required: true,
+            },
+            ToolArg {
+                name: "flag",
+                kind: ArgKind::Text,
+                description: "`*` for a cleared entry or `!` for one to review.",
+                required: true,
+            },
+            ToolArg {
+                name: "payee",
+                kind: ArgKind::Text,
+                description: "Who was paid, e.g. `Migros`; omit it when the narration says enough.",
+                required: false,
+            },
+            ToolArg {
+                name: "narration",
+                kind: ArgKind::Text,
+                description: "What the entry is for, e.g. `Groceries`.",
+                required: true,
+            },
+            ToolArg {
+                name: "postings",
+                kind: ArgKind::Postings,
+                description: "At least two postings. Leave `units` and `currency` out of the leg beancount should interpolate.",
+                required: true,
+            },
+        ],
+        read_only: false,
+    },
+    ToolSpec {
+        name: "write_file",
+        description: "Propose a journal file's whole new text, for a change `add_transaction` cannot express. The app stages this as a proposal: the user sees a diff and approves or rejects it, so nothing is written by this call. The answer says the proposal is pending — never report the file as changed until the user approves it.",
+        args: &[
+            ToolArg {
+                name: "path",
+                kind: ArgKind::Text,
+                description: "The journal file to replace: a `path` from the `files` tool.",
+                required: true,
+            },
+            ToolArg {
+                name: "text",
+                kind: ArgKind::Text,
+                description: "The file's complete new text, unchanged lines included.",
+                required: true,
+            },
+        ],
+        read_only: false,
     },
 ];
 
-/// The read tools the panel offers the model, as OpenAI-shaped schemas.
+/// The tools the panel offers the model, as OpenAI-shaped schemas.
 pub fn tools() -> Vec<ToolSchema> {
     TOOLS.iter().map(schema_of).collect()
+}
+
+/// Whether `name` is a tool that only reads.
+///
+/// An unknown name is not read-only: a dispatcher that has not learned the tool
+/// must not run it, and this answer makes "unknown" fail closed.
+pub fn is_read_only(name: &str) -> bool {
+    TOOLS.iter().any(|spec| spec.name == name && spec.read_only)
 }
 
 /// One table row as the schema the wire takes.
@@ -383,13 +477,7 @@ fn schema_of(spec: &ToolSpec) -> ToolSchema {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for arg in spec.args {
-        properties.insert(
-            arg.name.to_string(),
-            json!({
-                "type": arg.kind.json_type(),
-                "description": arg.description,
-            }),
-        );
+        properties.insert(arg.name.to_string(), schema_arg(arg));
         if arg.required {
             required.push(Value::String(arg.name.to_string()));
         }
@@ -408,6 +496,43 @@ fn schema_of(spec: &ToolSpec) -> ToolSchema {
         name: spec.name.to_string(),
         description: spec.description.to_string(),
         parameters: Value::Object(parameters),
+    }
+}
+
+/// One argument's JSON Schema, shaped by [`ArgKind`].
+fn schema_arg(arg: &ToolArg) -> Value {
+    match arg.kind {
+        ArgKind::Text | ArgKind::Whole => json!({
+            "type": arg.kind.json_type(),
+            "description": arg.description,
+        }),
+        // One posting per object, the same three fields `NewPosting` takes: a
+        // nested schema so a model cannot send a bare account string or an
+        // amount without its commodity and hope the panel guesses.
+        ArgKind::Postings => json!({
+            "type": "array",
+            "description": arg.description,
+            "minItems": 2,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "The account to post to, e.g. `Expenses:Food:Groceries`.",
+                    },
+                    "units": {
+                        "type": "string",
+                        "description": "The amount as an exact decimal string, e.g. `-12.34`; omit it on the leg beancount interpolates.",
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "The commodity, e.g. `USD`; omit it to use the ledger's operating currency.",
+                    },
+                },
+                "required": ["account"],
+                "additionalProperties": false,
+            },
+        }),
     }
 }
 
@@ -633,11 +758,53 @@ mod tests {
                 "index_series",
                 "lifestyle_report",
                 "price_targets",
+                "add_transaction",
+                "write_file",
             ],
-            "the panel offers exactly the read tools it can execute"
+            "the panel offers the reads it can execute, then the two writes it stages"
         );
         let names: BTreeSet<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(names.len(), schemas.len(), "the model dispatches by name");
+
+        // The writes are the last two, and only those two; an unknown name is
+        // not read-only either, so a dispatcher fails closed.
+        let writes: Vec<&str> = TOOLS
+            .iter()
+            .filter(|spec| !spec.read_only)
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(writes, ["add_transaction", "write_file"]);
+        for spec in TOOLS {
+            assert_eq!(
+                is_read_only(spec.name),
+                spec.read_only,
+                "{}: the read-only flag is what dispatchers ask for",
+                spec.name
+            );
+        }
+        assert!(!is_read_only("delete_everything"));
+
+        for spec in TOOLS {
+            let description = spec.description.to_lowercase();
+            if spec.read_only {
+                assert!(
+                    !description.contains("proposal"),
+                    "{}: a read never stages a proposal",
+                    spec.name
+                );
+            } else {
+                assert!(
+                    description.contains("proposal"),
+                    "{}: a write must say it only stages a proposal",
+                    spec.name
+                );
+                assert!(
+                    description.contains("approve"),
+                    "{}: a write must say the user approves it",
+                    spec.name
+                );
+            }
+        }
 
         for tool in &schemas {
             assert!(!tool.name.trim().is_empty());
@@ -689,7 +856,7 @@ mod tests {
             for (name, property) in properties {
                 let kind = property.get("type").and_then(Value::as_str);
                 assert!(
-                    matches!(kind, Some("string" | "integer")),
+                    matches!(kind, Some("string" | "integer" | "array")),
                     "{}: `{name}` has type {kind:?}",
                     tool.name
                 );
@@ -701,6 +868,61 @@ mod tests {
                     "{}: `{name}` has no description",
                     tool.name
                 );
+                // A posting array is the one nested shape; its items are the
+                // `NewPosting` fields, and each is documented like a top-level
+                // argument.
+                if kind == Some("array") {
+                    let items = property
+                        .get("items")
+                        .and_then(Value::as_object)
+                        .unwrap_or_else(|| panic!("{}: `{name}` has no item schema", tool.name));
+                    assert_eq!(
+                        items.get("type").and_then(Value::as_str),
+                        Some("object"),
+                        "{}: `{name}` items are objects",
+                        tool.name
+                    );
+                    assert_eq!(
+                        items.get("additionalProperties").and_then(Value::as_bool),
+                        Some(false),
+                        "{}: `{name}` items refuse unknown fields",
+                        tool.name
+                    );
+                    let fields = items
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .unwrap_or_else(|| panic!("{}: `{name}` items have no fields", tool.name));
+                    for field in ["account", "units", "currency"] {
+                        let shape = fields
+                            .get(field)
+                            .unwrap_or_else(|| panic!("{}: `{name}` lacks `{field}`", tool.name));
+                        assert_eq!(
+                            shape.get("type").and_then(Value::as_str),
+                            Some("string"),
+                            "{}: `{name}.{field}` is a string",
+                            tool.name
+                        );
+                        assert!(
+                            shape
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .is_some_and(|text| !text.trim().is_empty()),
+                            "{}: `{name}.{field}` has no description",
+                            tool.name
+                        );
+                    }
+                    let item_required: Vec<&str> = items
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .map(|list| list.iter().filter_map(Value::as_str).collect())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        item_required,
+                        ["account"],
+                        "{}: `{name}` needs only the account",
+                        tool.name
+                    );
+                }
             }
         }
     }
@@ -717,6 +939,8 @@ mod tests {
             "tool",
             "language",
             "applied",
+            "proposal",
+            "approve",
         ] {
             assert!(
                 prompt.contains(needle),

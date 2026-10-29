@@ -105,9 +105,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{#if assistant.sessionsError}
 			<Alert variant="destructive" class="mb-1.5">{assistant.sessionsError}</Alert>
 		{/if}
-		{#if assistant.malformed.length > 0}
+		{#if (assistant.malformed?.length ?? 0) > 0}
 			<div class="text-muted-foreground mb-1.5 px-1 text-[0.625rem]">
-				{assistant.malformed.length} conversation file{assistant.malformed.length === 1
+				{(assistant.malformed?.length ?? 0)} conversation file{assistant.malformed?.length === 1
 					? ""
 					: "s"} could not be read.
 				{#each assistant.malformed as file (file.path)}

@@ -35,11 +35,12 @@
 //!
 //! # What it deliberately does not do
 //!
-//! No streaming ([`crate::ai_stream`]), no entry writing ([`crate::editing`]'s
-//! transaction edits), and no tool loop: [`ask`] is one model call, and a call
-//! the model asks for comes back in [`Answer`] for the caller to print. The
-//! only write is [`write_prices`], because appending quotes is the one change
-//! a price fetch has always been allowed to make.
+//! No streaming ([`crate::ai_stream`]) and no entry writing ([`crate::editing`]'s
+//! transaction edits). [`ask`] runs the model's *read* tools itself — up to
+//! [`ASK_ROUNDS`] model calls — because a terminal cannot dispatch them, but a
+//! call to a write tool comes back in [`Answer::tool_calls`] as a proposal and
+//! is never executed. The only write is [`write_prices`], because appending
+//! quotes is the one change a price fetch has always been allowed to make.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -106,6 +107,14 @@ impl Opened {
         let guard = self.state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().expect("an opened ledger keeps its ledger");
         read(&loaded.ledger)
+    }
+
+    /// The loaded session — ledger and the baseline edits are measured
+    /// against — for a read that needs both (a register row's `modified` flag).
+    fn with_loaded<T>(&self, read: impl FnOnce(&session::Loaded) -> T) -> T {
+        let guard = self.state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().expect("an opened ledger keeps its ledger");
+        read(loaded)
     }
 }
 
@@ -493,8 +502,10 @@ pub fn ai_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("ai")
 }
 
-/// One call the model asked for. The CLI does not run it (one call is one
-/// call); it prints it so the asker knows what the model wanted.
+/// One write call the model asked for, unexecuted.
+///
+/// [`ask`] runs reads and only prints these: a proposal is the user's to
+/// approve, and the CLI has no place to ask.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AnswerCall {
     /// The tool's dispatch name.
@@ -503,50 +514,299 @@ pub struct AnswerCall {
     pub arguments: String,
 }
 
-/// One assistant turn's answer.
+/// One assistant answer, after the reads it asked for have been run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Answer {
-    /// The prose the model produced.
+    /// The last prose the model produced.
     pub text: String,
-    /// The calls the model asked for, unexecuted.
+    /// Write calls the model asked for, kept as proposals and never executed.
     pub tool_calls: Vec<AnswerCall>,
     /// Why generation stopped, in the endpoint's words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// How many model calls the answer took, tool rounds included.
+    pub rounds: u32,
+    /// Whether the loop stopped at [`ASK_ROUNDS`] with the model still asking
+    /// for tools, so the answer may be incomplete.
+    pub truncated: bool,
 }
 
-/// One assistant turn: the app's system prompt, the app's read tools, and one
-/// model call — no streaming, no tool loop.
+/// How many model calls one [`ask`] may make: the question, then the follow-ups
+/// its tool answers need. Four is enough for "read, read once more, answer"
+/// without letting a confused model loop, and each round is a paid request.
+pub const ASK_ROUNDS: u32 = 4;
+
+/// How many rows a `query` tool answer may carry. The same cap the panel uses,
+/// so a CLI answer and a window answer read the same table.
+const ASK_QUERY_ROWS: u32 = 200;
+
+/// What the model is told when it asks for a write: the call was not run.
+const ASK_PROPOSAL_PENDING: &str = "This change is a proposal for the user to approve. Nothing has been written and it is not applied.";
+
+/// One question, answered by the endpoint in `dir`: the app's system prompt and
+/// the app's tools, then as many read-tool rounds as the model asks for, up to
+/// [`ASK_ROUNDS`].
 ///
 /// The prompt and the tools come from [`crate::ai_cmd`], the module the panel
-/// reads, so the CLI's assistant is the same assistant; only the composition is
-/// here, because the panel composes it in the frontend. A turn the model answers
-/// with tool calls comes back as [`Answer::tool_calls`] — running them and
-/// asking again is the panel's job, and deliberately not this one's.
-pub fn ask(config_dir: &Path, prompt: &str) -> Result<Answer, String> {
+/// reads, so the CLI's assistant is the same assistant; only the composition
+/// and the read dispatch are here, because the panel composes them in the
+/// frontend. `ledger` is what the read tools answer from: `None` is a question
+/// asked without a journal, and each read then answers the model with "no
+/// ledger is loaded" instead of failing the whole ask.
+///
+/// A write tool is never run: it comes back in [`Answer::tool_calls`] so the
+/// caller can print it as a proposal. Nothing this function does writes a file.
+pub fn ask(config_dir: &Path, ledger: Option<&Opened>, prompt: &str) -> Result<Answer, String> {
+    ask_with(&crate::ai_cmd::Endpoint, config_dir, ledger, prompt)
+}
+
+/// [`ask`] over a scripted backend — the seam its tests drive.
+fn ask_with(
+    backend: &impl crate::ai_cmd::Backend,
+    config_dir: &Path,
+    ledger: Option<&Opened>,
+    prompt: &str,
+) -> Result<Answer, String> {
     use crate::ai::{ChatMessage, ChatRequest, ChatRole};
 
-    let request = ChatRequest {
-        messages: vec![
-            ChatMessage::text(ChatRole::System, crate::ai_cmd::SYSTEM_PROMPT),
-            ChatMessage::text(ChatRole::User, prompt),
-        ],
-        tools: crate::ai_cmd::tools(),
-        media: Vec::new(),
-    };
-    let response = crate::ai_cmd::chat(&ai_dir(config_dir), request)?;
+    let dir = ai_dir(config_dir);
+    // One schema build for the whole ask: the same table every round, so a
+    // round cannot be offered a different tool set than the one before it.
+    let tools = crate::ai_cmd::tools();
+    let mut messages = vec![
+        ChatMessage::text(ChatRole::System, crate::ai_cmd::SYSTEM_PROMPT),
+        ChatMessage::text(ChatRole::User, prompt),
+    ];
+    let mut proposals: Vec<AnswerCall> = Vec::new();
+    let mut text = String::new();
+    let mut finish_reason = None;
+    let mut rounds = 0;
+    let mut truncated = false;
+
+    while rounds < ASK_ROUNDS {
+        let request = ChatRequest {
+            messages: messages.clone(),
+            tools: tools.clone(),
+            media: Vec::new(),
+        };
+        let response = crate::ai_cmd::chat_with(backend, &dir, request)?;
+        rounds += 1;
+        finish_reason.clone_from(&response.finish_reason);
+        // A round that only calls tools has no prose; the answer's text is the
+        // last prose the model did say.
+        if !response.text.trim().is_empty() {
+            text.clone_from(&response.text);
+        }
+        if response.tool_calls.is_empty() {
+            break;
+        }
+
+        // The calls are announced before their answers, the order the wire
+        // requires; a tool answer without its assistant turn is a broken
+        // conversation the endpoint would refuse.
+        messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            text: response.text.clone(),
+            tool_calls: response.tool_calls.clone(),
+            tool_call_id: None,
+        });
+
+        let mut ran = 0;
+        for call in response.tool_calls {
+            if crate::ai_cmd::is_read_only(&call.name) {
+                let answer = run_read_tool(ledger, config_dir, &call.name, &call.arguments);
+                messages.push(ChatMessage::tool_result(&call.id, answer));
+                ran += 1;
+            } else {
+                // A write is a proposal, never an answer to the model: running
+                // it would be the app applying an edit the user never saw. The
+                // call still gets a tool message — an unanswered call would make
+                // the next round an invalid conversation — saying it is pending.
+                messages.push(ChatMessage::tool_result(
+                    &call.id,
+                    serde_json::json!({
+                        "status": "proposed",
+                        "tool": call.name,
+                        "note": ASK_PROPOSAL_PENDING,
+                    })
+                    .to_string(),
+                ));
+                // The same proposal asked for twice is printed once.
+                if !proposals.iter().any(|existing| {
+                    existing.name == call.name && existing.arguments == call.arguments
+                }) {
+                    proposals.push(AnswerCall {
+                        name: call.name,
+                        arguments: call.arguments,
+                    });
+                }
+            }
+        }
+        if ran == 0 {
+            break;
+        }
+        truncated = rounds == ASK_ROUNDS;
+    }
+
     Ok(Answer {
-        text: response.text,
-        tool_calls: response
-            .tool_calls
-            .into_iter()
-            .map(|call| AnswerCall {
-                name: call.name,
-                arguments: call.arguments,
-            })
-            .collect(),
-        finish_reason: response.finish_reason,
+        text,
+        tool_calls: proposals,
+        finish_reason,
+        rounds,
+        truncated,
     })
+}
+
+/// Run one read tool by name and answer the model with JSON text.
+///
+/// This is the CLI's half of the panel's dispatcher: the same tools, the same
+/// façade calls the screens use, so a total the model quotes in the terminal is
+/// the total the window shows. A refusal — a bad argument, a missing journal, a
+/// tool this build does not have — goes back as `{"error": …}` for the model to
+/// read and correct, never as a failed `ask`.
+fn run_read_tool(
+    ledger: Option<&Opened>,
+    config_dir: &Path,
+    name: &str,
+    arguments: &str,
+) -> String {
+    match read_tool_answer(ledger, config_dir, name, arguments) {
+        Ok(value) => value.to_string(),
+        Err(message) => serde_json::json!({ "error": message }).to_string(),
+    }
+}
+
+/// [`run_read_tool`] with the answer as a value, for the exhaustive match.
+fn read_tool_answer(
+    ledger: Option<&Opened>,
+    config_dir: &Path,
+    name: &str,
+    arguments: &str,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+
+    let args: Value = if arguments.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(arguments)
+            .map_err(|error| format!("the arguments are not JSON: {error}"))?
+    };
+    if !args.is_object() {
+        return Err("the arguments must be a JSON object".to_string());
+    }
+
+    match name {
+        "query" => {
+            let opened = opened_or(ledger)?;
+            let bql = text_arg(&args, &["query", "bql"])?;
+            to_value(query(opened, &bql, ASK_QUERY_ROWS)?)
+        }
+        "accounts" => {
+            let opened = opened_or(ledger)?;
+            opened.with_loaded(|loaded| {
+                let modified = crate::accounts::modified_accounts(&loaded.ledger, &loaded.baseline);
+                to_value(crate::accounts::account_balances(&loaded.ledger, &modified))
+            })
+        }
+        "transactions" => {
+            let opened = opened_or(ledger)?;
+            let account = text_arg(&args, &["account"])?;
+            opened.with_loaded(|loaded| {
+                to_value(crate::accounts::account_transaction_views(
+                    &loaded.ledger,
+                    &loaded.baseline,
+                    &account,
+                ))
+            })
+        }
+        "files" => {
+            let opened = opened_or(ledger)?;
+            opened.with_loaded(|loaded| to_value(crate::files::journal_file_views(loaded)))
+        }
+        "grep" | "read_lines" => {
+            let opened = opened_or(ledger)?;
+            let dir = opened
+                .root
+                .parent()
+                .ok_or_else(|| format!("{} has no directory to search", opened.root.display()))?;
+            // The file tools already own path confinement, .gitignore handling
+            // and the hashes a follow-up edit needs; re-implementing them here
+            // is how a terminal would search something the panel cannot.
+            let tool = if name == "grep" { "grep" } else { "read" };
+            let answer =
+                crate::tools::invoke(dir, tool, &args).map_err(|error| error.to_string())?;
+            Ok(answer)
+        }
+        "budget_range" => {
+            let opened = opened_or(ledger)?;
+            let from = optional_text(&args, "from");
+            let to = optional_text(&args, "to");
+            to_value(budget_range(opened, from, to)?)
+        }
+        "index_series" => to_value(index_series(config_dir)?),
+        "lifestyle_report" => {
+            let opened = opened_or(ledger)?;
+            let months = integer_arg(&args, &["months"])?;
+            let index = text_arg(&args, &["index"])?;
+            to_value(lifestyle(opened, config_dir, months, Some(&index))?)
+        }
+        "price_targets" => {
+            let opened = opened_or(ledger)?;
+            to_value(price_targets(opened))
+        }
+        other => Err(format!(
+            "`{other}` is not a tool this build can run; the tools are the ones in the request"
+        )),
+    }
+}
+
+/// The opened ledger a read needs, or the sentence the model is told.
+fn opened_or(ledger: Option<&Opened>) -> Result<&Opened, String> {
+    ledger.ok_or_else(|| {
+        "no ledger is loaded, so this tool has nothing to read; ask the user to open a journal"
+            .to_string()
+    })
+}
+
+/// One required string argument, under any of the names a schema may use.
+fn text_arg(args: &serde_json::Value, names: &[&str]) -> Result<String, String> {
+    for name in names {
+        if let Some(value) = args.get(*name) {
+            let text = value
+                .as_str()
+                .ok_or_else(|| format!("`{name}` must be a string"))?
+                .trim();
+            if !text.is_empty() {
+                return Ok(text.to_string());
+            }
+        }
+    }
+    Err(format!("`{}` is required", names[0]))
+}
+
+/// One optional string argument; blank is absent, not an empty argument.
+fn optional_text(args: &serde_json::Value, name: &str) -> Option<String> {
+    args.get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// One required whole-number argument.
+fn integer_arg(args: &serde_json::Value, names: &[&str]) -> Result<u32, String> {
+    let name = names[0];
+    let value = args
+        .get(name)
+        .ok_or_else(|| format!("`{name}` is required"))?
+        .as_u64()
+        .ok_or_else(|| format!("`{name}` must be a whole number"))?;
+    u32::try_from(value).map_err(|_| format!("`{name}` is too large"))
+}
+
+/// A serialisable answer as the JSON value the model reads.
+fn to_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, String> {
+    serde_json::to_value(value).map_err(|error| format!("the answer could not be encoded: {error}"))
 }
 
 // -------------------------------------------------------------------- chart ---
@@ -902,7 +1162,276 @@ option \"operating_currency\" \"USD\"
         // An empty configuration has no model, and `ai.rs` refuses before any
         // request goes out — so this asserts the composition reached the
         // backend without a network.
-        let error = ask(&config, "how much did I spend?").expect_err("no model is configured");
+        let error =
+            ask(&config, None, "how much did I spend?").expect_err("no model is configured");
         assert!(error.contains("model"), "{error}");
+    }
+
+    /// A model that answers from a fixed script, one response per call, and
+    /// keeps every request it was sent.
+    struct Scripted {
+        answers: std::cell::RefCell<std::collections::VecDeque<crate::ai::ChatResponse>>,
+        requests: std::cell::RefCell<Vec<crate::ai::ChatRequest>>,
+    }
+
+    impl Scripted {
+        fn new(answers: Vec<crate::ai::ChatResponse>) -> Self {
+            Self {
+                answers: std::cell::RefCell::new(answers.into()),
+                requests: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<crate::ai::ChatRequest> {
+            self.requests.borrow().clone()
+        }
+    }
+
+    impl crate::ai_cmd::Backend for Scripted {
+        fn models(
+            &self,
+            _config: &crate::ai::AiConfig,
+        ) -> Result<Vec<crate::ai::ModelInfo>, String> {
+            Ok(Vec::new())
+        }
+
+        fn chat(
+            &self,
+            _config: &crate::ai::AiConfig,
+            request: crate::ai::ChatRequest,
+        ) -> Result<crate::ai::ChatResponse, String> {
+            self.requests.borrow_mut().push(request);
+            self.answers
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| "the script ran out of answers".to_string())
+        }
+    }
+
+    /// A turn that only calls tools: the call announced, no prose.
+    fn calls(calls: Vec<crate::ai::ToolCall>) -> crate::ai::ChatResponse {
+        crate::ai::ChatResponse {
+            text: String::new(),
+            tool_calls: calls,
+            finish_reason: Some("tool_calls".to_string()),
+            ..crate::ai::ChatResponse::default()
+        }
+    }
+
+    /// A turn that answers in prose.
+    fn says(text: &str) -> crate::ai::ChatResponse {
+        crate::ai::ChatResponse {
+            text: text.to_string(),
+            finish_reason: Some("stop".to_string()),
+            ..crate::ai::ChatResponse::default()
+        }
+    }
+
+    #[test]
+    fn ask_runs_a_read_tool_and_answers_from_its_result() {
+        let (dir, opened) = opened();
+        let config = dir.file("config");
+        fs::create_dir_all(&config).unwrap();
+        let query = "SELECT account, SUM(number) WHERE account ~ \"Expenses:\" GROUP BY account ORDER BY account";
+        let scripted = Scripted::new(vec![
+            calls(vec![crate::ai::ToolCall {
+                id: "call-1".to_string(),
+                name: "query".to_string(),
+                arguments: serde_json::json!({ "query": query }).to_string(),
+            }]),
+            says("You spent 250.50 USD on groceries."),
+        ]);
+
+        let answer = ask_with(&scripted, &config, Some(&opened), "What did I spend?")
+            .expect("the turn completes");
+
+        // The prose is the model's, the read ran, and the loop took two calls.
+        assert_eq!(answer.text, "You spent 250.50 USD on groceries.");
+        assert!(answer.tool_calls.is_empty(), "a read is not a proposal");
+        assert_eq!(answer.rounds, 2);
+        assert!(!answer.truncated);
+        assert_eq!(answer.finish_reason.as_deref(), Some("stop"));
+
+        // The second request carries the call and its answer, in the wire's
+        // order, and the answer is the BQL executor's own table.
+        let requests = scripted.requests();
+        assert_eq!(requests.len(), 2);
+        let messages = &requests[1].messages;
+        assert_eq!(messages.len(), 4, "system, user, call, answer");
+        assert_eq!(messages[2].role, crate::ai::ChatRole::Assistant);
+        assert_eq!(messages[2].tool_calls[0].id, "call-1");
+        assert_eq!(messages[3].role, crate::ai::ChatRole::Tool);
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("call-1"));
+        let table: serde_json::Value =
+            serde_json::from_str(&messages[3].text).expect("the tool answer is JSON");
+        assert_eq!(
+            table["columns"],
+            serde_json::json!(["account", "SUM(number)"])
+        );
+        assert_eq!(
+            table["rows"],
+            serde_json::json!([["Expenses:Food:Groceries", "250.50"]])
+        );
+
+        // The write tools are offered too — the model may propose one — and the
+        // read tool's schema came from the same table the panel sends.
+        let names: Vec<&str> = requests[1]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(names.contains(&"add_transaction"));
+        assert!(names.contains(&"write_file"));
+    }
+
+    #[test]
+    fn ask_proposes_a_write_and_never_applies_it() {
+        let (dir, opened) = opened();
+        let config = dir.file("config");
+        fs::create_dir_all(&config).unwrap();
+        let journal = dir.file("main.bean");
+        let before = fs::read_to_string(&journal).expect("the journal is readable");
+
+        // The model proposes an entry. Nothing runs it — not even the journal
+        // file it names may be opened for writing.
+        let arguments = serde_json::json!({
+            "file": journal.display().to_string(),
+            "date": "2026-02-01",
+            "flag": "*",
+            "payee": "Cafe",
+            "narration": "Coffee",
+            "postings": [
+                { "account": "Expenses:Food:Groceries", "units": "4.50", "currency": "USD" },
+                { "account": "Assets:Bank" }
+            ]
+        })
+        .to_string();
+        let scripted = Scripted::new(vec![calls(vec![crate::ai::ToolCall {
+            id: "call-w".to_string(),
+            name: "add_transaction".to_string(),
+            arguments: arguments.clone(),
+        }])]);
+
+        let answer = ask_with(&scripted, &config, Some(&opened), "Add a coffee")
+            .expect("the turn completes");
+
+        assert!(answer.text.is_empty(), "the model said no prose");
+        assert_eq!(
+            answer.tool_calls,
+            vec![AnswerCall {
+                name: "add_transaction".to_string(),
+                arguments,
+            }],
+            "the write call comes back as a proposal, arguments verbatim"
+        );
+        assert_eq!(
+            answer.rounds, 1,
+            "a write is not a read: no follow-up round"
+        );
+
+        // The proof: the journal is byte-for-byte what it was, and the write
+        // tool was never answered as a tool message (the model is not told it
+        // happened).
+        assert_eq!(
+            fs::read_to_string(&journal).expect("the journal is readable"),
+            before,
+            "the proposal must not have written anything"
+        );
+        assert_eq!(scripted.requests().len(), 1);
+    }
+
+    #[test]
+    fn ask_answers_a_write_call_with_a_pending_note_in_a_mixed_round() {
+        let (dir, opened) = opened();
+        let config = dir.file("config");
+        fs::create_dir_all(&config).unwrap();
+        let arguments = serde_json::json!({
+            "file": dir.file("main.bean").display().to_string(),
+            "date": "2026-02-01",
+            "flag": "*",
+            "narration": "Coffee",
+            "postings": [
+                { "account": "Expenses:Food:Groceries", "units": "4.50", "currency": "USD" },
+                { "account": "Assets:Bank" }
+            ]
+        })
+        .to_string();
+        let scripted = Scripted::new(vec![
+            calls(vec![
+                crate::ai::ToolCall {
+                    id: "call-read".to_string(),
+                    name: "files".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                crate::ai::ToolCall {
+                    id: "call-write".to_string(),
+                    name: "add_transaction".to_string(),
+                    arguments: arguments.clone(),
+                },
+            ]),
+            says("I proposed the entry; apply it in the panel."),
+        ]);
+
+        let answer = ask_with(&scripted, &config, Some(&opened), "Add a coffee")
+            .expect("the turn completes");
+        assert_eq!(answer.rounds, 2);
+        assert_eq!(answer.tool_calls.len(), 1, "the write is reported once");
+
+        // Every call is answered — an assistant turn whose call has no tool
+        // answer would be a conversation the endpoint refuses — and the write's
+        // answer says it is pending, not done.
+        let requests = scripted.requests();
+        let messages = &requests[1].messages;
+        assert_eq!(messages.len(), 5, "system, user, call, read, write");
+        let read_answer: serde_json::Value =
+            serde_json::from_str(&messages[3].text).expect("the read answer is JSON");
+        assert_eq!(
+            read_answer[0]["path"],
+            serde_json::json!(dir.file("main.bean").display().to_string())
+        );
+        let write_answer: serde_json::Value =
+            serde_json::from_str(&messages[4].text).expect("the write answer is JSON");
+        assert_eq!(write_answer["status"], "proposed");
+        assert!(
+            write_answer["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("Nothing has been written"))
+        );
+
+        // Still nothing on disk: the mixed round did not turn the proposal into
+        // a write.
+        let journal = fs::read_to_string(dir.file("main.bean")).expect("the journal is readable");
+        assert!(
+            !journal.contains("Coffee"),
+            "the proposal was not applied:\n{journal}"
+        );
+    }
+
+    #[test]
+    fn ask_without_a_ledger_tells_the_model_the_tools_have_nothing_to_read() {
+        let dir = TempDir::new("api-ask-no-ledger");
+        let config = dir.file("config");
+        fs::create_dir_all(&config).unwrap();
+        let scripted = Scripted::new(vec![
+            calls(vec![crate::ai::ToolCall {
+                id: "call-f".to_string(),
+                name: "files".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            says("No journal is open."),
+        ]);
+
+        let answer =
+            ask_with(&scripted, &config, None, "Which files?").expect("the turn completes");
+        assert_eq!(answer.text, "No journal is open.");
+        let requests = scripted.requests();
+        let tool_answer: serde_json::Value =
+            serde_json::from_str(&requests[1].messages[3].text).expect("the refusal is JSON");
+        assert!(
+            tool_answer["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("no ledger is loaded")),
+            "the model is told why: {tool_answer}"
+        );
     }
 }

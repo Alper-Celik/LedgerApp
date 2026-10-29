@@ -43,6 +43,15 @@ scripts/android-build.sh --apk            # release APK (release is the default)
 which runs `npm run tauri android build` inside `nix develop .#android` (SDK, NDK, JDK 17 and a
 rustc with the Android std targets). No device or emulator is needed to build it.
 
+A release build is unsigned until a keystore is configured:
+
+```sh
+scripts/android-keystore.sh    # writes app/upload.jks + app/keystore.properties (git-ignored)
+```
+
+(or pass `STORE_FILE`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` to the build). Keep that
+keystore: the same key has to sign every update.
+
 ## Command line
 
 `src-tauri` also builds a `ledger` binary over the same backend — no Tauri runtime, no second

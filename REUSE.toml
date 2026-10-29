@@ -11,6 +11,13 @@
 # the Gradle authors' copyright (its own files say so). Re-running
 # `tauri android init` regenerates the tree, which is also why an inline header
 # would be lost.
+#
+# `src/lib/assistant/python/packages` holds the Pyodide wheels the sandbox ships
+# so `pandas` works offline — binary distributions downloaded from the
+# distribution the lockfile in `node_modules/pyodide` names (jsDelivr, version
+# pinned). Pyodide resolves each package by its file name, so the names cannot
+# change and the wheels cannot carry a header of their own. Each annotation's
+# licence is the one that wheel's `METADATA` declares.
 
 version = 1
 
@@ -30,3 +37,33 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2015 the original authors"
 SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "src/lib/assistant/python/packages/pandas-*.whl"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2008-2026, the pandas development team"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "src/lib/assistant/python/packages/numpy-*.whl"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2005-2026, the NumPy Developers"
+SPDX-License-Identifier = "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+
+[[annotations]]
+path = "src/lib/assistant/python/packages/python_dateutil-*.whl"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2017- the dateutil contributors (see the wheel's AUTHORS file)"
+SPDX-License-Identifier = "Apache-2.0 AND BSD-3-Clause"
+
+[[annotations]]
+path = "src/lib/assistant/python/packages/pytz-*.whl"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2003-2019 Stuart Bishop <stuart@stuartbishop.net>"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "src/lib/assistant/python/packages/six-*.whl"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2010-2024 Benjamin Peterson <benjamin@python.org>"
+SPDX-License-Identifier = "MIT"

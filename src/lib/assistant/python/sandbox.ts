@@ -238,9 +238,10 @@ class PythonSandbox {
 
 /**
  * Where the runtime's files are served from: the Vite plugin copies the
- * `pyodide` package's runtime next to the app's assets, under `/pyodide/`.
- * The path is absolute, so `location.href` only supplies scheme and host —
- * which also works under Tauri's custom protocol.
+ * `pyodide` package's runtime, and the vendored wheels under `packages/`, next
+ * to the app's assets, under `/pyodide/`. The path is absolute, so
+ * `location.href` only supplies scheme and host — which also works under
+ * Tauri's custom protocol.
  */
 function pyodideIndexURL(): string {
 	const root = base.endsWith("/") ? base.slice(0, -1) : base;

@@ -192,3 +192,33 @@ test("a commit in the branches screen opens its patch", async ({ page }) => {
 	// Both branches the fixture reports are listed, the current one marked.
 	await expect(page.getByText("main").first()).toBeVisible();
 });
+
+test("the python sandbox boots in the app's origin and runs a script", async ({ page }) => {
+	// The sandbox is exercised directly rather than through a model turn: what
+	// this proves is that Pyodide's assets resolve from the app itself, the
+	// worker runs under this origin, and the `ledger` bridge is reachable.
+	await page.goto("/assistant");
+
+	const run = await page.evaluate(async () => {
+		const sandbox = await import("/src/lib/assistant/python/sandbox.ts");
+		return sandbox.runPython(
+			[
+				"import ledger",
+				"accounts = await ledger.accounts()",
+				"ledger.table('accounts', accounts)",
+				"print('python-ok', len(accounts))",
+			].join("\n"),
+			{ timeoutMs: 120_000, maxOutput: 10_000 },
+			// The bridge answers `{ ok, text }`; text is the JSON the Python side decodes.
+			async () => ({
+				ok: true,
+				text: JSON.stringify([{ name: "Assets:Bank", balance: "1.00", currency: "TRY" }]),
+			})
+		);
+	});
+
+	expect(run.error).toBe("");
+	expect(run.stdout).toContain("python-ok 1");
+	expect(run.tables).toHaveLength(1);
+	expect(run.tables[0].rows[0]).toContain("Assets:Bank");
+});

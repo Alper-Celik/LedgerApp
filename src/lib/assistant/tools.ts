@@ -23,10 +23,18 @@
  * in a worker (see `python/sandbox.ts`), and every `ledger.*` call that script
  * makes arrives back here as an RPC, so a sandboxed figure is read by this
  * same dispatcher and cannot disagree with a tool's.
+ *
+ * The two writes are different in kind. `add_transaction` and `write_file`
+ * validate their arguments into a [`Proposal`] and stop there: the transcript
+ * draws the exact entry or diff and the model is told the change is pending.
+ * Only [`applyProposal`], called from the card's Apply button, runs the write
+ * command — so a model can ask for an edit and never make one.
  */
+import { invalidateAll } from "$app/navigation";
 import { invoke } from "@tauri-apps/api/core";
-import { commands } from "../../bindings";
+import { commands, type NewPosting, type NewTransaction } from "../../bindings";
 import { messageOf } from "../errors.js";
+import { bumpLedgerRevision } from "../ledger-revision.svelte.js";
 import type { PythonRun } from "./artifacts/types.js";
 import { runPython } from "./python/sandbox.js";
 import type { PythonRpcAnswer } from "./python/protocol.js";
@@ -39,6 +47,32 @@ export type DispatchOutcome = {
 	text: string;
 	/** The parsed answer, for the card's row count and details. */
 	result: unknown;
+	/**
+	 * A write the model asked for, staged for the user. Its presence is the
+	 * whole difference: the card renders it and only an explicit click calls
+	 * [`applyProposal`], and the tool answer above tells the model it is pending.
+	 */
+	proposal?: Proposal;
+};
+
+/**
+ * A change the model proposed and the user has not approved.
+ *
+ * It is plain data so it survives in the conversation's stored message: the
+ * card draws it, [`applyProposal`] performs it, and nothing else may. A
+ * transaction appends `entry`; a file write replaces `file` with `after`.
+ */
+export type Proposal = {
+	/** The tool the model called: `add_transaction` or `write_file`. */
+	tool: string;
+	kind: "transaction" | "file";
+	/** The journal file the write targets, as `journal_files` reported it. */
+	file: string;
+	/** The validated entry for a transaction proposal, `null` otherwise. */
+	entry: NewTransaction | null;
+	/** The file's text before and after for a whole-file write, `null` otherwise. */
+	before: string | null;
+	after: string | null;
 };
 
 /**
@@ -70,6 +104,12 @@ const ALIASES: Record<string, string> = {
 	run_query: "query",
 	python: "run_python",
 	run_code: "run_python",
+	add_entry: "add_transaction",
+	new_transaction: "add_transaction",
+	create_transaction: "add_transaction",
+	write_text: "write_file",
+	replace_file: "write_file",
+	update_file: "write_file",
 };
 
 /** The tool names this panel can answer, for the unknown-name error. */
@@ -84,6 +124,8 @@ const NAMES = [
 	"price_targets",
 	"query",
 	"run_python",
+	"add_transaction",
+	"write_file",
 ];
 
 /**
@@ -353,6 +395,14 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 				return runOutcome(await runPython(code, {}, ledgerRpc));
 			}
 
+			case "add_transaction":
+				// A write is never dispatched: it is validated into a proposal the
+				// card renders, and `applyProposal` runs only on a click.
+				return proposed(await transactionProposal(call.name, args));
+
+			case "write_file":
+				return proposed(await fileProposal(call.name, args));
+
 			default:
 				throw new Error(
 					`unknown tool \`${call.name}\`; this panel can run ${NAMES.map((name) => `\`${name}\``).join(", ")}`
@@ -361,6 +411,229 @@ export async function dispatchTool(call: ToolCall): Promise<DispatchOutcome> {
 	} catch (cause) {
 		return failure(messageOf(cause));
 	}
+}
+
+// -- the writes ---------------------------------------------------------------
+
+/**
+ * The sentence every proposal's tool answer repeats to the model.
+ *
+ * A model that reads "proposal" as "done" is the one failure this whole path
+ * exists to prevent, so the answer says it in as many words.
+ */
+const PENDING =
+	"This change is staged as a proposal for the user to approve. Nothing has been written. Do not say or imply that it was applied, and do not repeat the proposal unless the user asks for it again.";
+
+/** `YYYY-MM-DD`, the one date shape the write command accepts. */
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** An exact decimal string, never a float. */
+const DECIMAL = /^-?\d+(?:\.\d+)?$/;
+/** A Beancount account: a capitalized root and at least one colon segment. */
+const ACCOUNT = /^[A-Z][A-Za-z0-9-]*(?::[A-Za-z0-9-]+)+$/;
+/** A commodity symbol, e.g. `USD` or `AAPL`. */
+const CURRENCY = /^[A-Z][A-Z0-9'._-]*$/;
+
+/**
+ * A journal file's canonical path, from the spelling the model used.
+ *
+ * The write commands take a path `journal_files` reported; the model may echo
+ * the label instead, so both are matched and the canonical path is what the
+ * proposal carries. An unknown path is refused here with the files that do
+ * exist — before anything is staged — rather than at apply time.
+ */
+async function knownFile(file: string): Promise<string> {
+	const name = file.trim();
+	if (!name) throw new Error("`file` must name a journal file; call `files` first");
+	const files = await commands.journalFiles();
+	const found =
+		files.find((candidate) => candidate.path === name) ??
+		files.find((candidate) => candidate.label === name);
+	if (!found) {
+		const paths = files.map((candidate) => `\`${candidate.path}\``).join(", ");
+		throw new Error(
+			`\`${name}\` is not a file of this journal; the files are ${paths || "none"}`
+		);
+	}
+	return found.path;
+}
+
+/** One posting's optional string field, blank treated as absent. */
+function postingText(value: unknown, position: number, field: string): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== "string") {
+		throw new Error(`posting ${position}: \`${field}\` must be a string`);
+	}
+	const text = value.trim();
+	return text === "" ? null : text;
+}
+
+/** One posting object, validated field by field. */
+function postingArg(raw: unknown, position: number): NewPosting {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error(`posting ${position} must be an object`);
+	}
+	const posting = raw as Record<string, unknown>;
+	const account = typeof posting.account === "string" ? posting.account.trim() : "";
+	if (!ACCOUNT.test(account)) {
+		throw new Error(`posting ${position}: \`${account || "?"}\` is not an account name`);
+	}
+	const units = postingText(posting.units, position, "units");
+	const currency = postingText(posting.currency, position, "currency");
+	if (units !== null && !DECIMAL.test(units)) {
+		throw new Error(`posting ${position}: \`${units}\` is not an exact decimal amount`);
+	}
+	if (currency !== null && !CURRENCY.test(currency)) {
+		throw new Error(`posting ${position}: \`${currency}\` is not a commodity`);
+	}
+	if (units === null && currency !== null) {
+		throw new Error(`posting ${position}: a currency needs an amount to go with it`);
+	}
+	return { account, units, currency };
+}
+
+/** A transaction proposal's postings, refused whole if any one is wrong. */
+function postingsArg(args: Record<string, unknown>, key: string): NewPosting[] {
+	const value = args[key];
+	if (!Array.isArray(value)) throw new Error(`\`${key}\` must be a list of postings`);
+	return value.map((raw, index) => postingArg(raw, index + 1));
+}
+
+/**
+ * `add_transaction`'s arguments as a proposal, validated before it is shown.
+ *
+ * The validation mirrors what the write command will itself refuse — a real
+ * date shape, a flag beancount reads, an account name, a decimal amount — so a
+ * malformed entry is a sentence the model can correct, not a card the user has
+ * to reject.
+ */
+async function transactionProposal(
+	tool: string,
+	args: Record<string, unknown>
+): Promise<Proposal> {
+	const file = await knownFile(stringArg(args, "file"));
+	const date = stringArg(args, "date").trim();
+	const flag = stringArg(args, "flag").trim();
+	const narration = stringArg(args, "narration").trim();
+	const payee = optionalStringArg(args, "payee")?.trim() ?? "";
+	const postings = postingsArg(args, "postings");
+
+	if (!DATE.test(date)) throw new Error(`\`date\` must be YYYY-MM-DD, not \`${date}\``);
+	if (flag !== "*" && flag !== "!") {
+		throw new Error("`flag` must be `*` (cleared) or `!` (to review)");
+	}
+	if (!narration) throw new Error("`narration` must say what the entry is for");
+	if (postings.length < 2) throw new Error("a transaction needs at least two postings");
+
+	const entry: NewTransaction = {
+		file,
+		date,
+		flag,
+		payee: payee || null,
+		narration,
+		postings,
+	};
+	return { tool, kind: "transaction", file, entry, before: null, after: null };
+}
+
+/**
+ * `write_file`'s arguments as a proposal: the file's current text, read through
+ * the same session the editor uses, and the text the model proposes to put in
+ * its place. The current text is what the card diffs against.
+ */
+async function fileProposal(tool: string, args: Record<string, unknown>): Promise<Proposal> {
+	const file = await knownFile(stringArg(args, "path", "file"));
+	const after = stringArg(args, "text", "content");
+	if (!after.trim()) throw new Error("`text` must be the file's whole new text");
+	const before = await unwrap(commands.fileText(file));
+	if (before === after) {
+		throw new Error(`the proposed text is identical to \`${file}\`, so there is nothing to write`);
+	}
+	return { tool, kind: "file", file, entry: null, before, after };
+}
+
+/**
+ * A proposal as a tool outcome.
+ *
+ * `result` is the card's data (and what the conversation stores, so a reopened
+ * transcript draws the same card); `text` is the model's — compact, and saying
+ * in as many words that nothing was written. `ok` is true because validating
+ * and staging succeeded: the proposal is pending, not an error.
+ */
+function proposed(proposal: Proposal): DispatchOutcome {
+	const result = { status: "proposed", ...proposal, note: PENDING };
+	const text =
+		proposal.kind === "transaction"
+			? JSON.stringify({
+					status: "proposed",
+					tool: proposal.tool,
+					file: proposal.file,
+					entry: proposal.entry,
+					note: PENDING,
+				})
+			: JSON.stringify({
+					status: "proposed",
+					tool: proposal.tool,
+					file: proposal.file,
+					lines: (proposal.after ?? "").split("\n").length,
+					note: PENDING,
+				});
+	return { ok: true, result, text, proposal };
+}
+
+/**
+ * The proposal a stored tool answer carries, for a transcript reopened from the
+ * ledger. `null` for any other answer, including a refusal.
+ */
+export function proposalOf(result: unknown): Proposal | null {
+	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+	const record = result as Record<string, unknown>;
+	if (record.status !== "proposed") return null;
+	const kind = record.kind;
+	if (kind !== "transaction" && kind !== "file") return null;
+	if (typeof record.tool !== "string" || typeof record.file !== "string") return null;
+
+	if (kind === "transaction") {
+		const entry = record.entry;
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+		return {
+			tool: record.tool,
+			kind,
+			file: record.file,
+			entry: entry as NewTransaction,
+			before: null,
+			after: null,
+		};
+	}
+	if (typeof record.before !== "string" || typeof record.after !== "string") return null;
+	return {
+		tool: record.tool,
+		kind,
+		file: record.file,
+		entry: null,
+		before: record.before,
+		after: record.after,
+	};
+}
+
+/**
+ * Perform a proposal the user approved — the only place a proposal becomes a
+ * write.
+ *
+ * The command is the app's own (`add_transaction` / `update_file_text`), so the
+ * ledger is reloaded, validated and staged exactly as an edit from the register
+ * is; a refusal rejects with the backend's message, which the card shows
+ * verbatim. On success every surface reading the ledger is told.
+ */
+export async function applyProposal(proposal: Proposal): Promise<void> {
+	if (proposal.kind === "transaction") {
+		if (!proposal.entry) throw new Error("this proposal has no entry to write");
+		await unwrap(commands.addTransaction(proposal.entry));
+	} else {
+		if (proposal.after === null) throw new Error("this proposal has no text to write");
+		await unwrap(commands.updateFileText(proposal.file, proposal.after));
+	}
+	bumpLedgerRevision();
+	await invalidateAll();
 }
 
 /**

@@ -107,7 +107,8 @@ enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
-    /// Ask the assistant one question: one model call, no streaming.
+    /// Ask the assistant: it may run the app's read tools itself, and a write it
+    /// wants is printed as a proposal, never applied.
     Ask {
         /// The question, as one argument.
         prompt: String,
@@ -845,7 +846,18 @@ fn series_answer(cli: &Cli, series: &api::IndexSeries) -> Result<u8, CliError> {
 
 fn ask(cli: &Cli, prompt: &str) -> Result<u8, CliError> {
     let config = config_dir(cli);
-    let answer = api::ask(&config, prompt)?;
+    // The assistant's read tools answer from the same opened ledger every other
+    // command uses. A journal that cannot be loaded is not fatal to the
+    // question: the model is told the tools have nothing to read, and the
+    // reason is on stderr so the asker knows why a figure is missing.
+    let opened = match api::open(&ledger_path(cli)) {
+        Ok(opened) => Some(opened),
+        Err(error) => {
+            eprintln!("ledger: the journal could not be opened for the assistant's tools: {error}");
+            None
+        }
+    };
+    let answer = api::ask(&config, opened.as_ref(), prompt)?;
     if cli.json {
         return emit_json(&answer);
     }
@@ -860,15 +872,32 @@ fn ask(cli: &Cli, prompt: &str) -> Result<u8, CliError> {
             }
         })?;
     }
-    // One call is one call: the tools the model asked for are printed, not run.
+    // Reads ran; a write did not. It is a proposal for the user, printed with
+    // the exact arguments the model produced, and nothing on disk has changed.
     for call in &answer.tool_calls {
+        let arguments = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            Ok(value) => {
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| call.arguments.clone())
+            }
+            Err(_) => call.arguments.clone(),
+        };
+        eprintln!("ledger: proposed `{}` (not applied):", call.name);
+        for line in arguments.lines() {
+            eprintln!("  {line}");
+        }
+    }
+    if !answer.tool_calls.is_empty() {
+        eprintln!("ledger: nothing was written; review and apply the proposal in the app.");
+    }
+    if answer.truncated {
         eprintln!(
-            "ledger: the model asked for the tool {} with {}",
-            call.name, call.arguments
+            "ledger: stopped after {} tool rounds; ask again to continue.",
+            api::ASK_ROUNDS
         );
     }
     if let Some(reason) = &answer.finish_reason
         && reason != "stop"
+        && reason != "tool_calls"
     {
         eprintln!("ledger: the model stopped because of `{reason}`");
     }

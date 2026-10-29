@@ -45,7 +45,13 @@ import {
 	type ToolSchema,
 } from "./api.js";
 import { mediaPartsOf, visionOf, type Attachment } from "./media.js";
-import { dispatchTool, offeredTools } from "./tools.js";
+import {
+	applyProposal as writeProposal,
+	dispatchTool,
+	offeredTools,
+	proposalOf,
+	type Proposal,
+} from "./tools.js";
 
 /** How many tool rounds one turn may run before the panel stops. */
 export const MAX_ROUNDS = 6;
@@ -54,7 +60,19 @@ export const MAX_ROUNDS = 6;
 export type Entry =
 	| { kind: "user"; text: string }
 	| { kind: "assistant"; text: string }
-	| { kind: "tool"; name: string; result: unknown; text: string; ok: boolean };
+	| { kind: "tool"; name: string; result: unknown; text: string; ok: boolean }
+	/**
+	 * A write the model proposed. It stays `pending` — and nothing is written —
+	 * until the user clicks Apply; Reject drops the card. `expired` is a
+	 * proposal restored from an older conversation, which is not applied because
+	 * the file may have changed since.
+	 */
+	| {
+			kind: "proposal";
+			proposal: Proposal;
+			status: "pending" | "applied" | "failed" | "expired";
+			error: string;
+	  };
 
 export class Assistant {
 	settings = $state<AiSettings | null>(null);
@@ -382,7 +400,10 @@ export class Assistant {
 			// fragment has somewhere to go; a round that ends without prose takes
 			// it away again.
 			this.entries.push({ kind: "assistant", text: "" });
+			// The bubble is read back from the array so this is the proxy the
+			// transcript draws, not a copy: streaming mutates what renders.
 			const entry = this.entries[this.entries.length - 1];
+			if (entry.kind !== "assistant") return;
 
 			let response: ChatResponse;
 			try {
@@ -446,15 +467,26 @@ export class Assistant {
 			}
 
 			for (const call of calls) {
-				this.busyNote = `Running \`${call.name}\`…`;
+				this.busyNote = `Calling \`${call.name}\`…`;
 				const outcome = await dispatchTool(call);
-				this.entries.push({
-					kind: "tool",
-					name: call.name,
-					result: outcome.result,
-					text: outcome.text,
-					ok: outcome.ok,
-				});
+				// A write is drawn as a proposal, never as a finished tool result:
+				// the card is the only place it becomes a write, and only on a click.
+				if (outcome.proposal) {
+					this.entries.push({
+						kind: "proposal",
+						proposal: outcome.proposal,
+						status: "pending",
+						error: "",
+					});
+				} else {
+					this.entries.push({
+						kind: "tool",
+						name: call.name,
+						result: outcome.result,
+						text: outcome.text,
+						ok: outcome.ok,
+					});
+				}
 				this.wire.push({
 					role: "tool",
 					text: outcome.text,
@@ -475,6 +507,42 @@ export class Assistant {
 		}
 
 		this.notice = `Stopped after ${MAX_ROUNDS} tool rounds; send another message to continue.`;
+	}
+
+	/**
+	 * Apply a proposal the user approved.
+	 *
+	 * The click is the consent: this is the one path from a proposal to a
+	 * write. The command is the app's own, so a refusal (an entry that does not
+	 * balance, a file the ledger will not reload) lands on the card in the
+	 * backend's own words and the card stays for a retry.
+	 */
+	async approveProposal(entry: Extract<Entry, { kind: "proposal" }>): Promise<void> {
+		if (this.busy || (entry.status !== "pending" && entry.status !== "failed")) return;
+		this.busy = true;
+		this.busyNote = `Writing \`${entry.proposal.file}\`…`;
+		this.chatError = "";
+		this.notice = "";
+		try {
+			await writeProposal(entry.proposal);
+			entry.status = "applied";
+			entry.error = "";
+			this.notice = `Wrote ${
+				entry.proposal.kind === "transaction" ? "the entry" : "the file"
+			} to ${entry.proposal.file}.`;
+		} catch (cause) {
+			entry.status = "failed";
+			entry.error = messageOf(cause);
+		} finally {
+			this.busy = false;
+			this.busyNote = "";
+		}
+	}
+
+	/** Drop a proposal the user rejected. Nothing is written. */
+	rejectProposal(entry: Extract<Entry, { kind: "proposal" }>): void {
+		if (entry.status !== "pending" && entry.status !== "failed") return;
+		this.dropEntry(entry);
 	}
 
 	/** Remove a placeholder bubble a turn never filled. */
@@ -553,13 +621,26 @@ export class Assistant {
 				}
 			} else {
 				const stored = readToolMessage(message);
-				this.entries.push({
-					kind: "tool",
-					name: stored.call.name,
-					result: stored.result,
-					text: message.text,
-					ok: stored.ok,
-				});
+				const proposal = proposalOf(stored.result);
+				if (proposal) {
+					// A proposal outlives the panel but not its moment: the file may
+					// have changed since, so it is shown with what it would have
+					// written and left for a fresh request to stage again.
+					this.entries.push({
+						kind: "proposal",
+						proposal,
+						status: "expired",
+						error: "",
+					});
+				} else {
+					this.entries.push({
+						kind: "tool",
+						name: stored.call.name,
+						result: stored.result,
+						text: message.text,
+						ok: stored.ok,
+					});
+				}
 				if (stored.call.id) {
 					this.wire.push({
 						role: "assistant",
@@ -606,7 +687,7 @@ function userWire(text: string): ChatMessage {
  */
 function systemWire(hasTools: boolean, base = ""): ChatMessage {
 	const ledger = hasTools
-		? "Use the provided read-only tools for every ledger fact. Every amount, date, account and transaction must come from a tool result."
+		? "Use the provided tools for every ledger fact. Every amount, date, account and transaction must come from a tool result. To change the books, call add_transaction or write_file: that only stages a proposal the user approves, so never say a change was applied."
 		: "No ledger tools are available in this session, so say plainly that you cannot read the ledger instead of guessing any figure.";
 	return {
 		role: "system",
