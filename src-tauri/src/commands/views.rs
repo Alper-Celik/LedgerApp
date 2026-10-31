@@ -12,7 +12,7 @@ use tauri::{Manager, State};
 use crate::AppRuntime;
 use crate::accounts::{account_balances, account_transaction_views, modified_accounts};
 use crate::budget::{BudgetRange, budget_view};
-use crate::budget_write::{self, BudgetSettings};
+use crate::budget_write::{self, BudgetConfig, BudgetPluginStatus, BudgetSettings};
 use crate::dashboards::{self, Dashboard};
 use crate::editing::{
     create_transaction, edit_file_source, edit_named_file_source, edit_transaction,
@@ -200,8 +200,9 @@ pub fn add_transaction(entry: NewTransaction, state: State<'_, AppState>) -> Res
 /// in the ledger's operating currency; see [`BudgetMonth`] for what each one
 /// means. The figures stay read-only because the plugin computes them on every
 /// load; what the screen writes instead is the configuration behind them —
-/// [`budget_settings`], [`budget_init`], [`budget_fund_set`] and
-/// [`budget_rollover_set`].
+/// [`budget_settings`], [`budget_init`], [`budget_config_set`],
+/// [`budget_fund_set`], [`budget_rollover_set`] and the plugin's own
+/// [`budget_plugin_status`]/[`budget_plugin_enable`].
 #[tauri::command]
 #[specta::specta]
 pub fn budget(month: Option<String>, state: State<'_, AppState>) -> Result<BudgetMonth, String> {
@@ -246,8 +247,11 @@ pub fn budget_settings(state: State<'_, AppState>) -> Result<BudgetSettings, Str
 ///
 /// The write goes through the loader-verified edit pipeline, so an invalid
 /// pattern is refused by the plugin and the file is put back byte-for-byte.
-/// `plugin_declared` on [`budget_settings`] is the form's warning that the
-/// journal does not load an envelope plugin yet; it is not a precondition.
+/// When the journal does not declare the envelope plugin yet, the `plugin`
+/// line is written in the same commit (into the root journal, in a second call
+/// when the block goes into an included file). A missing
+/// `rustledger_envelope.wasm` is refused before anything is written, with the
+/// path to put it at.
 #[tauri::command]
 #[specta::specta]
 pub fn budget_init(
@@ -319,6 +323,127 @@ pub fn budget_rollover_set(
         currency.as_deref(),
         &month,
     )
+}
+
+/// Replace the journal's existing budget configuration — the editor's way to
+/// change a budget that was already set up, rather than adding a second one.
+///
+/// The block holding `start date` is rewritten, in whichever journal file it
+/// lives: the returned [`BudgetConfig::file`] is that file, which need not be
+/// `file`. Every directive that is part of the configuration (`start date`,
+/// `end date`, `months ahead`, `budget account`, `assert`, `strict`) is
+/// replaced, so a key the new configuration does not use loses its line; every
+/// other envelope directive (`fund`, `rollover`, `adjust`, …) is left byte for
+/// byte where it stood. An `end date` and `months ahead` cannot be asked for
+/// together — the plugin rejects both — and a journal with no `start date` yet
+/// is refused with a pointer to [`budget_init`]. A journal that has the block
+/// but no `plugin` line gets one in the same write, so a legacy configuration
+/// is repaired by the edit; a missing `rustledger_envelope.wasm` is refused
+/// before anything is written.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_config_set(
+    file: String,
+    start: String,
+    months_ahead: Option<u32>,
+    end: Option<String>,
+    budget_accounts: Vec<String>,
+    r#assert: bool,
+    strict: bool,
+    state: State<'_, AppState>,
+) -> Result<BudgetConfig, String> {
+    budget_write::config_set(
+        &state,
+        &file,
+        &start,
+        months_ahead,
+        end.as_deref(),
+        &budget_accounts,
+        r#assert,
+        strict,
+    )
+}
+
+/// Whether the journal declares the envelope plugin, where the declaration
+/// lives, and the candidate locations of `rustledger_envelope.wasm` beside the
+/// journal — the budget screen's "the plugin is off" notice and the path it
+/// names. No ledger loaded answers an empty status.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_plugin_status(state: State<'_, AppState>) -> BudgetPluginStatus {
+    budget_write::plugin_status(&state)
+}
+
+/// Declare the envelope plugin in the root journal, if it is not declared
+/// already and its `.wasm` exists in one of the candidates
+/// [`budget_plugin_status`] names.
+///
+/// Already declared: the status comes back and nothing is written. Not there:
+/// the error names the absolute path to put the file at, because declaring a
+/// plugin that does not exist makes the loader fail and the write would be
+/// rolled back. The declaration joins the journal's other `plugin`/`option`
+/// lines.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_plugin_enable(state: State<'_, AppState>) -> Result<BudgetPluginStatus, String> {
+    budget_write::plugin_enable(&state)
+}
+
+/// The reader's own `rustledger_envelope.wasm`, chosen with the desktop file
+/// chooser — the release asset they downloaded. `None` when they cancel. A
+/// phone has no chooser here (the ledger is a SAF tree), so it answers `None`
+/// as well and [`budget_plugin_install`] explains what to do instead.
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_plugin_file(app: tauri::AppHandle<AppRuntime>) -> Option<String> {
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+
+        // The chooser is modal and blocks its thread, so it gets a worker of
+        // its own — the same rule `pick_ledger_folder` follows.
+        let chosen = tauri::async_runtime::spawn_blocking(move || {
+            app.dialog()
+                .file()
+                .set_title("Choose rustledger_envelope.wasm")
+                .add_filter("WebAssembly", &["wasm"])
+                .blocking_pick_file()
+        })
+        .await
+        .ok()?;
+
+        chosen
+            .and_then(|file| file.into_path().ok())
+            .map(|file| file.to_string_lossy().into_owned())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        let _ = app;
+        None
+    }
+}
+
+/// Copy a chosen `rustledger_envelope.wasm` beside the file that declares the
+/// plugin and, when a configuration already exists, declare it.
+///
+/// The source must start with the WebAssembly magic (`\0asm`); the target is
+/// the first path [`budget_plugin_status`] names — the declaring file's
+/// directory, which is the root journal's before a declaration exists. A file
+/// already there is kept when it is byte-identical and never overwritten when
+/// it is a different plugin. Everything is checked before the first write, so
+/// a failed install leaves the ledger untouched; with a configuration present
+/// the returned status is the same [`budget_plugin_enable`] would give. With
+/// no configuration the file is copied but not declared: the plugin would
+/// report a missing `start date`, and the next configuration write adds the
+/// line with the block.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_plugin_install(
+    source: String,
+    state: State<'_, AppState>,
+) -> Result<BudgetPluginStatus, String> {
+    budget_write::plugin_install(&state, &source)
 }
 
 /// Where dashboards live: the app's own config directory, never the ledger.

@@ -179,8 +179,9 @@ export const commands = {
 	 *  in the ledger's operating currency; see [`BudgetMonth`] for what each one
 	 *  means. The figures stay read-only because the plugin computes them on every
 	 *  load; what the screen writes instead is the configuration behind them —
-	 *  [`budget_settings`], [`budget_init`], [`budget_fund_set`] and
-	 *  [`budget_rollover_set`].
+	 *  [`budget_settings`], [`budget_init`], [`budget_config_set`],
+	 *  [`budget_fund_set`], [`budget_rollover_set`] and the plugin's own
+	 *  [`budget_plugin_status`]/[`budget_plugin_enable`].
 	 */
 	budget: (month: string | null) => typedError<BudgetMonth, string>(__TAURI_INVOKE("budget", { month })),
 	/**
@@ -212,8 +213,11 @@ export const commands = {
 	 * 
 	 *  The write goes through the loader-verified edit pipeline, so an invalid
 	 *  pattern is refused by the plugin and the file is put back byte-for-byte.
-	 *  `plugin_declared` on [`budget_settings`] is the form's warning that the
-	 *  journal does not load an envelope plugin yet; it is not a precondition.
+	 *  When the journal does not declare the envelope plugin yet, the `plugin`
+	 *  line is written in the same commit (into the root journal, in a second call
+	 *  when the block goes into an included file). A missing
+	 *  `rustledger_envelope.wasm` is refused before anything is written, with the
+	 *  path to put it at.
 	 */
 	budgetInit: (file: string, start: string, monthsAhead: number | null, end: string | null, budgetAccounts: string[], assert: boolean, strict: boolean) => typedError<null, string>(__TAURI_INVOKE("budget_init", { file, start, monthsAhead, end, budgetAccounts, assert, strict })),
 	/**
@@ -236,6 +240,66 @@ export const commands = {
 	 *  and a cap without both `units` and `currency` is refused.
 	 */
 	budgetRolloverSet: (file: string, account: string, kind: string, units: string | null, currency: string | null, month: string) => typedError<null, string>(__TAURI_INVOKE("budget_rollover_set", { file, account, kind, units, currency, month })),
+	/**
+	 *  Replace the journal's existing budget configuration — the editor's way to
+	 *  change a budget that was already set up, rather than adding a second one.
+	 * 
+	 *  The block holding `start date` is rewritten, in whichever journal file it
+	 *  lives: the returned [`BudgetConfig::file`] is that file, which need not be
+	 *  `file`. Every directive that is part of the configuration (`start date`,
+	 *  `end date`, `months ahead`, `budget account`, `assert`, `strict`) is
+	 *  replaced, so a key the new configuration does not use loses its line; every
+	 *  other envelope directive (`fund`, `rollover`, `adjust`, …) is left byte for
+	 *  byte where it stood. An `end date` and `months ahead` cannot be asked for
+	 *  together — the plugin rejects both — and a journal with no `start date` yet
+	 *  is refused with a pointer to [`budget_init`]. A journal that has the block
+	 *  but no `plugin` line gets one in the same write, so a legacy configuration
+	 *  is repaired by the edit; a missing `rustledger_envelope.wasm` is refused
+	 *  before anything is written.
+	 */
+	budgetConfigSet: (file: string, start: string, monthsAhead: number | null, end: string | null, budgetAccounts: string[], assert: boolean, strict: boolean) => typedError<BudgetConfig, string>(__TAURI_INVOKE("budget_config_set", { file, start, monthsAhead, end, budgetAccounts, assert, strict })),
+	/**
+	 *  Whether the journal declares the envelope plugin, where the declaration
+	 *  lives, and the candidate locations of `rustledger_envelope.wasm` beside the
+	 *  journal — the budget screen's "the plugin is off" notice and the path it
+	 *  names. No ledger loaded answers an empty status.
+	 */
+	budgetPluginStatus: () => __TAURI_INVOKE<BudgetPluginStatus>("budget_plugin_status"),
+	/**
+	 *  Declare the envelope plugin in the root journal, if it is not declared
+	 *  already and its `.wasm` exists in one of the candidates
+	 *  [`budget_plugin_status`] names.
+	 * 
+	 *  Already declared: the status comes back and nothing is written. Not there:
+	 *  the error names the absolute path to put the file at, because declaring a
+	 *  plugin that does not exist makes the loader fail and the write would be
+	 *  rolled back. The declaration joins the journal's other `plugin`/`option`
+	 *  lines.
+	 */
+	budgetPluginEnable: () => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_enable")),
+	/**
+	 *  The reader's own `rustledger_envelope.wasm`, chosen with the desktop file
+	 *  chooser — the release asset they downloaded. `None` when they cancel. A
+	 *  phone has no chooser here (the ledger is a SAF tree), so it answers `None`
+	 *  as well and [`budget_plugin_install`] explains what to do instead.
+	 */
+	pickPluginFile: () => __TAURI_INVOKE<string | null>("pick_plugin_file"),
+	/**
+	 *  Copy a chosen `rustledger_envelope.wasm` beside the file that declares the
+	 *  plugin and, when a configuration already exists, declare it.
+	 * 
+	 *  The source must start with the WebAssembly magic (`\0asm`); the target is
+	 *  the first path [`budget_plugin_status`] names — the declaring file's
+	 *  directory, which is the root journal's before a declaration exists. A file
+	 *  already there is kept when it is byte-identical and never overwritten when
+	 *  it is a different plugin. Everything is checked before the first write, so
+	 *  a failed install leaves the ledger untouched; with a configuration present
+	 *  the returned status is the same [`budget_plugin_enable`] would give. With
+	 *  no configuration the file is copied but not declared: the plugin would
+	 *  report a missing `start date`, and the next configuration write adds the
+	 *  line with the block.
+	 */
+	budgetPluginInstall: (source: string) => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_install", { source })),
 	/**
 	 *  Every saved dashboard, oldest id order as stored; a first run answers with
 	 *  the six seeded defaults (and writes nothing until one is saved).
@@ -722,6 +786,23 @@ export type BudgetMonth = {
 };
 
 /**
+ *  Whether the journal declares the envelope plugin, and where its `.wasm`
+ *  could live.
+ */
+export type BudgetPluginStatus = {
+	/**  A `plugin` directive names the envelope module. */
+	declared: boolean,
+	/**  The loaded path of the file that declares it, when one does. */
+	file: string | null,
+	/**
+	 *  The candidate locations for `rustledger_envelope.wasm`: the declaring
+	 *  file's directory first, then the root journal's. Empty when no ledger
+	 *  is loaded.
+	 */
+	wasm: PluginWasm[],
+};
+
+/**
  *  Several consecutive months of the ledger's envelope budget.
  * 
  *  The single-month [`BudgetMonth`] is the screen's *one* page; this is the
@@ -788,7 +869,8 @@ export type BudgetRangeMonth = {
 export type BudgetSettings = {
 	/**
 	 *  The journal declares an envelope plugin (`plugin "…envelope…wasm"`).
-	 *  The init form warns when this is false; the commands still write.
+	 *  A configuration write adds the line itself when its module is present;
+	 *  this field is what the screen's notice and repair controls read.
 	 */
 	plugin_declared: boolean,
 	/**  The parsed configuration, or `None` when no `start date` exists. */
@@ -1654,6 +1736,14 @@ export type PdfPage = {
 	height: number,
 	/**  The page as PNG bytes, 8-bit RGB. */
 	png: number[],
+};
+
+/**  One place the envelope plugin's `.wasm` could sit. */
+export type PluginWasm = {
+	/**  Absolute path of the candidate plugin file. */
+	path: string,
+	/**  Whether a file exists at [`PluginWasm::path`]. */
+	present: boolean,
 };
 
 /**

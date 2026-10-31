@@ -471,6 +471,14 @@ export async function stubIpc(page: Page) {
 			let opened = false;
 			/** Whether `budget_init` has run: the setup spec starts before it, everything else after. */
 			let budgetConfigured = false;
+			/** The envelope plugin's declaration and its module, as the budget screen reads them. */
+			let pluginDeclared = !window.location.search.includes("budget_no_plugin=1");
+			let pluginWasmPresent = !window.location.search.includes("budget_wasm_missing=1");
+			const pluginStatus = () => ({
+				declared: pluginDeclared,
+				file: pluginDeclared ? "/ledger/main.bean" : null,
+				wasm: [{ path: "/ledger/rustledger_envelope.wasm", present: pluginWasmPresent }],
+			});
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
 					log.push({ cmd, args });
@@ -568,19 +576,71 @@ export async function stubIpc(page: Page) {
 							const base = setupPending
 								? fixtures.budgetSettings
 								: fixtures.budgetSettingsConfigured;
-							return Promise.resolve({
-								...base,
-								plugin_declared: !window.location.search.includes("budget_no_plugin=1"),
-							});
+							return Promise.resolve({ ...base, plugin_declared: pluginDeclared });
 						}
+						case "budget_plugin_status":
+							return Promise.resolve(pluginStatus());
+						case "budget_plugin_enable":
+							if (!pluginWasmPresent) {
+								return Promise.reject(
+									"the envelope plugin is not declared and its file is missing: put rustledger_envelope.wasm at /ledger/rustledger_envelope.wasm first, or install a downloaded copy from the budget screen. A plugin path that does not point at a file makes the loader fail, so nothing was written"
+								);
+							}
+							pluginDeclared = true;
+							return Promise.resolve(pluginStatus());
+						case "pick_plugin_file":
+							return Promise.resolve(
+								window.location.search.includes("plugin_source=1")
+									? "/home/reader/Downloads/rustledger_envelope.wasm"
+									: null
+							);
+						case "budget_plugin_install":
+							if (window.location.search.includes("budget_fail=install")) {
+								return Promise.reject("that file is not a WebAssembly module");
+							}
+							pluginWasmPresent = true;
+							// A bare journal gains the module but not the declaration: the
+							// next configuration write adds the line with the block.
+							pluginDeclared = budgetConfigured;
+							return Promise.resolve(pluginStatus());
 						case "budget_init":
 							if (window.location.search.includes("budget_fail=init")) {
 								return Promise.reject(
 									"the ledger already declares a budget `start date`; edit that directive instead"
 								);
 							}
+							if (!pluginDeclared && !pluginWasmPresent) {
+								return Promise.reject(
+									"the envelope plugin is not declared and its file is missing: put rustledger_envelope.wasm at /ledger/rustledger_envelope.wasm first, or install a downloaded copy from the budget screen. A plugin path that does not point at a file makes the loader fail, so nothing was written"
+								);
+							}
 							budgetConfigured = true;
+							pluginDeclared = true;
 							return Promise.resolve(null);
+						case "budget_config_set": {
+							const changed = args as {
+								start: string;
+								monthsAhead: number | null;
+								end: string | null;
+								budgetAccounts: string[];
+								assert: boolean;
+								strict: boolean;
+							};
+							if (window.location.search.includes("budget_fail=config")) {
+								return Promise.reject("`months ahead` and `end date` cannot both be set");
+							}
+							budgetConfigured = true;
+							pluginDeclared = true;
+							return Promise.resolve({
+								file: "/ledger/main.bean",
+								start: changed.start,
+								end: changed.end,
+								months_ahead: changed.monthsAhead,
+								budget_accounts: changed.budgetAccounts,
+								assert: changed.assert,
+								strict: changed.strict,
+							});
+						}
 						case "budget_fund_set":
 							if (window.location.search.includes("budget_fail=fund")) {
 								return Promise.reject(
