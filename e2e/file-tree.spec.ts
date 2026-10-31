@@ -9,12 +9,18 @@ test.beforeEach(async ({ page }) => {
 	await stubIpc(page);
 });
 
-/** The sidebar's own tree, which every page carries. */
+/** The sidebar's own tree, which every page carries behind the Files tab. */
 const sidebarTree = (page: Page) =>
 	page.locator('[data-slot="sidebar"] [data-slot="file-tree"]');
 
+/** The sidebar opens on Accounts, so reaching the tree means choosing Files. */
+async function showFiles(page: Page) {
+	await page.locator('[data-slot="sidebar"]').getByRole("tab", { name: "Files" }).click();
+}
+
 test("the sidebar draws the journal's files as folders and leaves", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
+	await showFiles(page);
 	const tree = sidebarTree(page);
 
 	// The tree is rooted at the folder every file shares (`/ledger` in the stub),
@@ -59,6 +65,7 @@ test("the sidebar draws the journal's files as folders and leaves", async ({ pag
 
 test("a folder can be reached with the keyboard and toggled from it", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
+	await showFiles(page);
 	const tree = sidebarTree(page);
 	const toggle = tree.locator('[data-path="/ledger/accounts"]').getByRole("button");
 
@@ -78,6 +85,7 @@ test("clicking a leaf opens that file's screen, and the sidebar marks it current
 	page,
 }) => {
 	await page.goto("/account/Assets:Bank");
+	await showFiles(page);
 	const leaf = sidebarTree(page)
 		.locator('[data-path="/ledger/accounts/2026.bean"]')
 		.getByRole("link");
@@ -109,6 +117,7 @@ test("clicking a leaf opens that file's screen, and the sidebar marks it current
 
 test("the files screen carries the same tree at full width", async ({ page }) => {
 	await page.goto("/account/Assets:Bank");
+	await showFiles(page);
 
 	// The section's label is the way in.
 	await page
