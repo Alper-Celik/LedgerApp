@@ -110,6 +110,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         budget_plugin_enable,
         pick_plugin_file,
         budget_plugin_install,
+        budget_plugin_install_bundled,
         dashboards,
         save_dashboard,
         delete_dashboard,

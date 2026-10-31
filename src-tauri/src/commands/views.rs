@@ -446,6 +446,22 @@ pub fn budget_plugin_install(
     budget_write::plugin_install(&state, &source)
 }
 
+/// Install the envelope plugin the app carries, beside the journal.
+///
+/// The copy is the release build the app ships (`assets/rustledger_envelope.wasm`),
+/// so this is the install for a reader who has nothing to download: it lands in
+/// the same place [`budget_plugin_install`] writes, obeys the same overwrite
+/// rule, and declares the plugin when the journal already configures the budget.
+/// A phone refuses for the same reason the download does — a file written into
+/// the SAF mirror would not reach the storage tree.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_plugin_install_bundled(
+    state: State<'_, AppState>,
+) -> Result<BudgetPluginStatus, String> {
+    budget_write::plugin_install_bundled(&state)
+}
+
 /// Where dashboards live: the app's own config directory, never the ledger.
 ///
 /// A dashboard is a view over the ledger, not ledger data: keeping it out of the

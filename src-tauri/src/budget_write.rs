@@ -623,19 +623,26 @@ pub(crate) fn plugin_enable(state: &AppState) -> Result<BudgetPluginStatus, Stri
     Ok(plugin_status(state))
 }
 
+/// The envelope plugin the app carries: the release build of
+/// `plugins/rustledger-envelope`, committed under `src-tauri/assets` (see the
+/// sidecar license there for the build line). It is what lets a reader who
+/// downloaded nothing still put a matching module beside the journal.
+#[cfg(not(target_os = "android"))]
+const BUNDLED_PLUGIN: &[u8] = include_bytes!("../assets/rustledger_envelope.wasm");
+
 /// Install the reader's own copy of the plugin beside the file that declares
 /// it and, when the journal already has a configuration, declare it.
 ///
 /// The source is whatever the file chooser handed back — normally the release
 /// asset the reader downloaded. It is read and checked for the WebAssembly
 /// magic before anything is written; the target is the first candidate
-/// [`plugin_status`] names, which is the declaring file's directory and, with
-/// no declaration yet, the root journal's. A file already there is kept when
-/// it is byte-identical and never overwritten when it is a different plugin: a
-/// ledger already using an envelope module must not see it change under a
-/// stray download. Anything that cannot succeed — an unreadable source, the
-/// wrong bytes, a missing target directory — is refused before the first
-/// write, so a failed install leaves the ledger untouched.
+/// [`plugin_status`] names, which is the root journal's directory and, with no
+/// declaration yet, the same place. A file already there is kept when it is
+/// byte-identical and never overwritten when it is a different plugin: a ledger
+/// already using an envelope module must not see it change under a stray
+/// download. Anything that cannot succeed — an unreadable source, the wrong
+/// bytes, a missing target directory — is refused before the first write, so a
+/// failed install leaves the ledger untouched.
 ///
 /// With no configuration in the journal the file is copied but the `plugin`
 /// line is not written: the plugin reports a missing `start date` on the next
@@ -645,60 +652,92 @@ pub(crate) fn plugin_install(state: &AppState, source: &str) -> Result<BudgetPlu
     #[cfg(target_os = "android")]
     {
         let _ = (state, source);
-        return Err(
-            "installing the envelope plugin is not available on Android: the ledger is a mirror of a storage tree, so copy rustledger_envelope.wasm into the ledger folder itself with the system file manager and sync it; a file the app chose from its own storage would not reach the ledger"
-                .to_string(),
-        );
+        return Err(android_install_refusal());
     }
 
     #[cfg(not(target_os = "android"))]
     {
-        let (target, configured) = {
-            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
-            let loaded = guard.as_ref().ok_or("no ledger loaded")?;
-            let root = root_journal(&loaded.ledger)?;
-            let status = plugin_status_of(&loaded.ledger, &root.path);
-            let target = status
-                .wasm
-                .first()
-                .map(|wasm| PathBuf::from(&wasm.path))
-                .ok_or_else(|| {
-                    format!(
-                        "{} has no directory; the plugin cannot be installed beside it",
-                        root.path.display()
-                    )
-                })?;
-            let directory = target.parent().unwrap_or_else(|| Path::new("."));
-            if !directory.is_dir() {
-                return Err(format!(
-                    "{} is not a directory; the plugin cannot be installed beside the journal",
-                    directory.display()
-                ));
-            }
-            (target, configuration_block(&loaded.ledger).is_some())
-        };
-
         let bytes = std::fs::read(source).map_err(|error| format!("{source}: {error}"))?;
-        if !bytes.starts_with(b"\0asm") {
-            return Err(not_a_wasm_module(source, &bytes));
+        install_module(state, &bytes, source)
+    }
+}
+
+/// Install the copy the app carries ([`BUNDLED_PLUGIN`]): the same rules and the
+/// same result as [`plugin_install`], with nothing to download and no file to
+/// choose.
+pub(crate) fn plugin_install_bundled(state: &AppState) -> Result<BudgetPluginStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = state;
+        return Err(android_install_refusal());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        install_module(state, BUNDLED_PLUGIN, "the plugin bundled with the app")
+    }
+}
+
+/// The Android answer for both install entry points: the ledger there is a
+/// mirror of a storage tree, and a file written beside it would not reach the
+/// tree.
+#[cfg(target_os = "android")]
+fn android_install_refusal() -> String {
+    "installing the envelope plugin is not available on Android: the ledger is a mirror of a storage tree, so copy rustledger_envelope.wasm into the ledger folder itself with the system file manager and sync it; a file the app chose from its own storage would not reach the ledger".to_string()
+}
+
+/// Put `bytes` beside the journal and, when the journal already configures the
+/// budget, declare it. `origin` names the source in a refusal.
+#[cfg(not(target_os = "android"))]
+fn install_module(
+    state: &AppState,
+    bytes: &[u8],
+    origin: &str,
+) -> Result<BudgetPluginStatus, String> {
+    let (target, configured) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let root = root_journal(&loaded.ledger)?;
+        let status = plugin_status_of(&loaded.ledger, &root.path);
+        let target = status
+            .wasm
+            .first()
+            .map(|wasm| PathBuf::from(&wasm.path))
+            .ok_or_else(|| {
+                format!(
+                    "{} has no directory; the plugin cannot be installed beside it",
+                    root.path.display()
+                )
+            })?;
+        let directory = target.parent().unwrap_or_else(|| Path::new("."));
+        if !directory.is_dir() {
+            return Err(format!(
+                "{} is not a directory; the plugin cannot be installed beside the journal",
+                directory.display()
+            ));
         }
-        if target.exists() {
-            let existing =
-                std::fs::read(&target).map_err(|error| format!("{}: {error}", target.display()))?;
-            if existing != bytes {
-                return Err(format!(
-                    "refusing to overwrite {}: it already holds a different plugin; move that file away first",
-                    target.display()
-                ));
-            }
-        } else {
-            crate::fsutil::write_atomic(&target, &bytes, Some(0o644))?;
+        (target, configuration_block(&loaded.ledger).is_some())
+    };
+
+    if !bytes.starts_with(b"\0asm") {
+        return Err(not_a_wasm_module(origin, bytes));
+    }
+    if target.exists() {
+        let existing =
+            std::fs::read(&target).map_err(|error| format!("{}: {error}", target.display()))?;
+        if existing != bytes {
+            return Err(format!(
+                "refusing to overwrite {}: it already holds a different plugin; move that file away first",
+                target.display()
+            ));
         }
-        if configured {
-            plugin_enable(state)
-        } else {
-            Ok(plugin_status(state))
-        }
+    } else {
+        crate::fsutil::write_atomic(&target, bytes, Some(0o644))?;
+    }
+    if configured {
+        plugin_enable(state)
+    } else {
+        Ok(plugin_status(state))
     }
 }
 
@@ -2734,6 +2773,24 @@ option \"operating_currency\" \"TRY\"
 
         let status = budget_write::plugin_status(&state);
         assert!(status.declared);
+        assert!(status.wasm[0].present);
+    }
+
+    /// The app carries the plugin, so a reader with nothing downloaded installs
+    /// it in one call: the module beside the journal is the build the app
+    /// shipped, and a configured journal gets its declaration in the same pass.
+    #[test]
+    fn the_bundled_plugin_installs_beside_the_journal() {
+        let (dir, path, state) = fixture_without_wasm("budget-plugin-bundled", CONFIGURED);
+
+        let status = budget_write::plugin_install_bundled(&state).unwrap();
+        assert!(status.declared, "a configured journal is declared");
+        let target = dir.file("rustledger_envelope.wasm");
+        assert_eq!(fs::read(&target).unwrap(), BUNDLED_PLUGIN);
+        assert_eq!(
+            occurrences(&read(&path), "plugin \"rustledger_envelope.wasm\""),
+            1
+        );
         assert!(status.wasm[0].present);
     }
 

@@ -304,6 +304,31 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		await invalidateAll();
 	}
 
+	/**
+	 * The plugin the app carries, written beside the journal: the same install
+	 * as the downloaded one, for a reader with nothing to download. The backend
+	 * declares it when a configuration exists, which is what makes this the
+	 * repair for a journal that has one and no module.
+	 */
+	async function installBundledPlugin() {
+		if (pluginBusy) return;
+		pluginBusy = true;
+		pluginActionError = "";
+		try {
+			const result = await commands.budgetPluginInstallBundled();
+			if (result.status === "error") {
+				pluginActionError = result.error;
+				return;
+			}
+		} catch (cause) {
+			pluginActionError = messageOf(cause);
+			return;
+		} finally {
+			pluginBusy = false;
+		}
+		await reload();
+	}
+
 	$effect(() => {
 		// The plugin's entries are re-derived on every load of the ledger, so an
 		// edit saved anywhere can move every month on screen; the revision brings
@@ -429,6 +454,15 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						onclick={() => void installPlugin()}
 					>
 						Use a downloaded .wasm…
+					</Button>
+					<Button
+						size="sm"
+						variant="secondary"
+						class="h-8"
+						disabled={pluginBusy}
+						onclick={() => void installBundledPlugin()}
+					>
+						Use the bundled plugin
 					</Button>
 				</div>
 			</Alert>

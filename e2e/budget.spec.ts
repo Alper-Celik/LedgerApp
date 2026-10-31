@@ -92,6 +92,27 @@ test("a missing plugin module is refused and the journal is not written", async 
 	await expect.poll(async () => (await calls(page, "budget_init")).length).toBe(1);
 });
 
+test("the sheet installs the plugin the app carries, with nothing downloaded", async ({
+	page,
+}) => {
+	// No configuration and no module: the sheet offers the app's own copy, and
+	// the one call puts it beside the journal — no file chooser, no download.
+	await page.goto("/budget?budget_setup=1&budget_no_plugin=1&budget_wasm_missing=1");
+	await page.getByRole("button", { name: "Set up the envelope budget" }).click();
+
+	const dialog = page.getByRole("dialog", { name: "Set up the envelope budget" });
+	const pluginNote = dialog.getByRole("alert").filter({ hasText: "not found yet" });
+	await expect(pluginNote).toBeVisible();
+
+	await pluginNote.getByRole("button", { name: "Use the bundled plugin" }).click();
+
+	await expect
+		.poll(async () => (await calls(page, "budget_plugin_install_bundled")).length)
+		.toBe(1);
+	await expect(dialog.getByRole("alert").filter({ hasText: "(found)" })).toBeVisible();
+	expect((await calls(page, "pick_plugin_file")).length).toBe(0);
+});
+
 test("edit rewrites the existing configuration in place", async ({ page }) => {
 	await page.goto("/budget");
 	await page.getByRole("button", { name: "Edit configuration" }).click();

@@ -85,6 +85,7 @@ Exit codes: `0` answered, `1` failed (reason on stderr), `2` misuse.
 | `crates/chart-render` | chart spec → PNG / terminal (kitty graphics or Unicode) |
 | `vendor/TauriQt` | git submodule: the Qt runtime, taken by path |
 | `plugins/rustledger-envelope` | the envelope-budgeting WASM plugin (own crate, own flake output) |
+| `src-tauri/assets/rustledger_envelope.wasm` | that plugin's release build, embedded in the app so the budget screen can install it with nothing downloaded. Rebuild after plugin changes: `cd plugins/rustledger-envelope && cargo build --release --target wasm32-unknown-unknown && cp target/wasm32-unknown-unknown/release/rustledger_envelope.wasm ../../src-tauri/assets/` |
 | `src-tauri/gen/android` | the generated Gradle project `tauri android init` emits |
 | `books/`, `main.bean` | ignored/private: the actual ledger lives outside this repo |
 

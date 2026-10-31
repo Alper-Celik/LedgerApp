@@ -607,6 +607,12 @@ export async function stubIpc(page: Page) {
 							// next configuration write adds the line with the block.
 							pluginDeclared = budgetConfigured;
 							return Promise.resolve(pluginStatus());
+						case "budget_plugin_install_bundled":
+							// The app's own copy: no file to choose, and the same rule about
+							// declaring only what the journal already configures.
+							pluginWasmPresent = true;
+							pluginDeclared = budgetConfigured;
+							return Promise.resolve(pluginStatus());
 						case "budget_init":
 							if (window.location.search.includes("budget_fail=init")) {
 								return Promise.reject(

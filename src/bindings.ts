@@ -301,6 +301,17 @@ export const commands = {
 	 */
 	budgetPluginInstall: (source: string) => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_install", { source })),
 	/**
+	 *  Install the envelope plugin the app carries, beside the journal.
+	 * 
+	 *  The copy is the release build the app ships (`assets/rustledger_envelope.wasm`),
+	 *  so this is the install for a reader who has nothing to download: it lands in
+	 *  the same place [`budget_plugin_install`] writes, obeys the same overwrite
+	 *  rule, and declares the plugin when the journal already configures the budget.
+	 *  A phone refuses for the same reason the download does — a file written into
+	 *  the SAF mirror would not reach the storage tree.
+	 */
+	budgetPluginInstallBundled: () => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_install_bundled")),
+	/**
 	 *  Every saved dashboard, oldest id order as stored; a first run answers with
 	 *  the six seeded defaults (and writes nothing until one is saved).
 	 */

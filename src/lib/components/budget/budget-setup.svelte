@@ -242,6 +242,32 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	}
 
 	/**
+	 * The plugin the app carries, written beside the journal: the same install
+	 * as the downloaded one, with nothing to download. With a configuration
+	 * already in the journal the backend also declares it, so the page behind
+	 * the sheet re-reads.
+	 */
+	async function installBundledPlugin() {
+		if (installing) return;
+		installing = true;
+		error = "";
+		try {
+			const result = await commands.budgetPluginInstallBundled();
+			if (result.status === "error") {
+				error = result.error;
+				return;
+			}
+			pluginStatus = result.data;
+			await onsaved();
+		} catch (cause) {
+			error = messageOf(cause);
+			return;
+		} finally {
+			installing = false;
+		}
+	}
+
+	/**
 	 * The reader's downloaded `rustledger_envelope.wasm`: the chooser hands one
 	 * back, the backend copies it beside the journal (and declares it when a
 	 * configuration already exists). A missing configuration is not a failure
@@ -321,16 +347,26 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 									</p>
 								{/if}
 							</div>
-							<div>
+							<div class="flex flex-wrap gap-2">
 								<Button
 									type="button"
 									size="sm"
 									variant="outline"
 									class="h-8"
 									disabled={installing}
+									onclick={() => void installBundledPlugin()}
+								>
+									{installing ? "Installing…" : "Use the bundled plugin"}
+								</Button>
+								<Button
+									type="button"
+									size="sm"
+									variant="secondary"
+									class="h-8"
+									disabled={installing}
 									onclick={() => void installPlugin()}
 								>
-									{installing ? "Installing…" : "Use a downloaded .wasm…"}
+									Use a downloaded .wasm…
 								</Button>
 							</div>
 						</Alert>
