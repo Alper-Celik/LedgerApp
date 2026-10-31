@@ -387,12 +387,27 @@ export const commands = {
 	/**
 	 *  Files the ledger's folder changed behind the app (another device, a cloud
 	 *  client): the app should offer a reload rather than keep serving what it
-	 *  loaded. Empty when nothing moved or when the ledger is not in a synced folder.
+	 *  loaded.
+	 * 
+	 *  Empty when nothing moved, and always empty when the folder is not the
+	 *  tracker: in a git repository git owns the tree's history, and the operation
+	 *  log's last-seen map is a second baseline that a commit, a checkout or a
+	 *  branch switch leaves behind the index — comparing them would report the
+	 *  app's own repository work as an outside change. In a SAF tree the mirror is
+	 *  the app's private copy, so there is nothing to compare either. The answer
+	 *  comes from `sync::changes_for`, which shares `sync::watches` — the one gate —
+	 *  with `sync_conflicts`.
 	 */
 	syncChanges: () => typedError<ExternalChange[], string>(__TAURI_INVOKE("sync_changes")),
 	/**
 	 *  Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
 	 *  Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
+	 * 
+	 *  Empty when git owns the ledger: a conflict copy is a sync client's second
+	 *  version, and a repository's versions are git's (its merge conflicts are
+	 *  surfaced by the merge view). Reporting name-shaped copies there would put a
+	 *  conflict in front of the reader that git already accounts for. The answer
+	 *  comes from `sync::conflicts_for`, the same gate `sync_changes` uses.
 	 */
 	syncConflicts: () => typedError<Report, string>(__TAURI_INVOKE("sync_conflicts")),
 	/**

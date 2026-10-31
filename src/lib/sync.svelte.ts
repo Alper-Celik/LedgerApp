@@ -12,6 +12,12 @@ import { ledger } from "./ledger.svelte.js";
  * map (see `src-tauri/src/sync.rs`), so this lists exactly the files whose bytes
  * are not the ones this device last wrote.
  *
+ * Empty — and the bar silent — whenever git owns the ledger: a repository's
+ * versions are git's, and the log's baseline is a second record of the same
+ * tree that a commit or a branch switch leaves behind. The gate is the
+ * backend's (`sync::watches`), not this store's, so the conflicts screen and
+ * the bar cannot disagree about which mode the ledger is in.
+ *
  * The screen offers a reload rather than doing one: a reload replaces the ledger
  * under any open editor draft, which is the reader's call.
  */
@@ -58,6 +64,30 @@ export function noteTreeReport(report: {
 		// A pass that completed is what clears its own failure.
 		syncWatch.treeError = "";
 	}
+}
+
+/**
+ * Forget a tree reconciliation: this ledger is not in a mirror.
+ *
+ * `external`, `conflicts` and `treeError` describe files in a SAF mirror. A
+ * ledger read from a plain folder has no mirror, so a report left over from the
+ * previous tree describes a folder that is not on screen — and in a git
+ * repository there is no folder watch at all, so the bar must stay silent. Not
+ * adding to the report is not enough for either: it has to be dropped.
+ */
+export function leaveTreeMode() {
+	// A write on every revision bump would churn the state's readers for
+	// nothing; the common case is already empty.
+	if (
+		syncWatch.external.length === 0 &&
+		syncWatch.conflicts.length === 0 &&
+		syncWatch.treeError === ""
+	) {
+		return;
+	}
+	syncWatch.external = [];
+	syncWatch.conflicts = [];
+	syncWatch.treeError = "";
 }
 
 /** Re-read the watch list. Cheap: one command call, no ledger walk. */

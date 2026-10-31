@@ -350,13 +350,26 @@ fn onedrive_suffix(stem: &str) -> Option<(SyncClient, &str)> {
 
 /// Whether `tail` can be the account or machine name OneDrive appends.
 ///
-/// Dashes are common in real names (`budget-2026-01.bean`), so the tail has to
-/// look like a name: it starts with a letter and holds only letters, digits,
-/// dashes and underscores, at least two characters of it. That is not proof on
-/// its own — [`Evidence::Shape`] covers the rest.
+/// Dashes are common in real names, so a bare suffix after one means nothing:
+/// `package-lock.json` and `package.json`, `budget-grid.ts` and `budget.ts`,
+/// `2026-10-04-yatirim.xls` and `2026-10-04.xls` all sit side by side in an
+/// ordinary folder, and reading any of them as an OneDrive copy of the other is
+/// exactly the false conflict this module must not produce. The tail therefore
+/// has to look like the *name* the client copies for, not like a compound's
+/// second word: it starts with a capital and holds at least one lower-case
+/// letter (`Alper`, `Alper-PC`), and only letters, digits, dashes and
+/// underscores.
+///
+/// A lower-case word (`lock`, `grid`, `yatirim`) is how ordinary names are
+/// spelled; an all-capitals token (`TRY`, `Q4`) is how a currency or a quarter
+/// is spelled. Either would be a machine name only when the user named the
+/// machine that way, and then the shape loses its remaining evidence rather
+/// than claiming a conflict on a name alone — which is the trade this module
+/// makes everywhere else too.
 fn device_suffix(tail: &str) -> bool {
     tail.len() >= 2
-        && tail.starts_with(|c: char| c.is_ascii_alphabetic())
+        && tail.starts_with(|c: char| c.is_ascii_uppercase())
+        && tail.contains(|c: char| c.is_ascii_lowercase())
         && tail
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -673,6 +686,23 @@ mod tests {
             ("ledger's conflicted copy.bean", None),
             ("budget-2026-01.bean", None),
             ("ledger-.bean", None),
+            // A dated journal, a parenthesised note, and an include named after
+            // what it holds: dashes, brackets and suffixes that are part of an
+            // ordinary ledger, not evidence of a second copy.
+            ("2026-10.bean", None),
+            ("2026-10-31.bean", None),
+            ("main (notes).bean", None),
+            ("accounts-2026.bean", None),
+            // A lock file beside the file it locks, lower-case compounds, a
+            // sidecar licence, and a statement named for its date and what it
+            // holds.
+            ("package-lock.json", None),
+            ("budget-grid.ts", None),
+            ("budget-settings.ts", None),
+            ("alert-description.svelte", None),
+            ("last-playwright-attach-direct.json", None),
+            ("main.bean.license", None),
+            ("2026-10-04-yatirim.xls", None),
         ];
         for (name, expected) in cases {
             let expected = expected.map(|(client, original, stamp)| {
@@ -828,6 +858,73 @@ mod tests {
         assert_eq!(candidates(root).unwrap(), Vec::new());
     }
 
+    /// The names a real ledger folder holds side by side: dated journals, a
+    /// parenthesised note, an include named for its year, a lock file, a
+    /// compound source file, a sidecar licence and a statement whose name
+    /// carries its date *and* what it holds. Each has a file beside it that the
+    /// old OneDrive suffix rule — any dash followed by letters — paired it with
+    /// (63 pairs in this project's own folder alone), and none of them is a copy
+    /// of anything.
+    #[test]
+    fn scan_does_not_pair_ordinary_neighbours() {
+        let dir = TempDir::new("conflict-names-neighbours");
+        let root = dir.dir();
+        for (name, neighbour) in [
+            // Dated journals: a month, the same month's dated peer, and an
+            // include named for the year it holds.
+            ("2026-10.bean", "2026.bean"),
+            ("2026-10.bean", "2026-10-31.bean"),
+            ("2026-01-30.bean", "2026-01.bean"),
+            ("accounts-2026.bean", "accounts.bean"),
+            // A note in brackets is part of the name, not a copy number.
+            ("main (notes).bean", "main.bean"),
+            // A sidecar licence beside the file it covers.
+            ("main.bean.license", "main.bean"),
+            // Lock files and kebab-case source names: the tail is a word
+            // (`lock`, `grid`, `settings`, `description`), not an account or a
+            // machine name.
+            ("package-lock.json", "package.json"),
+            ("budget-grid.ts", "budget.ts"),
+            ("budget-settings.ts", "budget.ts"),
+            ("alert-description.svelte", "alert.svelte"),
+            ("last-playwright-attach-direct.json", "last-playwright-attach.json"),
+            // A statement whose name carries its date and what it holds.
+            ("2026-10-04-yatirim.xls", "2026-10-04.xls"),
+        ] {
+            write(root, name);
+            write(root, neighbour);
+        }
+
+        assert_eq!(scan_report(root).unwrap(), Report::default());
+    }
+
+    /// `Reports (1)` is a folder name; the file inside it pairs with nothing
+    /// outside that folder.
+    #[test]
+    fn scan_ignores_a_directory_named_like_a_copy() {
+        let dir = TempDir::new("conflict-names-directory-name");
+        let root = dir.dir();
+        write(root, "main.bean");
+        write(root, "Reports (1)/main.bean");
+        write(root, "Reports (1)/main (1).bean");
+
+        // The copy inside the folder pairs with the file inside the folder —
+        // never with the one at the root, and the folder's own name is not a
+        // copy name at all.
+        let found = pairs(root);
+        assert_eq!(
+            found,
+            vec![(
+                "main (1).bean".to_string(),
+                "main.bean".to_string(),
+                SyncClient::Drive,
+                None,
+            )],
+            "{found:#?}"
+        );
+        assert_eq!(scan_report(root).unwrap().orphans, Vec::new());
+    }
+
     #[test]
     fn scan_reports_orphans_only_for_names_that_prove_themselves() {
         let dir = TempDir::new("conflict-names-orphans");
@@ -955,6 +1052,14 @@ mod tests {
             write(root, &format!("sub/{skipped}/ledger.bean"));
             write(root, &format!("sub/{skipped}/ledger (1).bean"));
         }
+        // The log's own blobs live under `.ledger/log`, beside the state files
+        // the watch writes: a pair there must not be reported either.
+        write(root, ".ledger/log/ledger.bean");
+        write(root, ".ledger/log/ledger (1).bean");
+        write(
+            root,
+            ".ledger/log/gone.sync-conflict-20260130-120000-ABCDEFG.bean",
+        );
         // A real pair beside them, so the scan itself is known to work.
         write(root, "ledger.bean");
         write(root, "ledger 2.bean");
