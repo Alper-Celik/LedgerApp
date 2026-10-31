@@ -142,7 +142,13 @@ impl AppState {
     pub(crate) fn new() -> Self {
         let path = resolve_ledger_path();
         let loaded = match load_baselined(Path::new(&path)) {
-            Ok(loaded) => Some(loaded),
+            Ok(loaded) => {
+                // The launch is a successful load too: adopting it keeps a peer's
+                // change made while the app was closed from being reported as an
+                // outside change the reload cannot clear.
+                crate::sync::adopt_loaded(&loaded);
+                Some(loaded)
+            }
             Err(e) => {
                 eprintln!("not loading {}: {e}", path.display());
                 None

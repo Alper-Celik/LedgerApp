@@ -261,6 +261,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				return;
 			}
 			pluginStatus = result.data;
+			// With a configuration already in the journal the install also writes
+			// the `plugin` line, which the page behind the sheet has to re-read:
+			// otherwise its grid stays empty and its notice still says the plugin is
+			// undeclared. Harmless when the install only copied the module.
+			await onsaved();
 		} catch (cause) {
 			error = messageOf(cause);
 			return;

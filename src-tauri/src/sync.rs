@@ -82,15 +82,24 @@ pub fn adopt_loaded(loaded: &Loaded) {
         .map(|file| file.path.clone())
         .collect();
     let log = log_dir(directory);
+    let loaded_len = files.len();
     // Only this device's own record: another device's entries name paths in its
     // mirror, and adopting those would write spellings this device never used.
     // A recorded path that is still on disk but outside the load (another
     // journal in the folder) is left alone — nothing showed it to the reader.
     if let Ok(seen) = history::last_seen(&log) {
         for (recorded, _) in seen {
-            let path = history::local_path(&log, &recorded).unwrap_or(recorded);
+            let path = history::local_path(&log, &recorded).unwrap_or_else(|| recorded.clone());
             if !path.is_file() {
+                // Gone: the load already reflected the deletion.
                 files.push(path);
+            } else if path != recorded && files[..loaded_len].contains(&path) {
+                // The folder moved, so the recorded spelling resolves to a file
+                // the load just adopted under its new one. Retiring the recorded
+                // spelling is what keeps every later edit from comparing the new
+                // bytes against the pre-move hash and reporting it as external
+                // for ever.
+                files.push(recorded);
             }
         }
     }
@@ -164,14 +173,18 @@ pub fn changes_for(ledger_dir: &Path) -> Result<Vec<ExternalChange>, String> {
 }
 
 /// The answer `sync_conflicts` gives: the sync client's conflicted copies under
-/// the ledger folder, or an empty report when this ledger is not folder-tracked
-/// ([`watches`]).
+/// the ledger folder, or an empty report when git owns the ledger.
 ///
 /// In a repository git owns the versions, and its merge conflicts are surfaced
 /// by the merge view; a name-shaped second copy there is an ordinary neighbour
 /// of something else, not a difference the app may offer to settle.
+///
+/// A SAF tree is still a folder a sync client fills: its `name (1).bean` copies
+/// arrive in the mirror with everything else, so the scan keeps running there.
+/// Only the *baseline* watch ([`watches`]) is off in tree mode — reconciliation
+/// settles same-path differences, not the name-shaped ones this scan pairs.
 pub fn conflicts_for(ledger_dir: &Path) -> Result<crate::conflict_names::Report, String> {
-    if !watches(ledger_dir) {
+    if crate::repo::state(ledger_dir).repo {
         return Ok(crate::conflict_names::Report::default());
     }
     crate::conflict_names::scan_report(ledger_dir)
@@ -361,6 +374,52 @@ option \"operating_currency\" \"USD\"
         assert!(
             changed(&log).unwrap().is_empty(),
             "the reload adopted the disk as what this device has seen"
+        );
+    }
+
+    /// The folder moved, so the log's recorded spellings point at files that no
+    /// longer exist there. Each one resolves to a file the load just read, and
+    /// the recorded spelling has to be retired with it: left in place, every
+    /// later edit would compare the new bytes against the pre-move hash and
+    /// report the app's own work as an outside change the bar cannot clear.
+    #[test]
+    fn a_moved_folder_does_not_report_its_own_edits() {
+        let dir = TempDir::new("sync-moved");
+        let folder = dir.dir().join("ledger");
+        fs::create_dir_all(&folder).unwrap();
+        let ledger = folder.join("main.bean");
+        fs::write(&ledger, LEDGER).unwrap();
+        let log = log_dir(&folder);
+        record(
+            &log,
+            Origin::User,
+            "write",
+            &[history::Change::new(&ledger, None, Some(LEDGER.as_bytes()))],
+        )
+        .unwrap();
+
+        // The whole folder moves, the log inside it included.
+        let moved = dir.dir().join("moved");
+        fs::rename(&folder, &moved).unwrap();
+        let new_ledger = moved.join("main.bean");
+        let loaded = crate::session::load_baselined(&new_ledger).unwrap();
+        adopt_loaded(&loaded);
+
+        // The app's own edit, through the funnel that records it.
+        let state = crate::testing::loaded_state(&new_ledger);
+        let edited = LEDGER
+            .replace("-20.00", "-23.00")
+            .replace("20.00 USD", "23.00 USD");
+        crate::editing::edit_named_file_source(
+            &state,
+            &new_ledger.display().to_string(),
+            &edited,
+            None,
+        )
+        .unwrap();
+        assert!(
+            changed(&log_dir(&moved)).unwrap().is_empty(),
+            "the move retired the old spelling; the edit is the app's own"
         );
     }
 

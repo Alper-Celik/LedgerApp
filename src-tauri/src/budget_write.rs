@@ -442,9 +442,15 @@ fn plugin_status_of(ledger: &Ledger, root: &Path) -> BudgetPluginStatus {
     });
 
     let mut directories: Vec<PathBuf> = Vec::new();
+    // The loader resolves every `plugin` path against one base directory: the
+    // root journal's, not the declaring include's (`rustledger-loader` passes
+    // that `base_dir` straight to `resolve_path`). The root's directory is
+    // therefore the candidate an install must write to, and it comes first; the
+    // declaring file's directory stays as a second place to look, for a module
+    // put beside an include by hand.
     for directory in [
-        file.as_deref().and_then(|file| Path::new(file).parent()),
         root.parent(),
+        file.as_deref().and_then(|file| Path::new(file).parent()),
     ]
     .into_iter()
     .flatten()
@@ -530,6 +536,13 @@ fn declaration_for(ledger: &Ledger, root: &Path) -> Result<Option<(PathBuf, Stri
 /// file is written first and the declaration second: a `plugin` line written
 /// before any `start date` runs the plugin against an empty configuration, and
 /// its own diagnostic would roll the declaration back.
+///
+/// The include's first edit reloads without the plugin running, so it cannot
+/// see the block's plugin-level complaints. When the declaration that follows
+/// then fails, only the root journal is rolled back by the funnel — the include
+/// would keep a block the plugin rejects, and a retry would be refused for a
+/// `start date` that never worked. Capturing the include before the first edit
+/// and putting it back is what makes the pair land together or not at all.
 fn commit_config(
     state: &AppState,
     target: &Path,
@@ -548,13 +561,30 @@ fn commit_config(
                     None,
                 );
             }
+            let before = std::fs::read_to_string(target)
+                .map_err(|error| format!("{target_name}: {error}"))?;
             crate::editing::edit_named_file_source(state, &target_name, rewritten, None)?;
-            crate::editing::edit_named_file_source(
+            let declared = crate::editing::edit_named_file_source(
                 state,
                 &root.display().to_string(),
                 &root_text,
                 None,
-            )
+            );
+            match declared {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // Best effort: the sentence that matters is the plugin's, so a
+                    // restore that also fails is reported beside it, not instead.
+                    if let Err(restore) =
+                        crate::editing::edit_named_file_source(state, &target_name, &before, None)
+                    {
+                        return Err(format!(
+                            "{error}; and {target_name} could not be put back: {restore}"
+                        ));
+                    }
+                    Err(error)
+                }
+            }
         }
         None => crate::editing::edit_named_file_source(state, &target_name, rewritten, None),
     }
@@ -573,6 +603,16 @@ pub(crate) fn plugin_enable(state: &AppState) -> Result<BudgetPluginStatus, Stri
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("no ledger loaded")?;
         let root = root_journal(&loaded.ledger)?.path.clone();
+        // A declaration with no configuration runs the plugin against nothing, and
+        // its own "missing start date" diagnostic makes the funnel roll the line
+        // back — an action that can only fail. The line is written with the first
+        // block instead.
+        if configuration_block(&loaded.ledger).is_none() {
+            return Err(
+                "the journal has no envelope configuration yet; the `plugin` line is written with the first budget setup, because the plugin refuses to load without a `start date`"
+                    .to_string(),
+            );
+        }
         declaration_for(&loaded.ledger, &root)?
     };
 

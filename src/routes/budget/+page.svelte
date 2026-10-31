@@ -385,7 +385,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Alert variant="destructive">The plugin's status could not be read: {pluginError}</Alert>
 		</div>
 	{/if}
-	{#if plugin && !plugin.declared && plugin.wasm.length > 0}
+	{#if plugin && !plugin.declared && settings?.config && plugin.wasm.length > 0}
 		<!--
 			The journal has configuration but no `plugin` line (a budget set up
 			before setup wrote it, or a hand-written one). Both repairs go
