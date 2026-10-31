@@ -97,6 +97,13 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
                 relative.display()
             ));
         }
+        // A ledger file the folder keeps out of git — a private include named in
+        // `.gitignore` — is not in the diff the screen reviewed (that diff shows
+        // untracked, not ignored, files), so committing it would publish a file
+        // the reader never saw.
+        if repo.status_should_ignore(&relative).unwrap_or(false) {
+            continue;
+        }
         // A ledger file the repository does not track yet — an include created
         // outside the app, or a journal made before the repository — is part of
         // what the diff screen showed, so it is committed from the working tree
@@ -501,6 +508,50 @@ option \"operating_currency\" \"USD\"
         assert!(
             tree.get_name("expenses.bean").is_some(),
             "the include the diff showed is in the commit"
+        );
+        assert!(tree.get_name("main.bean").is_some());
+    }
+
+    /// A ledger file the folder keeps out of git is not part of the review
+    /// screen — `ledger_diff` shows untracked files, not ignored ones — so the
+    /// commit must leave it alone. A private accounts include named in
+    /// `.gitignore` must never be published by a commit made in the app.
+    #[test]
+    fn an_ignored_include_is_left_out_of_the_commit() {
+        let dir = TempDir::new("commit-ignored");
+        dir.seed(
+            "main.bean",
+            "include \"private.bean\"\n\n2026-01-01 open Assets:Bank:Checking\n",
+        );
+        dir.seed("private.bean", "2026-01-01 open Liabilities:Card\n");
+        dir.seed(".gitignore", "private.bean\n");
+        let repo = crate::testing::repo_with_commit(&dir, &["main.bean"]);
+        let state = loaded_state(&dir.file("main.bean"));
+
+        let diff = ledger_diff_text(&state).unwrap();
+        assert!(
+            !diff.contains("private.bean"),
+            "the ignored include is not on the review screen: {diff}"
+        );
+
+        // Something the reader did review, so there is a commit to inspect.
+        fs::write(
+            dir.file("main.bean"),
+            "include \"private.bean\"\n\n2026-01-01 open Assets:Bank:Checking\n2026-01-01 open Assets:Savings\n",
+        )
+        .unwrap();
+        commit_staged(&state, "another account").unwrap();
+
+        let tree = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(
+            tree.get_name("private.bean").is_none(),
+            "an ignored ledger file is never committed"
         );
         assert!(tree.get_name("main.bean").is_some());
     }

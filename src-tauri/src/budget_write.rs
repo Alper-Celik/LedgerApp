@@ -504,8 +504,9 @@ fn plugin_line() -> String {
 /// text that now carries the `plugin` line, or `None` when one is declared.
 ///
 /// The line goes into the root journal rather than the file being configured,
-/// so the file that declares the plugin is also the file the `.wasm` sits
-/// beside — a `plugin` path is resolved relative to the declaring file.
+/// so there is one place the declaration lives. The loader resolves every
+/// `plugin` path against the root journal's directory, not the declaring
+/// file's, which is also why [`plugin_status`] lists that directory first.
 /// [`plugin_enable`] and [`plugin_install`] write the same line into the same
 /// file, so a journal configured here and one repaired there read alike.
 ///
