@@ -6,6 +6,7 @@ import type {
 	AccountBalance,
 	AiSettingsView,
 	BudgetSettings,
+	PriceHistory,
 	TransactionEdit,
 	TransactionView,
 } from "../src/bindings";
@@ -373,6 +374,31 @@ export const priceQuotes = [
 ];
 
 /**
+ * The history the prices screen's links open: two explicit points and one
+ * implied by a trade, in two currencies, so a source or currency control has
+ * something to change. `source` filtering happens in the stub's
+ * `price_history` case, which is what the screen's own controls exercise.
+ */
+export const priceHistory: PriceHistory = {
+	commodity: "USD",
+	source: "both",
+	currencies: ["EUR", "TRY"],
+	counts: { explicit: 2, transactions: 1 },
+	points: [
+		{ date: "2026-01-02", value: "42.10", currency: "TRY", source: "explicit" },
+		{ date: "2026-01-03", value: "42.00", currency: "TRY", source: "transactions" },
+		{ date: "2026-01-04", value: "0.92", currency: "EUR", source: "explicit" },
+	],
+	summary: {
+		points: 3,
+		first: "2026-01-02",
+		last: "2026-01-04",
+		min: "0.92",
+		max: "42.10",
+	},
+};
+
+/**
  * The assistant, unconfigured: the endpoint's default root, no model chosen and
  * no key stored, which is what a fresh install reports (see `ai.rs`'s
  * `AiConfig::default`). The prompt is a stand-in for `SYSTEM_PROMPT`; nothing
@@ -551,6 +577,62 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.priceSources);
 						case "price_targets":
 							return Promise.resolve(fixtures.priceTargets);
+						case "price_history": {
+							// The screen's controls ask again with different filters; the
+							// stub narrows the one fixture the same way the backend narrows
+							// the ledger, so a control's effect is visible in the rows.
+							const request = (args ?? {}) as {
+								commodity?: string;
+								currency?: string | null;
+								source?: string;
+								from?: string | null;
+								to?: string | null;
+								limit?: number | null;
+							};
+							const source = request.source ?? "both";
+							const all = fixtures.priceHistory.points;
+							const counts = {
+								explicit: all.filter(
+									(point) =>
+										point.source === "explicit" &&
+										(!request.currency || point.currency === request.currency)
+								).length,
+								transactions: all.filter(
+									(point) =>
+										point.source === "transactions" &&
+										(!request.currency || point.currency === request.currency)
+								).length,
+							};
+							let rows = all.filter(
+								(point) =>
+									(source === "both" || point.source === source) &&
+									(!request.currency || point.currency === request.currency) &&
+									(!request.from || point.date.slice(0, 7) >= request.from) &&
+									(!request.to || point.date.slice(0, 7) <= request.to)
+							);
+							if (request.limit != null) rows = rows.slice(-request.limit);
+							const extreme = (direction: 1 | -1) =>
+								rows.reduce<string | null>((best, point) => {
+									if (best === null) return point.value;
+									return direction * Number(point.value) < direction * Number(best)
+										? point.value
+										: best;
+								}, null);
+							return Promise.resolve({
+								...fixtures.priceHistory,
+								commodity: request.commodity ?? fixtures.priceHistory.commodity,
+								source,
+								counts,
+								points: rows,
+								summary: {
+									points: rows.length,
+									first: rows[0]?.date ?? null,
+									last: rows.at(-1)?.date ?? null,
+									min: extreme(-1),
+									max: extreme(1),
+								},
+							});
+						}
 						case "fetch_prices":
 							return Promise.resolve(fixtures.priceQuotes);
 						case "write_prices":
@@ -655,6 +737,7 @@ export async function stubIpc(page: Page) {
 			priceSources,
 			priceTargets,
 			priceQuotes,
+			priceHistory,
 			aiSettings,
 			commits,
 			commitDiff,

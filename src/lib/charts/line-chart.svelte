@@ -26,6 +26,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		series,
 		tickFormat = compactNumber,
 		legend = true,
+		unit = "month",
 		class: className,
 	}: {
 		series: readonly ChartSeries[];
@@ -33,10 +34,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		tickFormat?: (value: number) => string;
 		/** Series names under the chart; turn off when the widget's title already says it. */
 		legend?: boolean;
+		/** What one point on the category axis measures, for the accessible summary. */
+		unit?: "month" | "day";
 		class?: string;
 	} = $props();
 
-	const chart = $derived(prepareChart(series, "Line chart"));
+	const chart = $derived(prepareChart(series, "Line chart", unit));
 </script>
 
 <ChartContainer

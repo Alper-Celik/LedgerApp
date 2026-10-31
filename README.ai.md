@@ -79,7 +79,7 @@ Exit codes: `0` answered, `1` failed (reason on stderr), `2` misuse.
 | `src-tauri/src/commands/` | the Tauri/specta command surface |
 | `src-tauri/src/api.rs` | the Tauri-free façade over the same modules, plain data out; the `ledger` binary's whole backend |
 | `src-tauri/src/bin/ledger.rs` | the `ledger` CLI (`check`, `query`, `budget`, `report`, `prices`, `index`, `ask`, `chart`) |
-| `src-tauri/src/` | one module per concern: ledger views (`accounts`, `source`, `files`, `budget`, `budget_write`, `reports`), edits (`editing`, `rewrite`, `conflict*`), storage and history (`session`, `storage`, `repo`, `git`, `git_ops`, `history`), fetchers (`prices`, `index*`), assistant (`ai`, `ai_cmd`, `attachments`, `tools`, `conversations`), `lsp` (see `AGENTS.md`) |
+| `src-tauri/src/` | one module per concern: ledger views (`accounts`, `source`, `files`, `budget`, `budget_write`, `reports`, `price_history`), edits (`editing`, `rewrite`, `conflict*`), storage and history (`session`, `storage`, `repo`, `git`, `git_ops`, `history`), fetchers (`prices`, `index*`), assistant (`ai`, `ai_cmd`, `attachments`, `tools`, `conversations`), `lsp` (see `AGENTS.md`) |
 | `src/lib/components/` | register, sidebar, source editor, diff, folder picker, assistant, budget, dashboards, inflation, prices, conflicts |
 | `src/lib/*.svelte.ts` | shared stores (filters, editor scope, ledger, git state, sidebar width) |
 | `crates/chart-render` | chart spec → PNG / terminal (kitty graphics or Unicode) |

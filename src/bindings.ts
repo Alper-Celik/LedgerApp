@@ -266,6 +266,18 @@ export const commands = {
 	 */
 	priceTargets: () => __TAURI_INVOKE<PriceTarget[]>("price_targets"),
 	/**
+	 *  One commodity's price history, from the two sources the journal states it
+	 *  in: explicit `price` directives, the rates implied by trades, or both.
+	 * 
+	 *  `source` is `"explicit"`, `"transactions"` or `"both"`; `currency` narrows
+	 *  the answer to one quote currency; `from`/`to` are inclusive `YYYY-MM` month
+	 *  labels and `limit` keeps only the newest that many points. A point says
+	 *  which source it came from, and `both` prefers the explicit price when a day
+	 *  has one. Every amount is an exact decimal string; see
+	 *  [`crate::price_history`] for the full rule.
+	 */
+	priceHistory: (commodity: string, currency: string | null, source: string, from: string | null, to: string | null, limit: number | null) => typedError<PriceHistory, string>(__TAURI_INVOKE("price_history", { commodity, currency, source, from, to, limit })),
+	/**
 	 *  Fetch quotes for the given requests. Blocking network work, so it runs on a
 	 *  worker thread; per-request failures come back as `PriceFetch::Failed` and the
 	 *  command only errors when every request failed.
@@ -1643,6 +1655,86 @@ export type PriceFetch =
 ({ quote: PriceQuote }) & { failed?: never } | 
 /**  Why that request produced none. */
 ({ failed: PriceFailure }) & { quote?: never };
+
+/**  One commodity's price history as the screen reads it. */
+export type PriceHistory = {
+	/**  The commodity the history is for. */
+	commodity: string,
+	/**
+	 *  The source selector the answer was built for: `explicit`,
+	 *  `transactions` or `both`.
+	 */
+	source: string,
+	/**
+	 *  Every currency the commodity has ever been priced in, across both
+	 *  sources, sorted. This is the currency picker's list, and it does not
+	 *  move when the source changes — an option that disappears under another
+	 *  source would be a control that changes under the hand.
+	 */
+	currencies: string[],
+	/**
+	 *  What each source holds for the commodity and the requested currency,
+	 *  before `from`/`to` and `limit` apply — the empty state's evidence.
+	 */
+	counts: PriceHistoryCounts,
+	/**
+	 *  The points, oldest first; a day with several currencies has one point
+	 *  per currency, ordered by currency.
+	 */
+	points: PriceHistoryPoint[],
+	/**  The small summary above the series. */
+	summary: PriceHistorySummary,
+};
+
+/**
+ *  How many points each source holds for a commodity before the requested
+ *  range and point limit narrow them. The screen uses this to say *why* an
+ *  answer is empty: nothing in the ledger, nothing in the chosen source, or
+ *  nothing in the chosen months.
+ */
+export type PriceHistoryCounts = {
+	/**  Points stated by `price` directives. */
+	explicit: number,
+	/**  Points implied by trades. */
+	transactions: number,
+};
+
+/**  One day's price for one commodity, in one currency, and where it came from. */
+export type PriceHistoryPoint = {
+	/**  The day, `YYYY-MM-DD`. */
+	date: string,
+	/**  The exact price as a decimal string. */
+	value: string,
+	/**  The currency the price is in. */
+	currency: string,
+	/**
+	 *  `"explicit"` for a `price` directive, `"transactions"` for a rate
+	 *  implied by a posting.
+	 */
+	source: string,
+};
+
+/**
+ *  The figures a reader wants before scrolling: how many days, when they run,
+ *  and the range of prices.
+ */
+export type PriceHistorySummary = {
+	/**  How many points the answer holds. */
+	points: number,
+	/**  The oldest point's day, `None` for an empty history. */
+	first: string | null,
+	/**  The newest point's day, `None` for an empty history. */
+	last: string | null,
+	/**
+	 *  The smallest price across the returned points, an exact decimal string.
+	 *  `None` for an empty history. When the answer holds several currencies
+	 *  the figure is the smallest decimal among them, which is a range of
+	 *  numbers rather than of money; ask for one currency to compare values.
+	 */
+	min: string | null,
+	/**  The largest price across the returned points; see [`Self::min`]. */
+	max: string | null,
+};
 
 /**
  *  One quote: one commodity, one currency, one day, one exact decimal price.
