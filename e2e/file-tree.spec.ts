@@ -137,3 +137,14 @@ test("the files screen says no ledger is open instead of reporting a failed read
 	await expect(page.getByRole("heading", { name: "Journal files", level: 1 })).toBeVisible();
 	await expect(page.getByText("No ledger is open")).toBeVisible();
 });
+
+test("an empty listing with no ledger says nothing is open, not that the journal is empty", async ({
+	page,
+}) => {
+	// The listing answers `[]` rather than failing in the app's first state, so
+	// the screen has to tell "nothing is open" apart from "this journal loads no
+	// files" by asking the summary, not by catching an error.
+	await page.goto("/files?no_ledger=1");
+	await expect(page.getByText("No ledger is open")).toBeVisible();
+	await expect(page.getByText("loads no files")).toHaveCount(0);
+});

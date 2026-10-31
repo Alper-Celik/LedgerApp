@@ -446,7 +446,13 @@ export async function stubIpc(page: Page) {
 						case "commit_ledger":
 							return Promise.resolve("abc1234");
 						case "ledger_summary":
-							return Promise.resolve(fixtures.summary);
+							// `?no_ledger=1` models the app's first state: no journal
+							// open, so the listing is empty and the summary is null.
+							return Promise.resolve(
+								window.location.search.includes("no_ledger=1")
+									? null
+									: fixtures.summary
+							);
 						case "load_ledger":
 							// `typedError`: reject to model `Err`; resolve the raw summary.
 							if (path !== "/ledger/Books") {
@@ -457,7 +463,11 @@ export async function stubIpc(page: Page) {
 						case "budget":
 							return Promise.resolve(fixtures.budgetMonth);
 						case "journal_files":
-							return Promise.resolve(fixtures.journalFiles);
+							return Promise.resolve(
+								window.location.search.includes("no_ledger=1")
+									? []
+									: fixtures.journalFiles
+							);
 						case "file_transactions":
 							return Promise.resolve(fixtures.transactions);
 						case "file_text":

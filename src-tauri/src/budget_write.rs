@@ -564,6 +564,17 @@ pub(crate) fn init(
     crate::editing::edit_named_file_source(state, file, &rewritten, None)
 }
 
+/// The journal file the loader holds under `file_id`.
+///
+/// A directive found by month may live in any of the journal's files; the write
+/// has to land in that one, or the second directive would lose to the first.
+fn source_of_id(ledger: &Ledger, file_id: usize) -> Result<&rustledger_loader::SourceFile, String> {
+    ledger
+        .source_map
+        .get(file_id)
+        .ok_or_else(|| format!("the journal holds no file with id {file_id}"))
+}
+
 /// The file and 1-based line of the journal's first `start date`, if any.
 fn existing_start_date(ledger: &Ledger) -> Option<(String, usize)> {
     for spanned in &ledger.directives {
@@ -613,28 +624,39 @@ pub(crate) fn fund_set(
         refuse_plumbing(&loaded.ledger, &account)?;
         let date = month_start(&month)?;
         if newest_fund(&loaded.ledger, &account)
-            .is_some_and(|entry| entry.0 <= date && entry.1 == requested)
+            .is_some_and(|entry| month_label(entry.0) <= month && entry.1 == requested)
         {
             return Ok(());
         }
-        let source = source_of_file(&loaded.ledger, file)?;
-        let previous = source.source.to_string();
-        let line = directive_line(
-            &date.to_string(),
-            "fund",
-            &[
-                account.clone(),
-                requested.number.to_string(),
-                requested.currency.clone(),
-            ],
-        );
-        match same_date_directive(&loaded.ledger, source.id, "fund", &account, date) {
-            Some(start) => replace_line(&previous, start, &line),
-            None => insert_block(&previous, &[line]),
+        let arguments = [
+            account.clone(),
+            requested.number.to_string(),
+            requested.currency.clone(),
+        ];
+        match same_month_directive(&loaded.ledger, "fund", &account, &month) {
+            // Rewritten where it stands, on the date it already carries: a
+            // second directive in the same month would lose to the older one, and
+            // changing the amount is not a reason to move the reader's line.
+            Some((file_id, start, on)) => {
+                let target = source_of_id(&loaded.ledger, file_id)?;
+                let line = directive_line(&on.to_string(), "fund", &arguments);
+                (target.path.clone(), replace_line(&target.source, start, &line))
+            }
+            None => {
+                let source = source_of_file(&loaded.ledger, file)?;
+                let line = directive_line(&date.to_string(), "fund", &arguments);
+                (source.path.clone(), insert_block(&source.source, &[line]))
+            }
         }
     };
 
-    crate::editing::edit_named_file_source(state, file, &rewritten, None)
+    let (target, rewritten) = rewritten;
+    crate::editing::edit_named_file_source(
+        state,
+        &target.display().to_string(),
+        &rewritten,
+        None,
+    )
 }
 
 /// Set `account`'s rollover policy from `month` on: `carry`, `reset`, or `cap`
@@ -661,24 +683,32 @@ pub(crate) fn rollover_set(
         refuse_plumbing(&loaded.ledger, &account)?;
         let date = month_start(&month)?;
         if newest_rollover(&loaded.ledger, &account)
-            .is_some_and(|entry| entry.0 <= date && entry.1 == requested)
+            .is_some_and(|entry| month_label(entry.0) <= month && entry.1 == requested)
         {
             return Ok(());
         }
-        let source = source_of_file(&loaded.ledger, file)?;
-        let previous = source.source.to_string();
-        let line = directive_line(
-            &date.to_string(),
-            "rollover",
-            &[account.clone(), policy_token(&requested)],
-        );
-        match same_date_directive(&loaded.ledger, source.id, "rollover", &account, date) {
-            Some(start) => replace_line(&previous, start, &line),
-            None => insert_block(&previous, &[line]),
+        let arguments = [account.clone(), policy_token(&requested)];
+        match same_month_directive(&loaded.ledger, "rollover", &account, &month) {
+            Some((file_id, start, on)) => {
+                let target = source_of_id(&loaded.ledger, file_id)?;
+                let line = directive_line(&on.to_string(), "rollover", &arguments);
+                (target.path.clone(), replace_line(&target.source, start, &line))
+            }
+            None => {
+                let source = source_of_file(&loaded.ledger, file)?;
+                let line = directive_line(&date.to_string(), "rollover", &arguments);
+                (source.path.clone(), insert_block(&source.source, &[line]))
+            }
         }
     };
 
-    crate::editing::edit_named_file_source(state, file, &rewritten, None)
+    let (target, rewritten) = rewritten;
+    crate::editing::edit_named_file_source(
+        state,
+        &target.display().to_string(),
+        &rewritten,
+        None,
+    )
 }
 
 /// The `rollover` policy the caller asked for, with the argument rules the
@@ -867,29 +897,33 @@ fn newest_rollover(ledger: &Ledger, account: &str) -> Option<(NaiveDate, Policy)
 
 /// The byte offset of the last `key` directive for `account` dated exactly
 /// `date` in file `file_id`, so it can be rewritten instead of duplicated.
-fn same_date_directive(
+fn same_month_directive(
     ledger: &Ledger,
-    file_id: usize,
     key: &str,
     account: &str,
-    date: NaiveDate,
-) -> Option<usize> {
-    let mut found = None;
+    month: &str,
+) -> Option<(usize, usize, NaiveDate)> {
+    // The plugin resolves by month, and a tie within a month keeps the *last*
+    // directive in the canonical stream: a `fund` dated the 15th beats one dated
+    // the 1st. So the grep is by month, and the last one found is the one that
+    // governs — replacing it is the only way an edit takes effect.
+    let mut found: Option<(usize, usize, NaiveDate)> = None;
     for spanned in &ledger.directives {
-        if usize::from(spanned.file_id) != file_id {
-            continue;
-        }
         let Directive::Custom(custom) = &spanned.value else {
             continue;
         };
         if custom.custom_type != "envelope"
-            || custom.date != date
+            || month_label(custom.date) != month
             || custom.values.first().and_then(meta_string) != Some(key)
             || custom.values.get(1).and_then(meta_account) != Some(account)
         {
             continue;
         }
-        found = Some(spanned.span.start);
+        found = Some((
+            usize::from(spanned.file_id),
+            spanned.span.start,
+            custom.date,
+        ));
     }
     found
 }
@@ -1220,6 +1254,45 @@ option \"operating_currency\" \"TRY\"
         let food = envelope(&settings, "Expenses:Food");
         assert_eq!(food.fund.as_ref().unwrap().units, "600.00");
         assert_eq!(food.since.as_deref(), Some("2026-03"));
+    }
+
+    /// The plugin resolves a dated key by *month*, and a tie keeps the last
+    /// directive in the stream: a `fund` dated the 15th beats one dated the 1st.
+    /// Matching by day would insert a second directive that the older one beats,
+    /// so the edit would look applied and change nothing.
+    #[test]
+    fn a_mid_month_directive_is_replaced_not_duplicated() {
+        let (_dir, path, state) = fixture(
+            "budget-mid-month",
+            "\
+option \"operating_currency\" \"TRY\"
+
+2026-01-01 custom \"envelope\" \"start date\" \"2026-01\"
+2026-01-01 custom \"envelope\" \"budget account\" \"^Assets:Bank\"
+2026-01-15 custom \"envelope\" \"fund\" Expenses:Food 100.00 TRY
+",
+        );
+        let file = journal(&path);
+
+        budget_write::fund_set(&state, &file, "Expenses:Food", "150.00", "TRY", "2026-01").unwrap();
+
+        let after = read(&path);
+        assert_eq!(occurrences(&after, "custom \"envelope\" \"fund\""), 1);
+        assert!(
+            after.contains("2026-01-15 custom \"envelope\" \"fund\" Expenses:Food 150.00 TRY"),
+            "the governing directive was not the one rewritten:\n{after}"
+        );
+        let settings = settings_of(&state.loaded.read().unwrap().as_ref().unwrap().ledger);
+        assert_eq!(
+            envelope(&settings, "Expenses:Food").fund,
+            Some(Amount {
+                units: "150.00".to_string(),
+                currency: "TRY".to_string()
+            })
+        );
+        // The same amount at that month is still a no-op.
+        budget_write::fund_set(&state, &file, "Expenses:Food", "150.00", "TRY", "2026-01").unwrap();
+        assert_eq!(read(&path), after);
     }
 
     #[test]

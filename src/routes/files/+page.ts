@@ -17,14 +17,18 @@ type FilesData = {
 
 /**
  * The journal's files, once. `journalFiles` is the same read the per-file
- * screen and the sidebar make, and it fails when no ledger is loaded — which
- * is the app's ordinary first state, not something to show as a broken read.
- * `ledgerSummary` is asked only to tell the two apart: a summary means a ledger
- * is open and the listing failed; no summary means there is nothing to open yet.
+ * screen and the sidebar make; it answers an empty list when no ledger is
+ * loaded rather than failing, so an empty answer is not by itself the app's
+ * "nothing is open" state — `ledgerSummary` is what tells the two apart, and it
+ * answers `null` exactly when no journal is loaded. A failure of the listing
+ * with a ledger open is the only real error to show.
  */
 export const load: PageLoad = async (): Promise<FilesData> => {
 	try {
-		return { files: (await commands.journalFiles()) ?? [], error: "", noLedger: false };
+		const files = (await commands.journalFiles()) ?? [];
+		if (files.length > 0) return { files, error: "", noLedger: false };
+		const summary = await commands.ledgerSummary().catch(() => null);
+		return { files, error: "", noLedger: summary === null };
 	} catch (cause) {
 		console.error("journalFiles failed", cause);
 		const failure = messageOf(cause);
