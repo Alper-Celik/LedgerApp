@@ -16,16 +16,18 @@ async function calls(page: Page, cmd: string) {
 
 test("set up writes the envelope configuration the form collected", async ({ page }) => {
 	// Unconfigured first: the backend refuses the range read and budget_settings
-	// has no config, which is the screen's setup state. The plugin is not
-	// declared, so the sheet must say what still has to be added by hand.
+	// has no config, which is the screen's setup state. The journal does not
+	// declare the plugin yet, but its module is beside the journal, so the same
+	// write adds the declaration and the sheet names the file it found.
 	await page.goto("/budget?budget_setup=1&budget_no_plugin=1");
 	await page.getByRole("button", { name: "Set up the envelope budget" }).click();
 
 	const dialog = page.getByRole("dialog", { name: "Set up the envelope budget" });
 	await expect(dialog).toBeVisible();
 	const pluginNote = dialog.getByRole("alert").filter({ hasText: "rustledger_envelope.wasm" });
-	await expect(pluginNote).toContainText('plugin "rustledger_envelope.wasm"');
-	await expect(pluginNote).toContainText("configuration only");
+	await expect(pluginNote).toContainText("does not declare the envelope plugin");
+	await expect(pluginNote).toContainText("/ledger/rustledger_envelope.wasm");
+	await expect(pluginNote).toContainText("(found)");
 
 	// The root journal is the loader's first file, and is preselected.
 	await expect(dialog.getByRole("button", { name: "Target journal file" })).toContainText(
@@ -65,6 +67,60 @@ test("set up writes the envelope configuration the form collected", async ({ pag
 			name: "Edit budgeted amount for Expenses:Food:Groceries from 2026-01",
 		})
 	).toBeVisible();
+});
+
+test("a missing plugin module is refused and the journal is not written", async ({ page }) => {
+	// The journal has no configuration and no module: setup must refuse before
+	// writing anything, and the sheet keeps the draft with the sentence that
+	// names the path.
+	await page.goto("/budget?budget_setup=1&budget_no_plugin=1&budget_wasm_missing=1");
+	await page.getByRole("button", { name: "Set up the envelope budget" }).click();
+
+	const dialog = page.getByRole("dialog", { name: "Set up the envelope budget" });
+	await expect(dialog).toBeVisible();
+	await expect(
+		dialog.getByRole("alert").filter({ hasText: "not found yet" })
+	).toBeVisible();
+
+	await dialog.getByLabel("Start month").fill("2026-03");
+	await dialog.getByRole("button", { name: "Write configuration" }).click();
+
+	await expect(
+		dialog.getByRole("alert").filter({ hasText: "nothing was written" })
+	).toBeVisible();
+	await expect(dialog).toBeVisible();
+	await expect.poll(async () => (await calls(page, "budget_init")).length).toBe(1);
+});
+
+test("edit rewrites the existing configuration in place", async ({ page }) => {
+	await page.goto("/budget");
+	await page.getByRole("button", { name: "Edit configuration" }).click();
+
+	const dialog = page.getByRole("dialog", { name: "Edit the envelope budget" });
+	await expect(dialog).toBeVisible();
+	// The form opens on what the ledger already says, and the target file is
+	// the one holding the block rather than a chooser.
+	await expect(dialog.getByLabel("Start month")).toHaveValue("2025-12");
+	await expect(dialog.getByLabel("Months ahead")).toHaveValue("12");
+	await expect(dialog.getByText("/ledger/main.bean")).toBeVisible();
+
+	await dialog.getByLabel("Start month").fill("2026-01");
+	await dialog.getByRole("radio", { name: "End month" }).click();
+	await dialog.getByLabel("End month").fill("2026-12");
+	await dialog.getByRole("button", { name: "Save configuration" }).click();
+
+	await expect.poll(async () => (await calls(page, "budget_config_set")).length).toBe(1);
+	const [save] = await calls(page, "budget_config_set");
+	expect(save?.args).toEqual({
+		file: "/ledger/main.bean",
+		start: "2026-01",
+		monthsAhead: null,
+		end: "2026-12",
+		budgetAccounts: ["^Assets:"],
+		assert: true,
+		strict: false,
+	});
+	await expect(dialog).toHaveCount(0);
 });
 
 test("editing a Budgeted cell writes a dated fund directive for its month", async ({ page }) => {

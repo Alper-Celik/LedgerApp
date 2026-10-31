@@ -30,7 +30,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { invalidateAll } from "$app/navigation";
 	import { ChevronLeftIcon, ChevronRightIcon } from "@hugeicons/core-free-icons";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
-	import { commands, type BudgetRange, type BudgetSettings } from "../../bindings";
+	import {
+		commands,
+		type BudgetPluginStatus,
+		type BudgetRange,
+		type BudgetSettings,
+	} from "../../bindings";
 	import BudgetAmount from "$lib/components/budget/budget-amount.svelte";
 	import BudgetGridRow from "$lib/components/budget/budget-grid-row.svelte";
 	import BudgetMonthCard from "$lib/components/budget/budget-month-card.svelte";
@@ -74,15 +79,22 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		error: string;
 		settings: BudgetSettings | null;
 		settingsError: string;
+		plugin: BudgetPluginStatus | null;
+		pluginError: string;
 	} | null>(null);
 	const range = $derived(fetched ? fetched.range : data.range);
 	const error = $derived(fetched ? fetched.error : data.error);
 	const settings = $derived(fetched ? fetched.settings : data.settings);
 	const settingsError = $derived(fetched ? fetched.settingsError : data.settingsError);
+	const plugin = $derived(fetched ? fetched.plugin : data.plugin);
+	const pluginError = $derived(fetched ? fetched.pluginError : data.pluginError);
 	const currency = $derived(range?.currency ?? "");
 	let busy = $state(false);
-	/** The setup sheet, opened from the empty state when no config exists. */
+	/** The setup sheet, opened from the empty state and from the header. */
 	let setupOpen = $state(false);
+	/** A plugin repair in flight, and its refusal under the notice. */
+	let pluginBusy = $state(false);
+	let pluginActionError = $state("");
 
 	const months = $derived(range?.months ?? []);
 	const total = $derived(months.length);
@@ -181,11 +193,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	async function refetch() {
 		const current = untrack(() => range);
 		const currentSettings = untrack(() => settings);
+		const currentPlugin = untrack(() => plugin);
 		busy = true;
 		try {
-			const [rangeOutcome, settingsOutcome] = await Promise.allSettled([
+			const [rangeOutcome, settingsOutcome, pluginOutcome] = await Promise.allSettled([
 				commands.budgetRange(current?.from || null, current?.to || null),
 				commands.budgetSettings(),
+				commands.budgetPluginStatus(),
 			]);
 			// A failed read keeps the window (or the configuration) on screen: the
 			// alert says what went wrong rather than the grid blanking out under it.
@@ -211,15 +225,83 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				nextSettings = settingsOutcome.value.data;
 			}
 
+			let nextPlugin = currentPlugin;
+			let nextPluginError = "";
+			if (pluginOutcome.status === "rejected") {
+				console.error("budgetPluginStatus failed", pluginOutcome.reason);
+				nextPluginError = messageOf(pluginOutcome.reason);
+			} else {
+				nextPlugin = pluginOutcome.value;
+			}
+
 			fetched = {
 				range: nextRange,
 				error: nextError,
 				settings: nextSettings,
 				settingsError: nextSettingsError,
+				plugin: nextPlugin,
+				pluginError: nextPluginError,
 			};
 		} finally {
 			busy = false;
 		}
+	}
+
+	/**
+	 * Declare the plugin in the journal — the notice's action for a
+	 * configuration written before setup did this itself. A missing module is
+	 * the backend's explicit refusal, shown under the notice; nothing is
+	 * written in that case.
+	 */
+	async function enablePlugin() {
+		if (pluginBusy) return;
+		pluginBusy = true;
+		pluginActionError = "";
+		try {
+			const result = await commands.budgetPluginEnable();
+			if (result.status === "error") {
+				pluginActionError = result.error;
+				return;
+			}
+		} catch (cause) {
+			pluginActionError = messageOf(cause);
+			return;
+		} finally {
+			pluginBusy = false;
+		}
+		await reload();
+	}
+
+	/**
+	 * The reader's downloaded `rustledger_envelope.wasm`: the chooser picks it,
+	 * the backend copies it beside the journal and (when a configuration
+	 * exists) declares it. A cancel writes nothing.
+	 */
+	async function installPlugin() {
+		if (pluginBusy) return;
+		pluginBusy = true;
+		pluginActionError = "";
+		try {
+			const source = await commands.pickPluginFile();
+			if (source === null) return;
+			const result = await commands.budgetPluginInstall(source);
+			if (result.status === "error") {
+				pluginActionError = result.error;
+				return;
+			}
+		} catch (cause) {
+			pluginActionError = messageOf(cause);
+			return;
+		} finally {
+			pluginBusy = false;
+		}
+		await reload();
+	}
+
+	/** The one reload every write ends in: the plugin's output, then the route's own reads. */
+	async function reload() {
+		bumpLedgerRevision();
+		await invalidateAll();
 	}
 
 	$effect(() => {
@@ -283,6 +365,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				</Button>
 			</div>
 		{/if}
+		<Button variant="outline" size="sm" class="h-8" onclick={() => (setupOpen = true)}>
+			{settings?.config ? "Edit configuration" : "Set up budget"}
+		</Button>
 	</header>
 
 	{#if error && range}
@@ -293,6 +378,63 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	{#if settingsError && range}
 		<div class="shrink-0 px-4 pb-2">
 			<Alert variant="destructive">The budget's configuration could not be read: {settingsError}</Alert>
+		</div>
+	{/if}
+	{#if pluginError && range}
+		<div class="shrink-0 px-4 pb-2">
+			<Alert variant="destructive">The plugin's status could not be read: {pluginError}</Alert>
+		</div>
+	{/if}
+	{#if plugin && !plugin.declared && plugin.wasm.length > 0}
+		<!--
+			The journal has configuration but no `plugin` line (a budget set up
+			before setup wrote it, or a hand-written one). Both repairs go
+			through the backend's loader-verified funnel; the missing-module
+			refusal keeps its sentence under this notice.
+		-->
+		<div class="shrink-0 px-4 pb-2">
+			<Alert class="flex flex-col gap-2 sm:flex-row sm:items-center">
+				{@const wasm = plugin.wasm[0] ?? null}
+				<div class="min-w-0 flex-1">
+					<p class="text-xs font-medium">The envelope plugin is not declared</p>
+					<p class="text-muted-foreground text-[11px] leading-tight">
+						The budget is written from <code class="font-mono">custom "envelope"</code>
+						directives, but nothing loads <code class="font-mono">rustledger_envelope.wasm</code>.
+						{#if wasm}
+							Put the module at
+							<code class="font-mono break-all">{wasm.path}</code>
+							{#if wasm.present}
+								— found.
+							{:else}
+								— not found there yet.
+							{/if}
+						{/if}
+					</p>
+				</div>
+				<div class="flex flex-wrap gap-2">
+					<Button
+						size="sm"
+						variant="outline"
+						class="h-8"
+						disabled={pluginBusy || !plugin.wasm.some((candidate) => candidate.present)}
+						onclick={() => void enablePlugin()}
+					>
+						Add the plugin line
+					</Button>
+					<Button
+						size="sm"
+						variant="secondary"
+						class="h-8"
+						disabled={pluginBusy}
+						onclick={() => void installPlugin()}
+					>
+						Use a downloaded .wasm…
+					</Button>
+				</div>
+			</Alert>
+			{#if pluginActionError}
+				<Alert variant="destructive" class="mt-2">{pluginActionError}</Alert>
+			{/if}
 		</div>
 	{/if}
 
@@ -444,8 +586,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			Nothing to lay out. The empty state is a state, not a failure: a
 			ledger without an envelope budget is the normal state of one. When the
 			config is missing the screen offers the way in; when it exists but the
-			plugin wrote no months, it says why that can be (usually the plugin
-			line is absent, which the app cannot write for the reader).
+			plugin wrote no months, it offers the edit and says what else can be
+			missing (the plugin notice above has the repair controls).
 		-->
 		<div class="min-h-0 flex-1 overflow-y-auto p-4" bind:clientWidth={width}>
 			<div class="flex max-w-md flex-col gap-2">
@@ -457,18 +599,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						directives. Set up its configuration — the start month, the on-budget accounts,
 						and how far the budget runs — and its funding, spending and rollovers land under
 						<code class="font-mono">Equity:Envelope:</code> for the months to appear here.
+						When <code class="font-mono">rustledger_envelope.wasm</code> sits beside the
+						journal, setup declares it in the same write.
 					</p>
-					<div>
+					<div class="flex flex-wrap gap-2">
 						<Button size="sm" onclick={() => (setupOpen = true)}>Set up the envelope budget</Button>
 					</div>
-					{#if !settings.plugin_declared}
-						<p class="text-muted-foreground text-xs">
-							This journal does not declare
-							<code class="font-mono">plugin "rustledger_envelope.wasm"</code>. Setup writes the
-							configuration only — the app cannot install a plugin — so add that line to the
-							journal as well.
-						</p>
-					{/if}
 				{:else if settings?.config}
 					<h2 class="text-sm font-medium">
 						{error ? "The budget could not be read" : "The budget is configured"}
@@ -478,13 +614,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						plugin has written no months for this window. Load the ledger again, or widen the
 						window with <code class="font-mono">?from=</code>.
 					</p>
-					{#if !settings.plugin_declared}
-						<p class="text-muted-foreground text-xs">
-							This journal does not declare
-							<code class="font-mono">plugin "rustledger_envelope.wasm"</code>. Add that line to
-							the journal: setup wrote the configuration only.
-						</p>
-					{/if}
+					<div class="flex flex-wrap gap-2">
+						<Button size="sm" variant="outline" onclick={() => (setupOpen = true)}>
+							Edit the configuration
+						</Button>
+					</div>
 				{:else if range === null}
 					<h2 class="text-sm font-medium">The budget could not be read</h2>
 					<p class="text-muted-foreground text-xs">
@@ -513,11 +647,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	<BudgetSetup
 		open={setupOpen}
-		pluginDeclared={settings?.plugin_declared ?? false}
+		{settings}
+		{plugin}
 		onclose={() => (setupOpen = false)}
-		onsaved={async () => {
-			bumpLedgerRevision();
-			await invalidateAll();
-		}}
+		onsaved={reload}
 	/>
 </div>

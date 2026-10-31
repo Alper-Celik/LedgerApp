@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { commands, type BudgetRange, type BudgetSettings } from "../../bindings";
+import {
+	commands,
+	type BudgetPluginStatus,
+	type BudgetRange,
+	type BudgetSettings,
+} from "../../bindings";
 import { messageOf } from "$lib/errors.js";
 import type { PageLoad } from "./$types";
 
@@ -28,9 +33,10 @@ import type { PageLoad } from "./$types";
 export const load: PageLoad = async ({ url }) => {
 	const from = url.searchParams.get("from");
 	const to = url.searchParams.get("to");
-	const [range, settings] = await Promise.allSettled([
+	const [range, settings, plugin] = await Promise.allSettled([
 		commands.budgetRange(from || null, to || null),
 		commands.budgetSettings(),
+		commands.budgetPluginStatus(),
 	]);
 
 	let months: BudgetRange | null = null;
@@ -55,5 +61,25 @@ export const load: PageLoad = async ({ url }) => {
 		configuration = settings.value.data;
 	}
 
-	return { range: months, error, settings: configuration, settingsError };
+	// The plugin's own status is what the screen's notice and its repair
+	// controls read: whether the journal declares the module, which file
+	// declares it, and the paths the `.wasm` can sit at. No ledger loaded is
+	// an empty status, not a failure.
+	let pluginStatus: BudgetPluginStatus | null = null;
+	let pluginError = "";
+	if (plugin.status === "rejected") {
+		console.error("budgetPluginStatus failed", plugin.reason);
+		pluginError = messageOf(plugin.reason);
+	} else {
+		pluginStatus = plugin.value;
+	}
+
+	return {
+		range: months,
+		error,
+		settings: configuration,
+		settingsError,
+		plugin: pluginStatus,
+		pluginError,
+	};
 };
