@@ -17,7 +17,9 @@ test("the sidebar draws the journal's files as folders and leaves", async ({ pag
 	await page.goto("/account/Assets:Bank");
 	const tree = sidebarTree(page);
 
-	const root = tree.locator('[data-path="/ledger"]');
+	// The tree is rooted at the folder every file shares (`/ledger` in the stub),
+	// so the first rows are `accounts`, `Liabilities` and `main.bean` — the rows
+	// are addressed by their absolute path, and named from the ledger down.
 	const accounts = tree.locator('[data-path="/ledger/accounts"]');
 	const added = tree.locator('[data-path="/ledger/accounts/2026.bean"]');
 	const untouched = tree.locator('[data-path="/ledger/accounts/2025.bean"]');
@@ -25,12 +27,11 @@ test("the sidebar draws the journal's files as folders and leaves", async ({ pag
 	const deep = tree.locator('[data-path="/ledger/Liabilities/TR:Ziraat/Bankkart/2026/2026-06.bean"]');
 
 	// Every folder starts open: the deepest leaf is already on screen.
-	await expect(root.getByRole("button")).toHaveAttribute("aria-expanded", "true");
 	await expect(accounts.getByRole("button")).toHaveAttribute("aria-expanded", "true");
 	await expect(deep).toBeVisible();
+	await expect(tree.locator('[data-path="/ledger"]')).toHaveCount(0);
 
 	// Counts belong to their own rows, and a folder's is its descendants'.
-	await expect(root.locator('[data-slot="file-tree-count"]')).toHaveText("8");
 	await expect(accounts.locator('[data-slot="file-tree-count"]')).toHaveText("4");
 	await expect(added.locator('[data-slot="file-tree-count"]')).toHaveText("4");
 	await expect(untouched.locator('[data-slot="file-tree-count"]')).toHaveText("0");
@@ -119,7 +120,10 @@ test("the files screen carries the same tree at full width", async ({ page }) =>
 
 	const tree = page.locator("main").locator('[data-slot="file-tree"]');
 	await expect(tree).toBeVisible();
-	await expect(tree.locator('[data-path="/ledger"]')).toContainText("8");
+	// No `/ledger` row: the tree is rooted there, so the shared folder's own
+	// total is the sum of the rows it shows.
+	await expect(tree.locator('[data-path="/ledger"]')).toHaveCount(0);
+	await expect(tree.locator('[data-path="/ledger/accounts"]')).toContainText("4");
 	await expect(
 		tree.locator('[data-path="/ledger/Liabilities/TR:Ziraat/Bankkart/2026/2026-06.bean"]')
 	).toBeVisible();

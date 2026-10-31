@@ -64,23 +64,62 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	const CHANGE_ORDER: Record<Change, number> = { unchanged: 0, modified: 1, added: 2 };
 
 	/**
-	 * Splits every path into folders and a leaf. Segments are sorted into
-	 * folders before files, each alphabetically, which is what makes a subtree
-	 * readable; the backend's list order carries no meaning here.
+	 * The directory every file shares — the ledger's own folder.
+	 *
+	 * The backend names files by absolute path; drawing that would spend the
+	 * first five rows on `/`, `/home`, `/home/alper`, … — identical for every
+	 * file. The tree is rooted at what they have in common instead; the full path
+	 * stays the row's identity and its title.
 	 */
+	/**
+	 * Splits every path into folders and a leaf, relative to [`sharedRoot`].
+	 * Segments are sorted into folders before files, each alphabetically, which
+	 * is what makes a subtree readable; the backend's list order carries no
+	 * meaning here.
+	 */
+	function sharedRoot(files: JournalFile[]): string {
+		if (files.length === 0) return "";
+		let prefix = files[0].path.split("/").slice(0, -1);
+		for (const file of files) {
+			const segments = file.path.split("/").slice(0, -1);
+			let shared = 0;
+			while (
+				shared < prefix.length &&
+				shared < segments.length &&
+				prefix[shared] === segments[shared]
+			) {
+				shared += 1;
+			}
+			prefix = prefix.slice(0, shared);
+			if (prefix.length === 0) return "";
+		}
+		return prefix.join("/");
+	}
+
 	function buildTree(files: JournalFile[]): TreeNode[] {
 		const roots: TreeNode[] = [];
 		const folders = new Map<string, TreeNode>();
 		const seen = new Set<string>();
+		const root = sharedRoot(files);
 
 		for (const file of files) {
 			if (seen.has(file.path)) continue;
 			seen.add(file.path);
-			const segments = file.path.split("/").filter((segment) => segment.length > 0);
+			// The rows are named from the ledger's folder down, but their identity
+			// stays the backend's absolute path: `data-path` is what a test and a
+			// future caller address a row by, and it must not depend on how deep
+			// the shared root happens to be.
+			const parts = file.path.split("/").filter((segment) => segment.length > 0);
+			const skip =
+				root && file.path.startsWith(`${root}/`)
+					? root.split("/").filter((segment) => segment.length > 0).length
+					: 0;
+			const segments = parts.slice(skip);
 			if (segments.length === 0) continue;
+			const leading = (file.path.startsWith("/") ? "/" : "") + parts.slice(0, skip).join("/");
 
 			let children = roots;
-			let prefix = "";
+			let prefix = leading;
 			for (const [index, segment] of segments.entries()) {
 				prefix = `${prefix}/${segment}`;
 				if (index === segments.length - 1) {
