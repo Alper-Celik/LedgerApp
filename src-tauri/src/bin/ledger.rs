@@ -161,6 +161,14 @@ enum IndexCommand {
         #[arg(long, value_name = "PATH")]
         csv: PathBuf,
     },
+    /// Write a stored series into the journal as one price per point.
+    Prices {
+        /// The series id, e.g. tr-cpi.
+        id: String,
+        /// The journal file to append to (default: the root journal).
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
 }
 
 /// Why a command did not answer, and the exit code that says which kind.
@@ -856,6 +864,41 @@ fn index(cli: &Cli, command: &IndexCommand) -> Result<u8, CliError> {
                 .map_err(|error| CliError::Failed(format!("{}: {error}", csv.display())))?;
             let series = api::index_import(&config, id, label, source, currency, &text)?;
             series_answer(cli, &series)
+        }
+        IndexCommand::Prices { id, file } => {
+            let opened = open_ledger(cli)?;
+            let file = file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let file = (!file.is_empty()).then_some(file.as_str());
+            let written = api::index_write_prices(&opened, &config, id, file)?;
+            if cli.json {
+                return emit_json(&written);
+            }
+            emit(|out| {
+                if written.written == 0 {
+                    writeln!(
+                        out,
+                        "{} already holds all {} prices of `{}` in {}",
+                        written.file, written.skipped, written.commodity, written.currency
+                    )
+                } else {
+                    writeln!(
+                        out,
+                        "wrote {} prices of `{}` in {} into {}{}",
+                        written.written,
+                        written.commodity,
+                        written.currency,
+                        written.file,
+                        if written.skipped == 0 {
+                            String::new()
+                        } else {
+                            format!(" ({} already there)", written.skipped)
+                        }
+                    )
+                }
+            })
         }
     }
 }

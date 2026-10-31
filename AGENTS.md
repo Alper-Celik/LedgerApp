@@ -39,7 +39,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   device, so a phone's operation undoes on the desktop).
 - **Fetchers** — `prices.rs` + `prices/tefas.rs` (quotes via rustledger's `PriceSource`, TEFAS
   downstream, written to the journal through the edit pipeline), `index.rs` (index-as-price maths),
-  `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `dashboards.rs` (the saved
+  `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `index_price.rs` (a stored
+  series written into the journal as `IDX.<ID>` prices, one per month), `dashboards.rs` (the saved
   dashboard store).
 - **Assistant** — `ai.rs` (OpenAI-compatible transport, settings that never leak the key), `ai_cmd.rs`
   (IPC surface, system prompt, tool table), `ai_stream.rs` (streaming reads forwarded as `ai://delta`),

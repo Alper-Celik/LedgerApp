@@ -838,18 +838,38 @@ fn checked_price(value: &str) -> Result<Decimal, String> {
 /// `text` with `lines` appended, one blank line apart — the same rule
 /// `editing`'s own appends follow, so a quote lands in the file the way a
 /// hand-written entry does.
+///
+/// The append uses the file's own line ending: a journal saved with CRLF keeps
+/// CRLF, because the loader (and git) would otherwise see every existing line
+/// change on a write that added two.
 fn with_appended(text: &str, lines: &str) -> String {
-    let mut rewritten = String::with_capacity(text.len() + lines.len() + 2);
+    let eol = line_ending(text);
+    let lines = if eol == "\n" {
+        lines.to_owned()
+    } else {
+        lines.replace('\n', eol)
+    };
+    let mut rewritten = String::with_capacity(text.len() + lines.len() + 2 * eol.len());
     rewritten.push_str(text);
     if !text.is_empty() {
         if !text.ends_with('\n') {
-            rewritten.push_str("\n\n");
-        } else if !text.ends_with("\n\n") {
-            rewritten.push('\n');
+            rewritten.push_str(eol);
+            rewritten.push_str(eol);
+        } else if !text.ends_with(&format!("{eol}{eol}")) {
+            rewritten.push_str(eol);
         }
     }
-    rewritten.push_str(lines);
+    rewritten.push_str(&lines);
     rewritten
+}
+
+/// The line ending the file already uses (`\r\n` when its first newline is a
+/// CRLF, else `\n`) — the same reading `budget_write` appends by.
+fn line_ending(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(index) if index > 0 && text.as_bytes()[index - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
 }
 
 #[cfg(test)]
@@ -978,6 +998,29 @@ option \"operating_currency\" \"TRY\"
             price: price.to_string(),
             source: "tefas".to_string(),
         }
+    }
+
+    #[test]
+    fn an_append_uses_the_files_own_line_ending() {
+        let lf = with_appended("2026-01-01 price AAPL 1.00 USD\n", "2026-01-02 price AAPL 2.00 USD\n");
+        assert_eq!(
+            lf,
+            "2026-01-01 price AAPL 1.00 USD\n\n2026-01-02 price AAPL 2.00 USD\n"
+        );
+        let crlf = with_appended(
+            "2026-01-01 price AAPL 1.00 USD\r\n",
+            "2026-01-02 price AAPL 2.00 USD\n",
+        );
+        assert_eq!(
+            crlf,
+            "2026-01-01 price AAPL 1.00 USD\r\n\r\n2026-01-02 price AAPL 2.00 USD\r\n"
+        );
+        // A file that already ends in a blank line gets no second one.
+        let spaced = with_appended("2026-01-01 open Assets:Bank\r\n\r\n", "2026-01-02 price AAPL 2.00 USD\n");
+        assert_eq!(
+            spaced,
+            "2026-01-01 open Assets:Bank\r\n\r\n2026-01-02 price AAPL 2.00 USD\r\n"
+        );
     }
 
     #[test]

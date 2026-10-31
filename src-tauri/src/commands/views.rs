@@ -538,6 +538,22 @@ pub async fn index_refresh(
     .map_err(|error| error.to_string())?
 }
 
+/// Write a stored index series into the journal as `price` directives — one per
+/// point, on the point's own month — so the index is a commodity the rest of
+/// the app can chart and convert with. The series is read from the store by id
+/// (a series fetched a moment ago is already there); `file` defaults to the
+/// ledger's root journal.
+#[tauri::command]
+#[specta::specta]
+pub fn index_write_prices(
+    id: String,
+    file: Option<String>,
+    app: tauri::AppHandle<AppRuntime>,
+    state: State<'_, AppState>,
+) -> Result<crate::index_price::IndexPriceWrite, String> {
+    crate::index_price::write_stored(&state, &indexes_dir(&app)?, &id, file.as_deref())
+}
+
 /// Spending per month in nominal and index-adjusted terms, per category — the
 /// lifestyle-inflation screen's data. `index` names a stored series.
 #[tauri::command]

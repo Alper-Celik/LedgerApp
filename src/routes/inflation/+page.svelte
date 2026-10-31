@@ -19,10 +19,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import ImportIndexSheet from "$lib/components/inflation/import-index-sheet.svelte";
 	import IndexCard from "$lib/components/inflation/index-card.svelte";
 	import LifestylePanel from "$lib/components/inflation/lifestyle-panel.svelte";
+	import ProviderList from "$lib/components/inflation/provider-list.svelte";
 	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
-	import { commands, type IndexSeries, type LifestyleReport } from "../../bindings";
+	import {
+		commands,
+		type IndexProviderInfo,
+		type IndexSeries,
+		type LifestyleReport,
+	} from "../../bindings";
 	import { messageOf } from "$lib/errors.js";
+	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import type { PageProps } from "./$types";
 
 	let { data }: PageProps = $props();
@@ -79,6 +86,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	/** Per-series refresh in flight, and its publisher's refusal by id. */
 	let refreshing = $state<Record<string, boolean>>({});
 	let refreshError = $state<Record<string, string>>({});
+	/** Per-series price write in flight, its answer, and its refusal, by id. */
+	let writing = $state<Record<string, boolean>>({});
+	let writeNote = $state<Record<string, string>>({});
+	let writeError = $state<Record<string, string>>({});
+	/** The publishers this build knows, and per-publisher fetch state. */
+	let providers = $state<IndexProviderInfo[]>([]);
+	let fetching = $state<Record<string, boolean>>({});
+	let fetchError = $state<Record<string, string>>({});
+
+	$effect(() => {
+		// The provider list is the backend's, so the screen cannot name a
+		// publisher this build no longer knows. A refusal leaves the list
+		// empty: the cards are still usable, and the import sheet still works.
+		void commands.indexProviderList().then(
+			(list) => (providers = list),
+			() => (providers = [])
+		);
+	});
 
 	/** Replace the part of the state an answer changed. */
 	function save(changes: Partial<typeof view>) {
@@ -153,6 +178,62 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		// from whose months just changed, both need the report run again.
 		if (indexId === "" || one.id === indexId) await runReport(months, one.id);
 	}
+
+	/**
+	 * Ask the store to write one series into the journal as prices. The
+	 * command takes the id, not the payload on screen: the store is the
+	 * authority, so a series refreshed a moment ago is written from its own
+	 * bytes. The answer names the commodity and the file, and a second press
+	 * writes nothing — the ledger already holds those directives.
+	 */
+	async function writePrices(one: IndexSeries) {
+		writing[one.id] = true;
+		delete writeError[one.id];
+		delete writeNote[one.id];
+		try {
+			const result = await commands.indexWritePrices(one.id, null);
+			if (result.status === "error") {
+				writeError[one.id] = result.error;
+				return;
+			}
+			const answer = result.data;
+			// The journal changed, so every other screen's snapshot is stale.
+			bumpLedgerRevision();
+			writeNote[one.id] =
+				answer.written === 0
+					? `${answer.commodity}: the journal already holds all ${answer.skipped} prices in ${answer.currency}.`
+					: `${answer.commodity}: wrote ${answer.written} prices into ${answer.file}` +
+						(answer.skipped > 0 ? ` (${answer.skipped} already there).` : ".");
+		} catch (cause) {
+			writeError[one.id] = messageOf(cause);
+		} finally {
+			writing[one.id] = false;
+		}
+	}
+
+	/**
+	 * Add a series the store does not hold yet: the provider downloads it and
+	 * stores it, and the new card is what can then be written as prices. A
+	 * provider without a download endpoint answers with its explanation, which
+	 * stays on that provider's row.
+	 */
+	async function fetchProvider(provider: IndexProviderInfo) {
+		fetching[provider.id] = true;
+		delete fetchError[provider.id];
+		try {
+			const result = await commands.indexRefresh(provider.id);
+			if (result.status === "error") {
+				fetchError[provider.id] = result.error;
+				return;
+			}
+			save({ series: withSeries(result.data), loadError: "" });
+			if (indexId === "") await runReport(months, result.data.id);
+		} catch (cause) {
+			fetchError[provider.id] = messageOf(cause);
+		} finally {
+			fetching[provider.id] = false;
+		}
+	}
 </script>
 
 <div class="flex flex-col gap-6 p-4">
@@ -201,10 +282,32 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						refreshing={refreshing[one.id] === true}
 						error={refreshError[one.id] ?? ""}
 						onrefresh={() => void refresh(one)}
+						writing={writing[one.id] === true}
+						writeNote={writeNote[one.id] ?? ""}
+						writeError={writeError[one.id] ?? ""}
+						onwrite={() => void writePrices(one)}
 					/>
 				{/each}
 			</div>
 		{/if}
+
+		<!--
+			The way in for a series the store does not hold yet: a provider this
+			build knows downloads and stores it, and the new card is then what
+			can be written into the journal as prices. The list comes from the
+			backend, so it cannot name a publisher that is gone.
+		-->
+		<div class="flex flex-col gap-2 pt-1">
+			<h3 class="text-sm font-semibold tracking-tight">Add a series</h3>
+			<ProviderList
+				{providers}
+				stored={series.map((one) => one.id)}
+				{fetching}
+				errors={fetchError}
+				onfetch={(provider) => void fetchProvider(provider)}
+				onimport={() => (importOpen = true)}
+			/>
+		</div>
 	</section>
 
 	<section class="flex flex-col gap-3" aria-labelledby="lifestyle-heading">

@@ -35,6 +35,7 @@ mod git;
 mod git_ops;
 mod history;
 mod index;
+mod index_price;
 mod index_providers;
 mod index_store;
 mod lsp;
@@ -130,6 +131,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         index_series,
         index_import,
         index_refresh,
+        index_write_prices,
         lifestyle_report,
         conversations,
         conversation,
