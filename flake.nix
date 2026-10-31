@@ -301,6 +301,7 @@
               qmakeMerged
               qtMerged
               cmake
+              mold # host link step, via the clang driver in the shellHook
             ];
 
             buildInputs = with pkgs; [
@@ -335,6 +336,15 @@
               # qt-build-utils prefers $QMAKE over PATH and searches for qmake6
               # first, so pin the shim explicitly rather than rely on PATH order.
               export QMAKE="${qmakeMerged}/bin/qmake"
+
+              # mold instead of the GNU linker for the host binary: the app
+              # links one large executable, and mold finishes it in a fraction
+              # of the time. `clang` is the driver, `mold` above supplies
+              # ld.mold. Per-target variables rather than RUSTFLAGS so a
+              # caller's own RUSTFLAGS still apply. (lld keeps its wasm32 job;
+              # macOS links with its own ld64, so this stays Linux-only.)
+              export CARGO_TARGET_${pkgs.lib.toUpper (builtins.replaceStrings [ "-" "." ] [ "_" "_" ] pkgs.stdenv.hostPlatform.config)}_LINKER=clang
+              export CARGO_TARGET_${pkgs.lib.toUpper (builtins.replaceStrings [ "-" "." ] [ "_" "_" ] pkgs.stdenv.hostPlatform.config)}_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
             '';
           };
 

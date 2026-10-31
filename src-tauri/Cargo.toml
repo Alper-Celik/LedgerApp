@@ -9,6 +9,7 @@ description = "A desktop ledger for Beancount journals"
 authors = ["Alper Çelik <alper@alper-celik.dev>"]
 license = "AGPL-3.0-or-later"
 edition = "2024"
+default-run = "ledger-app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -35,15 +36,18 @@ tauri-build = { version = "2", features = [] }
 # runtime-independent ones are kept. The Linux build takes tauri-runtime-qt
 # below; Windows/macOS re-add `wry` in their target section.
 tauri = { version = "2", default-features = false, features = [
-    "compression",
-    "common-controls-v6",
-    "dynamic-acl",
-    "x11",
+  "compression",
+  "common-controls-v6",
+  "dynamic-acl",
+  "x11",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 specta = "2.0.0-rc.25"
-tauri-specta = { version = "2.0.0-rc.25", features = ["javascript", "typescript"] }
+tauri-specta = { version = "2.0.0-rc.25", features = [
+  "javascript",
+  "typescript",
+] }
 specta-typescript = "0.0.12"
 rustledger-core = "0.24.0"
 rustledger-parser = "0.24.0"
@@ -115,8 +119,8 @@ chart-render = { path = "../crates/chart-render" }
 # unverified — and `attachments::render_pdf` documents the refusal there.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 mupdf = { version = "0.8", default-features = false, features = [
-    "base14-fonts",
-    "img",
+  "base14-fonts",
+  "img",
 ] }
 
 # Linux: the Qt runtime, taken from the submodule at vendor/TauriQt — the app
@@ -126,7 +130,9 @@ mupdf = { version = "0.8", default-features = false, features = [
 # backend (D-Bus; no toolkit in the process) rather than rfd's default GTK one.
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri-runtime-qt = { path = "../vendor/TauriQt/tauri-runtime-qt" }
-tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+tauri-plugin-dialog = { version = "2", default-features = false, features = [
+  "xdg-portal",
+] }
 
 # Everything but Linux: the stock wry runtime (Windows/macOS today, Android and
 # iOS as they come). Enabling `wry` only here keeps WebView2/WKWebView/the system
