@@ -113,6 +113,23 @@ test("the sheet installs the plugin the app carries, with nothing downloaded", a
 	expect((await calls(page, "pick_plugin_file")).length).toBe(0);
 });
 
+test("an outdated module is replaced from the page", async ({ page }) => {
+	// The journal declares the plugin and a module is there, but it is not this
+	// app's build: without this notice the ledger could never be repaired, since
+	// the repair controls only spoke for an undeclared journal.
+	await page.goto("/budget?budget_stale=1");
+	const notice = page.getByRole("alert").filter({ hasText: "out of date" });
+	await expect(notice).toBeVisible();
+	await expect(notice).toContainText("not the build this app carries");
+
+	await notice.getByRole("button", { name: "Use the bundled plugin" }).click();
+
+	await expect
+		.poll(async () => (await calls(page, "budget_plugin_install_bundled")).length)
+		.toBe(1);
+	await expect(page.getByRole("alert").filter({ hasText: "out of date" })).toHaveCount(0);
+});
+
 test("edit rewrites the existing configuration in place", async ({ page }) => {
 	await page.goto("/budget");
 	await page.getByRole("button", { name: "Edit configuration" }).click();

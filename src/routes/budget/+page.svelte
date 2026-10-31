@@ -410,23 +410,33 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<Alert variant="destructive">The plugin's status could not be read: {pluginError}</Alert>
 		</div>
 	{/if}
-	{#if plugin && !plugin.declared && settings?.config && plugin.wasm.length > 0}
+	{#if plugin && (!plugin.declared || plugin.stale) && settings?.config && plugin.wasm.length > 0}
 		<!--
-			The journal has configuration but no `plugin` line (a budget set up
-			before setup wrote it, or a hand-written one). Both repairs go
-			through the backend's loader-verified funnel; the missing-module
-			refusal keeps its sentence under this notice.
+			Two states, one notice: the journal has configuration but no `plugin`
+			line (a budget set up before setup wrote it, or a hand-written one),
+			or the module beside it is not the build this app carries — an older
+			copy, which the bundled install replaces. Both repairs go through the
+			backend's loader-verified funnel; the missing-module refusal keeps its
+			sentence under this notice.
 		-->
 		<div class="shrink-0 px-4 pb-2">
 			<Alert class="flex flex-col gap-2 sm:flex-row sm:items-center">
 				{@const wasm = plugin.wasm[0] ?? null}
 				<div class="min-w-0 flex-1">
-					<p class="text-xs font-medium">The envelope plugin is not declared</p>
+					<p class="text-xs font-medium">
+						{plugin.stale ? "The envelope plugin is out of date" : "The envelope plugin is not declared"}
+					</p>
 					<p class="text-muted-foreground text-[11px] leading-tight">
-						The budget is written from <code class="font-mono">custom "envelope"</code>
-						directives, but nothing loads <code class="font-mono">rustledger_envelope.wasm</code>.
+						{#if plugin.stale}
+							The module beside the journal is not the build this app carries, so it may
+							refuse to run (an execution error in the ledger's problems). The bundled
+							install replaces it.
+						{:else}
+							The budget is written from <code class="font-mono">custom "envelope"</code>
+							directives, but nothing loads <code class="font-mono">rustledger_envelope.wasm</code>.
+						{/if}
 						{#if wasm}
-							Put the module at
+							{plugin.stale ? "Module:" : "Put the module at"}
 							<code class="font-mono break-all">{wasm.path}</code>
 							{#if wasm.present}
 								— found.

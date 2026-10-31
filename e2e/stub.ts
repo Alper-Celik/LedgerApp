@@ -478,10 +478,13 @@ export async function stubIpc(page: Page) {
 			/** The envelope plugin's declaration and its module, as the budget screen reads them. */
 			let pluginDeclared = !window.location.search.includes("budget_no_plugin=1");
 			let pluginWasmPresent = !window.location.search.includes("budget_wasm_missing=1");
+			// An older copy of the module: declared, present, and not this app's build.
+			let pluginStale = window.location.search.includes("budget_stale=1");
 			const pluginStatus = () => ({
 				declared: pluginDeclared,
 				file: pluginDeclared ? "/ledger/main.bean" : null,
 				wasm: [{ path: "/ledger/rustledger_envelope.wasm", present: pluginWasmPresent }],
+				stale: pluginStale,
 			});
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
@@ -608,9 +611,10 @@ export async function stubIpc(page: Page) {
 							pluginDeclared = budgetConfigured;
 							return Promise.resolve(pluginStatus());
 						case "budget_plugin_install_bundled":
-							// The app's own copy: no file to choose, and the same rule about
-							// declaring only what the journal already configures.
+							// The app's own copy: no file to choose, it replaces an older
+							// module, and it declares only what the journal already configures.
 							pluginWasmPresent = true;
+							pluginStale = false;
 							pluginDeclared = budgetConfigured;
 							return Promise.resolve(pluginStatus());
 						case "budget_init":

@@ -184,10 +184,15 @@ pub struct BudgetPluginStatus {
     pub declared: bool,
     /// The loaded path of the file that declares it, when one does.
     pub file: Option<String>,
-    /// The candidate locations for `rustledger_envelope.wasm`: the declaring
-    /// file's directory first, then the root journal's. Empty when no ledger
-    /// is loaded.
+    /// The candidate locations for `rustledger_envelope.wasm`: the root
+    /// journal's directory first, then the declaring file's. Empty when no
+    /// ledger is loaded.
     pub wasm: Vec<PluginWasm>,
+    /// The module on disk is not the build this app carries, so the installed
+    /// copy is an older one. The screen offers the bundled install for it: a
+    /// ledger that declares the plugin can otherwise never be repaired, because
+    /// the repair only spoke for an undeclared journal.
+    pub stale: bool,
 }
 
 /// Everything the budget screen's editor reads: whether the plugin is declared,
@@ -461,7 +466,7 @@ fn plugin_status_of(ledger: &Ledger, root: &Path) -> BudgetPluginStatus {
         }
     }
 
-    let wasm = directories
+    let wasm: Vec<PluginWasm> = directories
         .into_iter()
         .map(|directory| {
             let path = directory.join(ENVELOPE_PLUGIN);
@@ -472,10 +477,24 @@ fn plugin_status_of(ledger: &Ledger, root: &Path) -> BudgetPluginStatus {
         })
         .collect();
 
+    // The module beside the journal, when there is one, against the build the
+    // app ships. Read only when a candidate is present: an absent module is not
+    // stale, it is missing, and the screen says that instead.
+    #[cfg(not(target_os = "android"))]
+    let stale = wasm
+        .iter()
+        .find(|candidate| candidate.present)
+        .is_some_and(|candidate| {
+            std::fs::read(&candidate.path).is_ok_and(|bytes| bytes != BUNDLED_PLUGIN)
+        });
+    #[cfg(target_os = "android")]
+    let stale = false;
+
     BudgetPluginStatus {
         declared: declared.is_some(),
         file,
         wasm,
+        stale,
     }
 }
 
@@ -2811,9 +2830,16 @@ option \"operating_currency\" \"TRY\"
         let target = dir.file("rustledger_envelope.wasm");
         fs::write(&target, b"\0asm-this-is-an-older-build").unwrap();
 
+        // The screen reads this before any repair control is offered.
+        assert!(
+            budget_write::plugin_status(&state).stale,
+            "a module that is not this app's build is reported stale"
+        );
+
         let status = budget_write::plugin_install_bundled(&state).unwrap();
         assert!(status.declared, "the configuration is declared");
         assert_eq!(fs::read(&target).unwrap(), BUNDLED_PLUGIN, "the app's build wins");
+        assert!(!status.stale, "the bundled build is the current one");
     }
 
     #[test]

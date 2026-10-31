@@ -806,11 +806,18 @@ export type BudgetPluginStatus = {
 	/**  The loaded path of the file that declares it, when one does. */
 	file: string | null,
 	/**
-	 *  The candidate locations for `rustledger_envelope.wasm`: the declaring
-	 *  file's directory first, then the root journal's. Empty when no ledger
-	 *  is loaded.
+	 *  The candidate locations for `rustledger_envelope.wasm`: the root
+	 *  journal's directory first, then the declaring file's. Empty when no
+	 *  ledger is loaded.
 	 */
 	wasm: PluginWasm[],
+	/**
+	 *  The module on disk is not the build this app carries, so the installed
+	 *  copy is an older one. The screen offers the bundled install for it: a
+	 *  ledger that declares the plugin can otherwise never be repaired, because
+	 *  the repair only spoke for an undeclared journal.
+	 */
+	stale: boolean,
 };
 
 /**
