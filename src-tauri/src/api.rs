@@ -52,6 +52,7 @@ use crate::session::{self, AppState};
 
 pub use crate::budget::{BudgetRange, BudgetRangeMonth};
 pub use crate::index::{IndexPoint, IndexSeries};
+pub use crate::index_price::IndexPriceWrite;
 pub use crate::model::{BudgetEnvelope, BudgetGroup, BudgetMonth};
 pub use crate::prices::{
     PriceFailure, PriceFetch, PriceQuote, PriceSourceInfo, PriceTarget, QuoteRequest,
@@ -505,6 +506,18 @@ pub fn index_refresh(config_dir: &Path, id: &str) -> Result<IndexSeries, String>
     let series = provider.fetch()?;
     crate::index_store::save_series(&indexes_dir(config_dir), &series)?;
     Ok(series)
+}
+
+/// Write the stored series `id` into the loaded ledger's journal as one `price`
+/// directive per point — the same write the window's `index_write_prices`
+/// command performs. `file` defaults to the root journal.
+pub fn index_write_prices(
+    opened: &Opened,
+    config_dir: &Path,
+    id: &str,
+    file: Option<&str>,
+) -> Result<IndexPriceWrite, String> {
+    crate::index_price::write_stored(&opened.state, &indexes_dir(config_dir), id, file)
 }
 
 // ---------------------------------------------------------------- assistant ---

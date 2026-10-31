@@ -359,6 +359,14 @@ export const commands = {
 	 */
 	indexRefresh: (id: string) => typedError<IndexSeries, string>(__TAURI_INVOKE("index_refresh", { id })),
 	/**
+	 *  Write a stored index series into the journal as `price` directives — one per
+	 *  point, on the point's own month — so the index is a commodity the rest of
+	 *  the app can chart and convert with. The series is read from the store by id
+	 *  (a series fetched a moment ago is already there); `file` defaults to the
+	 *  ledger's root journal.
+	 */
+	indexWritePrices: (id: string, file: string | null) => typedError<IndexPriceWrite, string>(__TAURI_INVOKE("index_write_prices", { id, file })),
+	/**
 	 *  Spending per month in nominal and index-adjusted terms, per category — the
 	 *  lifestyle-inflation screen's data. `index` names a stored series.
 	 */
@@ -1234,6 +1242,25 @@ export type IndexPoint = {
 	date: string,
 	/**  The price level at that month, as an exact decimal string. */
 	value: string,
+};
+
+/**
+ *  What one write did: the commodity it named, the file it landed in, and how
+ *  many of the series' points were new.
+ */
+export type IndexPriceWrite = {
+	/**  The series id the points came from. */
+	series: string,
+	/**  The ledger commodity the points were written as, e.g. `IDX.TR-CPI`. */
+	commodity: string,
+	/**  The currency the prices are in. */
+	currency: string,
+	/**  The journal file the directives went into. */
+	file: string,
+	/**  How many `price` directives this run appended. */
+	written: number,
+	/**  How many points the ledger already carried verbatim. */
+	skipped: number,
 };
 
 /**

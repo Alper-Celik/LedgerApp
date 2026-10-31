@@ -326,6 +326,16 @@ export const indexSeries = [
 	},
 ];
 
+/** What `index_write_prices` answers: the stored series, now a ledger commodity. */
+export const indexPriceWrite = {
+	series: "CPI:TRY",
+	commodity: "IDX.CPI-TRY",
+	currency: "TRY",
+	file: "/ledger/main.bean",
+	written: 3,
+	skipped: 0,
+};
+
 /** Lifestyle inflation: nominal vs index-adjusted spending per category. */
 export const lifestyle = {
 	index: { id: "CPI:TRY", label: "TÜİK CPI (TR)", change: "3.81" },
@@ -368,8 +378,22 @@ export const priceTargets = [
 	{ commodity: "AFT", currency: "TRY", kind: "fund", latest: null },
 ];
 
-export const priceQuotes = [
-	{ commodity: "AFT", currency: "TRY", date: "2026-01-30", price: "1.2345", source: "tefas" },
+/**
+ * What `fetch_prices` answers: one outcome per request, in request order, in
+ * the backend's `PriceFetch` shape — `{ quote }` for an answer, `{ failed }`
+ * for a refusal. The frontend reads the tag, so a bare quote here would be
+ * reported as "returned no quote".
+ */
+export const priceFetches = [
+	{
+		quote: {
+			commodity: "AFT",
+			currency: "TRY",
+			date: "2026-01-30",
+			price: "1.2345",
+			source: "tefas",
+		},
+	},
 ];
 
 /**
@@ -551,8 +575,25 @@ export async function stubIpc(page: Page) {
 						case "index_series":
 							return Promise.resolve(fixtures.indexSeries);
 						case "index_import":
-						case "index_refresh":
 							return Promise.resolve(fixtures.indexSeries[0]);
+						case "index_refresh": {
+							// A fetched series takes the id it was fetched under, which
+							// is what the provider row and the new card are keyed by.
+							const id = (args as { id?: string } | null)?.id ?? "";
+							const base = fixtures.indexSeries[0];
+							return Promise.resolve({
+								...base,
+								id,
+								label: id === base.id ? base.label : `Index ${id}`,
+							});
+						}
+						case "index_write_prices": {
+							// The write is per stored id; the answer names the commodity
+							// and how many points were new (a second run reports zero).
+							const id = (args as { id?: string } | null)?.id ?? "";
+							const commodity = `IDX.${id.toUpperCase().replace(/[^A-Z0-9'._-]/g, "-")}`;
+							return Promise.resolve({ ...fixtures.indexPriceWrite, series: id, commodity });
+						}
 						case "lifestyle_report":
 							return Promise.resolve(fixtures.lifestyle);
 						case "price_sources":
@@ -560,7 +601,7 @@ export async function stubIpc(page: Page) {
 						case "price_targets":
 							return Promise.resolve(fixtures.priceTargets);
 						case "fetch_prices":
-							return Promise.resolve(fixtures.priceQuotes);
+							return Promise.resolve(fixtures.priceFetches);
 						case "write_prices":
 							return Promise.resolve(null);
 						case "git_branches":
@@ -659,10 +700,11 @@ export async function stubIpc(page: Page) {
 			budgetSettingsConfigured,
 			dashboards,
 			indexSeries,
+			indexPriceWrite,
 			lifestyle,
 			priceSources,
 			priceTargets,
-			priceQuotes,
+			priceFetches,
 			aiSettings,
 			commits,
 			commitDiff,
