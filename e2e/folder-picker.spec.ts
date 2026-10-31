@@ -63,3 +63,82 @@ test("the desktop's own chooser opens the folder it returned, without the sheet"
 		path: "/ledger/Books",
 	});
 });
+
+declare global {
+	interface Window {
+		/** Resolves the `accounts` answer the test below is holding back. */
+		__releaseAccounts?: () => void;
+	}
+}
+
+test("opening from the sidebar refreshes the balances it lists", async ({ page }) => {
+	// The sidebar's own trigger, not Settings': it is the control on every
+	// screen, and the tree beside it is the list that must follow the switch.
+	await page.goto("/ledger?native=folder");
+	const sidebar = page.locator('[data-slot="sidebar"]');
+	await expect(sidebar).toContainText("1,500.00");
+	await sidebar.getByRole("button", { name: "Open folder…" }).click();
+	await expect(sidebar).toContainText("999.00");
+	await expect(sidebar).not.toContainText("1,500.00");
+});
+
+test("balances still loading when a folder is opened cannot land after its refresh", async ({
+	page,
+}) => {
+	// A large journal answers `accounts` slowly, and the pickup can start while
+	// the startup answer is in flight. That answer describes the journal that
+	// was open when the window loaded; arriving last, it must not put those
+	// balances back. Held here until the test releases it, so the two answers
+	// cannot race by accident.
+	await page.addInitScript(() => {
+		const internals = window.__TAURI_INTERNALS__;
+		const invoke = internals.invoke;
+		let held = false;
+		internals.invoke = async (cmd, args) => {
+			const answer = await invoke(cmd, args);
+			if (cmd === "accounts" && !held) {
+				held = true;
+				const pending = Promise.withResolvers<void>();
+				window.__releaseAccounts = pending.resolve;
+				await pending.promise;
+			}
+			return answer;
+		};
+	});
+
+	await page.goto("/ledger?native=folder");
+	const sidebar = page.locator('[data-slot="sidebar"]');
+	await sidebar.getByRole("button", { name: "Open folder…" }).click();
+	// The open's own fetch adopted the new journal's balances.
+	await expect(sidebar).toContainText("999.00");
+
+	// Now the startup answer lands. One tick is all it needs to be assigned.
+	await page.evaluate(() => window.__releaseAccounts?.());
+	await page.waitForTimeout(300);
+	expect(await sidebar.innerText()).toContain("999.00");
+	expect(await sidebar.innerText()).not.toContain("1,500.00");
+});
+
+test("a phone opens a folder from the drawer and finds the new balances in it", async ({
+	page,
+}) => {
+	// The drawer is the only way to the button on a phone, and the picker it
+	// opens is a sheet of its own: one at a time, or the drawer disappears
+	// under the picker's first tap.
+	await page.setViewportSize({ width: 390, height: 844 });
+	await page.goto("/ledger");
+	await page.getByRole("button", { name: "Open navigation" }).click();
+	const drawer = page.getByRole("dialog", { name: "Sidebar" });
+	await expect(drawer).toContainText("1,500.00");
+
+	await drawer.getByRole("button", { name: "Open folder…" }).click();
+	await expect(drawer).toBeHidden();
+	const picker = page.getByRole("dialog", { name: "Open ledger folder" });
+	await expect(picker).toBeVisible();
+	await picker.getByRole("button", { name: /Books/ }).click();
+	await picker.getByRole("button", { name: "Open this folder" }).click();
+	await expect(picker).toBeHidden();
+
+	await page.getByRole("button", { name: "Open navigation" }).click();
+	await expect(page.getByRole("dialog", { name: "Sidebar" })).toContainText("999.00");
+});

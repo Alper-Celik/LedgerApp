@@ -141,6 +141,31 @@ test("phones get a card per entry, with the register's work still there", async 
 		{ index: 1, units: "40.00" },
 		{ index: 2, units: "60.00" },
 	]);
+
+	// Nothing may hang off the side: a 390px page is read as it is, not
+	// sideways.
+	expect(
+		await page.evaluate(() => {
+			const root = document.documentElement;
+			return root.scrollWidth <= root.clientWidth;
+		})
+	).toBe(true);
+
+	// A short window scrolls. Scrolled to the end, the last entry's own actions
+	// must clear the fixed quick-add button sitting over the same corner.
+	await page.setViewportSize({ width: 390, height: 420 });
+	await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+	expect(
+		await page.evaluate(() => {
+			const buttons = document.querySelectorAll("main li[data-entry-id] button");
+			const last = buttons[buttons.length - 1]?.getBoundingClientRect();
+			const quickAdd = document
+				.querySelector('button[aria-label="Add transaction"]')
+				?.getBoundingClientRect();
+			if (!last || !quickAdd) return false;
+			return last.bottom <= quickAdd.top || last.right <= quickAdd.left;
+		})
+	).toBe(true);
 });
 
 test("the ledger-wide views the sidebar links to render", async ({ page }) => {

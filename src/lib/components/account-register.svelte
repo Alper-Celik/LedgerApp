@@ -414,7 +414,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	</Table.Row>
 {/snippet}
 
-<div class="flex flex-col gap-3">
+<!--
+	`pb-16` on phones: the quick-add button is fixed over the bottom-right of
+	every page, exactly where a card's own actions sit on the last entry — the
+	extra strip keeps them tappable once the list is scrolled to its end. A
+	table wide enough for the desktop (and the button hidden) needs none of it.
+-->
+<div class="flex flex-col gap-3 pb-16 md:pb-0">
 	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
 		<!--
 			What the braces button opens: the entry's own lines, or the whole

@@ -117,6 +117,28 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		}
 	}
 
+	/**
+	 * The balances as of `revision`, adopted only while that revision is still
+	 * the current one.
+	 *
+	 * The mount and every refresh go through here because they overlap: the
+	 * backend answers from whatever ledger it holds *now*, but the startup
+	 * request can still be in flight when a folder is opened, and its answer —
+	 * the previous journal's balances — would otherwise land last and put them
+	 * back. A large journal makes that window wide, which is why opening a
+	 * ledger could leave the tree showing where the reader came from.
+	 */
+	async function balancesAt(revision: number) {
+		const next = await loadAccounts();
+		if (revision === ledgerRevision.value) accounts = next;
+	}
+
+	/** The journal's files as of `revision`, under the same rule as `balancesAt`. */
+	async function filesAt(revision: number) {
+		const next = await loadFiles();
+		if (revision === ledgerRevision.value) files = next;
+	}
+
 	/** Folded subtrees by account name; everything opens by default. */
 	let folded = $state<Record<string, boolean>>({});
 	let toggleFold = (name: string) => (folded[name] = !folded[name]);
@@ -155,8 +177,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	);
 
 	onMount(async () => {
-		accounts = await loadAccounts();
-		files = await loadFiles();
+		// The revision as the window opened: balances answered from here on are
+		// for this journal unless a refresh has since moved on.
+		const revision = ledgerRevision.value;
+		await balancesAt(revision);
+		await filesAt(revision);
 		// Which journal the app opened (the CLI argument, LEDGER_PATH or
 		// main.bean), so Settings can name it before a folder is picked.
 		refreshLedger();
@@ -175,12 +200,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		if (revision === 0) return;
 		// The fetches are async, so a slower older answer must not overwrite a
 		// newer one: only the latest revision is allowed to land.
-		void loadAccounts().then((next) => {
-			if (revision === ledgerRevision.value) accounts = next;
-		});
-		void loadFiles().then((next) => {
-			if (revision === ledgerRevision.value) files = next;
-		});
+		void balancesAt(revision);
+		void filesAt(revision);
 	});
 </script>
 
@@ -460,7 +481,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					size="sm"
 					class="rounded-none"
 					aria-disabled={ledger.opening}
-					onclick={chooseLedger}
+					onclick={() => {
+						// On a phone this button sits in the drawer, and the picker it
+						// opens is a sheet of its own. Two stacked modals leave the
+						// drawer to vanish under the picker's first tap — while it
+						// still covers the list — so one closes before the other opens.
+						sidebar.setOpenMobile(false);
+						chooseLedger();
+					}}
 				>
 					<HugeiconsIcon icon={FolderOpenIcon} strokeWidth={2} data-icon="inline-start" />
 					<span class="min-w-0 flex-1 truncate">

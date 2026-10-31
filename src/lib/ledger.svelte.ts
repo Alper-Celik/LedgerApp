@@ -192,7 +192,15 @@ export async function openLedgerPath(path: string): Promise<boolean> {
 		// journal — so the client has to start one again either way.
 		resetLanguageServer();
 		bumpLedgerRevision();
-		await invalidateAll();
+		// The backend has swapped its ledger and every id-bearing surface has
+		// its revision, so the open has succeeded whatever a route `load` does
+		// next. A failing refetch is a failed read, not a refused folder: saying
+		// otherwise leaves the picker up over a ledger that is already open.
+		try {
+			await invalidateAll();
+		} catch (cause) {
+			console.error("invalidateAll failed", cause);
+		}
 		return true;
 	} catch (cause) {
 		ledger.error = messageOf(cause);
