@@ -790,7 +790,7 @@ fn price_lines(
 /// `' . _ -`, at most 24 bytes, opening and closing on an alphanumeric. Codes
 /// arrive from providers in mixed case, so the checked form is uppercased —
 /// which is the only spelling the ledger's lexer accepts.
-fn checked_commodity(kind: &str, value: &str) -> Result<String, String> {
+pub(crate) fn checked_commodity(kind: &str, value: &str) -> Result<String, String> {
     let code = value.trim().to_uppercase();
     let shaped = !code.is_empty()
         && code.len() <= 24

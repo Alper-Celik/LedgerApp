@@ -21,7 +21,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 - **Ledger views** — `session.rs` (`AppState`, the loaded `Ledger` + baseline, path resolution), `accounts.rs`
   (tree balances, register rows), `source.rs` (`balance_view` ↔ source spans), `files.rs` (journal files,
   per-file transactions, the new-entry file suggestion), `budget.rs` (one month and a range of envelope
-  budget), `reports.rs` (net worth, cash flow, category months, lifestyle inflation).
+  budget), `budget_write.rs` (the budget editor: reads the plugin's `custom "envelope"` configuration,
+  appends/updates its `start date`, `fund` and `rollover` directives through the edit pipeline),
+  `reports.rs` (net worth, cash flow, category months, lifestyle inflation).
 - **Edits** — `editing.rs` (write → reload → roll back on a *new* loader error → stage), `rewrite.rs` (pure
   byte-range surgery), `conflict.rs` (directive-level three-way merge), `conflict_cmd.rs` (compare/resolve
   over the operation log), `conflict_names.rs` (every sync client's conflict-copy naming).

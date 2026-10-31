@@ -20,6 +20,7 @@ mod ai_stream;
 pub mod api;
 pub mod attachments;
 mod budget;
+mod budget_write;
 pub mod commands;
 mod conflict;
 mod conflict_cmd;
@@ -98,6 +99,10 @@ pub fn command_builder() -> Builder<AppRuntime> {
         add_transaction,
         budget,
         budget_range,
+        budget_settings,
+        budget_init,
+        budget_fund_set,
+        budget_rollover_set,
         dashboards,
         save_dashboard,
         delete_dashboard,
