@@ -397,6 +397,10 @@ export const priceFetches = [
 	},
 ];
 
+export const priceQuotes = [
+	{ commodity: "AFT", currency: "TRY", date: "2026-01-30", price: "1.2345", source: "tefas" },
+];
+
 /**
  * The history the prices screen's links open: two explicit points and one
  * implied by a trade, in two currencies, so a source or currency control has
