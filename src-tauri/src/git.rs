@@ -28,7 +28,11 @@ pub(crate) fn ledger_diff_text(state: &AppState) -> Result<String, String> {
             options.pathspec(spec);
         }
     }
-    options.include_untracked(true);
+    // A ledger file the repository does not track yet is part of what the commit
+    // screen reviews: without its content a new include would be listed as a
+    // delta with no lines (libgit2 omits untracked bodies by default), and the
+    // commit would then carry a file the reader never saw.
+    options.include_untracked(true).show_untracked_content(true);
     let head = head_tree(&repo);
     let diff = repo
         .diff_tree_to_workdir_with_index(head.as_ref(), Some(&mut options))
@@ -93,9 +97,11 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
                 relative.display()
             ));
         }
-        if index.get_path(&relative, 0).is_none() {
-            continue;
-        }
+        // A ledger file the repository does not track yet — an include created
+        // outside the app, or a journal made before the repository — is part of
+        // what the diff screen showed, so it is committed from the working tree
+        // like any other ledger path. Skipping it left a reviewed change out of
+        // the commit, and the diff never cleared.
         let disk = repo.workdir().map(|dir| dir.join(&relative));
         match disk.filter(|path| path.is_file()) {
             Some(path) => {
@@ -123,7 +129,12 @@ pub(crate) fn commit_staged(state: &AppState, message: &str) -> Result<String, S
                 staged.add(&entry).map_err(|e| format!("git index: {e}"))?;
             }
             None => {
-                // Deleted on disk: the commit records the deletion.
+                // Deleted on disk: the commit records the deletion — when the
+                // index had it. An untracked path the folder no longer holds has
+                // nothing to record.
+                if index.get_path(&relative, 0).is_none() {
+                    continue;
+                }
                 staged
                     .remove_path(&relative)
                     .map_err(|e| format!("git index: {e}"))?;
@@ -449,6 +460,49 @@ option \"operating_currency\" \"USD\"
             .peel_to_blob()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(blob.content()), newer);
+    }
+
+    /// A ledger file the folder holds but the repository does not track — an
+    /// include the app never wrote, in a repository made before it existed — is
+    /// part of the diff the commit screen showed. Leaving it out of the commit
+    /// dropped a reviewed change and left the diff uncleared.
+    #[test]
+    fn an_untracked_include_is_committed_with_the_ledger() {
+        let dir = TempDir::new("commit-untracked");
+        dir.seed(
+            "main.bean",
+            "include \"expenses.bean\"\n\n2026-01-01 open Assets:Bank:Checking\n2026-01-01 open Expenses:Food\n",
+        );
+        dir.seed(
+            "expenses.bean",
+            "2026-01-10 * \"Groceries\"\n  Assets:Bank:Checking            -20.00 USD\n  Expenses:Food                    20.00 USD\n",
+        );
+        let repo = crate::testing::repo_with_commit(&dir, &["main.bean"]);
+        let state = loaded_state(&dir.file("main.bean"));
+        let diff = ledger_diff_text(&state).unwrap();
+        assert!(
+            diff.contains("=== expenses.bean ===\n"),
+            "the commit screen shows the untracked include, body included: {diff}"
+        );
+        assert!(
+            diff.contains("+2026-01-10 * \"Groceries\"\n"),
+            "the untracked file's lines read as additions: {diff}"
+        );
+
+        commit_staged(&state, "add the folder's own include").unwrap();
+
+        let tree = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(
+            tree.get_name("expenses.bean").is_some(),
+            "the include the diff showed is in the commit"
+        );
+        assert!(tree.get_name("main.bean").is_some());
     }
 
     #[test]
