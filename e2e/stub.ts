@@ -433,7 +433,14 @@ export async function stubIpc(page: Page) {
 					// Rust command would produce; rejecting models `Err`.
 					switch (cmd) {
 						case "accounts":
-							return Promise.resolve(opened ? fixtures.booksAccounts : fixtures.accounts);
+							// `?empty=1` models a journal with no accounts to list.
+							return Promise.resolve(
+								window.location.search.includes("empty=1")
+									? []
+									: opened
+										? fixtures.booksAccounts
+										: fixtures.accounts
+							);
 						case "account_transactions":
 							return Promise.resolve(fixtures.transactions);
 						case "transaction_source":
@@ -464,7 +471,8 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.budgetMonth);
 						case "journal_files":
 							return Promise.resolve(
-								window.location.search.includes("no_ledger=1")
+								window.location.search.includes("no_ledger=1") ||
+									window.location.search.includes("empty=1")
 									? []
 									: fixtures.journalFiles
 							);
