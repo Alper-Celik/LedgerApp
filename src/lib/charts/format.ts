@@ -66,12 +66,16 @@ export function categoryLabels(series: readonly ChartSeries[]): string[] {
  * The chart in words, for `aria-label`: a canvas is invisible to a screen
  * reader, so the summary names each series and where it starts and ends.
  */
-export function describeSeries(kind: string, series: readonly ChartSeries[]): string {
+export function describeSeries(
+	kind: string,
+	series: readonly ChartSeries[],
+	unit: "month" | "day" = "month",
+): string {
 	const drawn = series.filter((one) => one.points.length > 0);
 	if (drawn.length === 0) return `${kind}: no data yet.`;
 
-	const months = categoryLabels(drawn).length;
-	const span = months === 1 ? "1 month" : `${months} months`;
+	const count = categoryLabels(drawn).length;
+	const span = count === 1 ? `1 ${unit}` : `${count} ${unit}s`;
 	const parts = drawn.map((one) => {
 		const first = one.points[0] as ChartDatum;
 		const last = one.points[one.points.length - 1] as ChartDatum;

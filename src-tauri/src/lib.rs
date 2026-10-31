@@ -40,6 +40,7 @@ mod index_providers;
 mod index_store;
 mod lsp;
 mod model;
+mod price_history;
 mod prices;
 mod query;
 mod repo;
@@ -112,6 +113,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         git_set_identity,
         price_sources,
         price_targets,
+        price_history,
         fetch_prices,
         write_prices,
         ai_settings,

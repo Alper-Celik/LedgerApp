@@ -372,6 +372,37 @@ pub fn price_targets(state: State<'_, AppState>) -> Vec<crate::prices::PriceTarg
     crate::prices::targets(&state)
 }
 
+/// One commodity's price history, from the two sources the journal states it
+/// in: explicit `price` directives, the rates implied by trades, or both.
+///
+/// `source` is `"explicit"`, `"transactions"` or `"both"`; `currency` narrows
+/// the answer to one quote currency; `from`/`to` are inclusive `YYYY-MM` month
+/// labels and `limit` keeps only the newest that many points. A point says
+/// which source it came from, and `both` prefers the explicit price when a day
+/// has one. Every amount is an exact decimal string; see
+/// [`crate::price_history`] for the full rule.
+#[tauri::command]
+#[specta::specta]
+pub fn price_history(
+    commodity: String,
+    currency: Option<String>,
+    source: String,
+    from: Option<String>,
+    to: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<crate::price_history::PriceHistory, String> {
+    crate::price_history::history(
+        &state,
+        &commodity,
+        currency.as_deref(),
+        &source,
+        from.as_deref(),
+        to.as_deref(),
+        limit,
+    )
+}
+
 /// Fetch quotes for the given requests. Blocking network work, so it runs on a
 /// worker thread; per-request failures come back as `PriceFetch::Failed` and the
 /// command only errors when every request failed.
