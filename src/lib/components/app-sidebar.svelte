@@ -31,7 +31,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		buildAccountTree,
 		type AccountNode,
 	} from "$lib/accounts.js";
-	import GitStatus from "$lib/components/git-status.svelte";
+	import FileTree from "$lib/components/file-tree.svelte";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import UncommittedMark from "$lib/components/uncommitted-mark.svelte";
 	import { git, refreshGit } from "$lib/git.svelte.js";
@@ -357,43 +357,37 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 		<!--
 			The journal's own files: the root the session was opened with and
-			every `include` it pulls in, each with what git says about it and how
-			many entries it writes. A file is opened by path in the register's
-			file view, so this is also how a new entry reaches a file other than
-			the one it would otherwise be filed into.
+			every `include` it pulls in, drawn as the directory tree they live in,
+			each file with what git says about it and how many entries it writes.
+			A file is opened by path in the register's file view, so this is also
+			how a new entry reaches a file other than the one it would otherwise
+			be filed into. The section's label leads to the full-width screen of
+			the same tree for when the sidebar is too narrow to read a deep path.
 		-->
-		{#if files.length > 0}
-			<Sidebar.Group>
-				<Sidebar.GroupLabel class="rounded-none">Journal files</Sidebar.GroupLabel>
-				<Sidebar.GroupContent>
-					<Sidebar.Menu>
-						{#each files as file (file.path)}
-							{@const href = `/files/${encodeURIComponent(file.path)}`}
-							<Sidebar.MenuItem>
-								<Sidebar.MenuButton
-									size="sm"
-									class="rounded-none"
-									isActive={page.url.pathname === href}
-								>
-									{#snippet child({ props })}
-										<a {...props} {href} title={file.path}>
-											<!-- The letter is absent when nothing changed; the slot keeps the labels aligned. -->
-											<span class="flex w-3 shrink-0 justify-center">
-												<GitStatus change={file.change} />
-											</span>
-											<span class="min-w-0 flex-1 truncate">{file.label}</span>
-											<span class="text-muted-foreground shrink-0 text-xs tabular-nums">
-												{file.transactions}
-											</span>
-										</a>
-									{/snippet}
-								</Sidebar.MenuButton>
-							</Sidebar.MenuItem>
-						{/each}
-					</Sidebar.Menu>
-				</Sidebar.GroupContent>
-			</Sidebar.Group>
-		{/if}
+		<Sidebar.Group>
+			<Sidebar.GroupLabel class="rounded-none">
+				{#snippet child({ props })}
+					<a
+						{...props}
+						href={resolve("/files")}
+						class="hover:text-sidebar-foreground flex h-full w-full items-center"
+					>
+						Journal files
+					</a>
+				{/snippet}
+			</Sidebar.GroupLabel>
+			<Sidebar.GroupContent>
+				{#if files.length > 0}
+					<FileTree {files} compact />
+				{:else}
+					<!--
+						The section stays so its label is still the way to the files
+						screen, which is where "no ledger open" is explained.
+					-->
+					<p class="text-sidebar-foreground/60 px-2 py-1 text-xs">No journal files</p>
+				{/if}
+			</Sidebar.GroupContent>
+		</Sidebar.Group>
 		{#each sections as entry (entry.section.label)}
 			<Sidebar.Group>
 				<Sidebar.GroupContent>
