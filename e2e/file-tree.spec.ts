@@ -88,12 +88,22 @@ test("clicking a leaf opens that file's screen, and the sidebar marks it current
 
 	// The route names the file, so its row is the current one — and the folder
 	// holding it is open even though the visit started from elsewhere.
-	await expect(
-		sidebarTree(page).locator('[data-path="/ledger/accounts/2026.bean"]').getByRole("link")
-	).toHaveAttribute("aria-current", "page");
-	await expect(
-		sidebarTree(page).locator('[data-path="/ledger/accounts"]').getByRole("button")
-	).toHaveAttribute("aria-expanded", "true");
+	const tree = sidebarTree(page);
+	const accounts = tree.locator('[data-path="/ledger/accounts"]');
+	const active = tree.locator('[data-path="/ledger/accounts/2026.bean"]').getByRole("link");
+	await expect(active).toHaveAttribute("aria-current", "page");
+	await expect(accounts.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+
+	// Navigating back to the file opens its folder again: a folder the reader
+	// closed earlier does not keep the route's own file hidden.
+	await accounts.getByRole("button").click();
+	await expect(active).toHaveCount(0);
+	await tree.locator('[data-path="/ledger/main.bean"]').getByRole("link").click();
+	await expect(page).toHaveURL(/\/files\/%2Fledger%2Fmain\.bean$/);
+	await page.goBack();
+	await expect(page).toHaveURL(/\/files\/%2Fledger%2Faccounts%2F2026\.bean$/);
+	await expect(accounts.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+	await expect(active).toBeVisible();
 });
 
 test("the files screen carries the same tree at full width", async ({ page }) => {
