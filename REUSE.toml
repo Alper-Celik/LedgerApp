@@ -67,13 +67,3 @@ path = "src/lib/assistant/python/packages/six-*.whl"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2010-2024 Benjamin Peterson <benjamin@python.org>"
 SPDX-License-Identifier = "MIT"
-
-# The envelope plugin the app carries, built from `plugins/rustledger-envelope`
-# (`cargo build --release --target wasm32-unknown-unknown`) and embedded at
-# compile time (`src-tauri/src/budget_write.rs`, `BUNDLED_PLUGIN`). A binary
-# cannot carry a header, and re-building it would wipe one.
-[[annotations]]
-path = "src-tauri/assets/rustledger_envelope.wasm"
-precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Alper Çelik <alper@alper-celik.dev>"
-SPDX-License-Identifier = "AGPL-3.0-or-later"
