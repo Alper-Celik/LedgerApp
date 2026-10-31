@@ -53,7 +53,7 @@ test("currency and month controls narrow the answer, and an empty range says why
 
 	// The commodity is priced in two currencies, so the picker is there and
 	// narrowing to one leaves that currency's points.
-	await page.getByRole("combobox", { name: "Price currency" }).click();
+	await page.getByRole("button", { name: "Price currency" }).click();
 	await page.getByRole("option", { name: "TRY" }).click();
 	await expect(rows).toHaveCount(2);
 	await expect(rows.filter({ hasText: "0.92" })).toHaveCount(0);
