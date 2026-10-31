@@ -127,10 +127,17 @@ export const budgetMonth = {
 	currency: "TRY",
 };
 
-/** The journal's files, as the file explorer lists them. */
+/** The journal's files, as the file explorer lists them: a nested directory tree. */
 export const journalFiles = [
 	{ path: "/ledger/main.bean", label: "main.bean", transactions: 2, change: "modified" },
-	{ path: "/ledger/2026/01.bean", label: "2026/01.bean", transactions: 0, change: "unchanged" },
+	{ path: "/ledger/accounts/2025.bean", label: "accounts/2025.bean", transactions: 0, change: "unchanged" },
+	{ path: "/ledger/accounts/2026.bean", label: "accounts/2026.bean", transactions: 4, change: "added" },
+	{
+		path: "/ledger/Liabilities/TR:Ziraat/Bankkart/2026/2026-06.bean",
+		label: "Liabilities/TR:Ziraat/Bankkart/2026/2026-06.bean",
+		transactions: 2,
+		change: "modified",
+	},
 ];
 
 /** The repository's history, for the branches screen. */
