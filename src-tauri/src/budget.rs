@@ -26,8 +26,8 @@ const ENVELOPE_NAMESPACE: &str = "Equity:Envelope";
 /// figure real. Neither is an envelope a user funded, so neither becomes a
 /// group: the pool is reported as [`BudgetMonth::to_budget`] and the contra is
 /// left out of the month's lines.
-const ENVELOPE_POOL: &str = "Equity:Envelope:To-Be-Budgeted";
-const ENVELOPE_MONEY: &str = "Equity:Envelope:Money";
+pub(crate) const ENVELOPE_POOL: &str = "Equity:Envelope:To-Be-Budgeted";
+pub(crate) const ENVELOPE_MONEY: &str = "Equity:Envelope:Money";
 
 /// What the budget says about a ledger the plugin has not budgeted: an empty
 /// screen would read as "this month is worth nothing", which is a different

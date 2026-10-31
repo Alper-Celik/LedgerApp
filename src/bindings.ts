@@ -177,9 +177,10 @@ export const commands = {
 	 *  `month` is a `YYYY-MM` label, or `None` for the newest month the plugin has
 	 *  budgeted, which is what the screen opens on. The figures are for that month,
 	 *  in the ledger's operating currency; see [`BudgetMonth`] for what each one
-	 *  means. Read-only on purpose: the plugin owns the allocations (its `fund`,
-	 *  `adjust`, `zero`, `pad` and `rollover` configuration) and rewrites them on
-	 *  every load, so an edit from here would fight the next run of it.
+	 *  means. The figures stay read-only because the plugin computes them on every
+	 *  load; what the screen writes instead is the configuration behind them —
+	 *  [`budget_settings`], [`budget_init`], [`budget_fund_set`] and
+	 *  [`budget_rollover_set`].
 	 */
 	budget: (month: string | null) => typedError<BudgetMonth, string>(__TAURI_INVOKE("budget", { month })),
 	/**
@@ -191,6 +192,50 @@ export const commands = {
 	 *  ledger without an envelope budget looks like, and the screen says so.
 	 */
 	budgetRange: (from: string | null, to: string | null) => typedError<BudgetRange, string>(__TAURI_INVOKE("budget_range", { from, to })),
+	/**
+	 *  The envelope budget's configuration, as the editor reads it: whether the
+	 *  journal declares an envelope plugin, the parsed config block (`None` until a
+	 *  `start date` exists) and every account a `fund`/`rollover` names, with the
+	 *  newest value and the month it started (`since`).
+	 * 
+	 *  Read from the ledger's `custom "envelope"` directives, never from the
+	 *  `Equity:Envelope:` entries the plugin writes: those are the plugin's output
+	 *  and are recomputed on every load.
+	 */
+	budgetSettings: () => typedError<BudgetSettings, string>(__TAURI_INVOKE("budget_settings")),
+	/**
+	 *  Append the budget's configuration block to a journal file: `start date`, an
+	 *  optional `end date` and `months ahead`, one `budget account` pattern per
+	 *  entry, and `assert`/`strict` only when they differ from the plugin's
+	 *  defaults. Refuses when the journal already has a `start date` (the error says
+	 *  where) or when `budget_accounts` is empty.
+	 * 
+	 *  The write goes through the loader-verified edit pipeline, so an invalid
+	 *  pattern is refused by the plugin and the file is put back byte-for-byte.
+	 *  `plugin_declared` on [`budget_settings`] is the form's warning that the
+	 *  journal does not load an envelope plugin yet; it is not a precondition.
+	 */
+	budgetInit: (file: string, start: string, monthsAhead: number | null, end: string | null, budgetAccounts: string[], assert: boolean, strict: boolean) => typedError<null, string>(__TAURI_INVOKE("budget_init", { file, start, monthsAhead, end, budgetAccounts, assert, strict })),
+	/**
+	 *  Make `units currency` the amount assigned to `account` from `month`
+	 *  (`YYYY-MM`) on.
+	 * 
+	 *  The plugin inherits a `fund` until a later one replaces it, so this is an
+	 *  upsert: the value already taking effect is left alone when unchanged, an
+	 *  existing directive dated exactly the month's first day is rewritten rather
+	 *  than duplicated, and otherwise one line is added. `0.00` is legal and stops
+	 *  the funding; the plugin's own `To-Be-Budgeted`/`Money` accounts are refused.
+	 */
+	budgetFundSet: (file: string, account: string, units: string, currency: string, month: string) => typedError<null, string>(__TAURI_INVOKE("budget_fund_set", { file, account, units, currency, month })),
+	/**
+	 *  Set `account`'s rollover policy from `month` on: `carry`, `reset`, or `cap`
+	 *  with `units`/`currency`.
+	 * 
+	 *  Same dating and upsert rules as [`budget_fund_set`]: an unchanged policy
+	 *  writes nothing, a directive at exactly the month's first day is rewritten,
+	 *  and a cap without both `units` and `currency` is refused.
+	 */
+	budgetRolloverSet: (file: string, account: string, kind: string, units: string | null, currency: string | null, month: string) => typedError<null, string>(__TAURI_INVOKE("budget_rollover_set", { file, account, kind, units, currency, month })),
 	/**
 	 *  Every saved dashboard, oldest id order as stored; a first run answers with
 	 *  the six seeded defaults (and writes nothing until one is saved).
@@ -485,6 +530,20 @@ export type AiSettingsView = {
 	system_prompt: string,
 };
 
+/**
+ *  Where an amount starts, as both sides of the payload need it.
+ * 
+ *  `units` is an exact decimal string with the scale it was written with
+ *  (`4000.00` stays `4000.00`), never a float. `currency` is the beancount
+ *  commodity code.
+ */
+export type Amount = {
+	/**  The exact decimal quantity. */
+	units: string,
+	/**  The commodity code, e.g. `TRY`. */
+	currency: string,
+};
+
 /**  A file as the panel lists it before deciding how to use it. */
 export type AttachmentInfo = {
 	path: string,
@@ -525,6 +584,27 @@ export type BranchInfo = {
 	 *  configured. `None` for remote branches and for locals with no upstream.
 	 */
 	upstream: string | null,
+};
+
+/**  The budget's configuration as a whole. */
+export type BudgetConfig = {
+	/**  The file the `start date` directive lives in. */
+	file: string,
+	/**  First budget month, `YYYY-MM`. */
+	start: string,
+	/**  Last budget month, when one is declared. */
+	end: string | null,
+	/**  Months to budget past the newest ledger directive, when one is declared. */
+	months_ahead: number | null,
+	/**  The on-budget account patterns, in directive order. */
+	budget_accounts: string[],
+	/**  Whether the plugin emits its month-end assertions (default `TRUE`). */
+	assert: boolean,
+	/**
+	 *  Whether the plugin warns about spending in never-funded categories
+	 *  (default `FALSE`).
+	 */
+	strict: boolean,
 };
 
 /**
@@ -664,6 +744,22 @@ export type BudgetRangeMonth = {
 	 *  [`BudgetMonth::groups`] is.
 	 */
 	groups: BudgetGroup[],
+};
+
+/**
+ *  Everything the budget screen's editor reads: whether the plugin is declared,
+ *  the configuration block, and every account it configures.
+ */
+export type BudgetSettings = {
+	/**
+	 *  The journal declares an envelope plugin (`plugin "…envelope…wasm"`).
+	 *  The init form warns when this is false; the commands still write.
+	 */
+	plugin_declared: boolean,
+	/**  The parsed configuration, or `None` when no `start date` exists. */
+	config: BudgetConfig | null,
+	/**  Every account any `fund`/`rollover` directive names, alphabetically. */
+	envelopes: EnvelopeSetting[],
 };
 
 /**
@@ -1001,6 +1097,35 @@ export type DecisionDto = {
 	 *  [`ConflictView::base_found`] is `false`.
 	 */
 	base: string | null,
+};
+
+/**
+ *  One category the configuration mentions, and the values the editor shows.
+ * 
+ *  The account is the *expense* account (`Expenses:Groceries`), not the plugin's
+ *  mirrored envelope account: that is what the `fund`/`rollover` directives
+ *  name.
+ */
+export type EnvelopeSetting = {
+	/**  The category, as the directive names it. */
+	account: string,
+	/**
+	 *  The newest `fund` amount for the account, or `None` when it was never
+	 *  funded.
+	 */
+	fund: Amount | null,
+	/**
+	 *  `YYYY-MM` of that newest `fund`, or `None` when the account has none.
+	 *  This is the month the displayed amount starts applying.
+	 */
+	since: string | null,
+	/**  The newest `rollover` policy, defaulting to the plugin's carry. */
+	rollover: RolloverSetting,
+	/**
+	 *  The journal file the account's newest `fund`/`rollover` directive lives
+	 *  in, as [`JournalFile::path`](crate::model::JournalFile::path) spells it.
+	 */
+	file: string,
 };
 
 /**  One file whose bytes on disk are not the bytes this device last recorded. */
@@ -1677,6 +1802,26 @@ export type Resolve =
 
 /**  Who said a message. */
 export type Role = "user" | "assistant" | "tool";
+
+/**
+ *  What happens to a category's balance at a month boundary — the three shapes
+ *  the plugin's `rollover` key understands.
+ */
+export type RolloverKind = 
+/**  Carry the whole balance into the next month (the plugin's default). */
+"carry" | 
+/**  Reset the balance to zero, sweeping it back to `To-Be-Budgeted`. */
+"reset" | 
+/**  Carry up to [`RolloverSetting::amount`], sweeping the excess. */
+"cap";
+
+/**  One account's rollover policy, as the screen edits it. */
+export type RolloverSetting = {
+	/**  Which boundary policy is in force. */
+	kind: RolloverKind,
+	/**  The cap, only for [`RolloverKind::Cap`]. */
+	amount: Amount | null,
+};
 
 /**
  *  Which storage the ledger lives in.

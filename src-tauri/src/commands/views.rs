@@ -12,6 +12,7 @@ use tauri::{Manager, State};
 use crate::AppRuntime;
 use crate::accounts::{account_balances, account_transaction_views, modified_accounts};
 use crate::budget::{BudgetRange, budget_view};
+use crate::budget_write::{self, BudgetSettings};
 use crate::dashboards::{self, Dashboard};
 use crate::editing::{
     create_transaction, edit_file_source, edit_named_file_source, edit_transaction,
@@ -197,9 +198,10 @@ pub fn add_transaction(entry: NewTransaction, state: State<'_, AppState>) -> Res
 /// `month` is a `YYYY-MM` label, or `None` for the newest month the plugin has
 /// budgeted, which is what the screen opens on. The figures are for that month,
 /// in the ledger's operating currency; see [`BudgetMonth`] for what each one
-/// means. Read-only on purpose: the plugin owns the allocations (its `fund`,
-/// `adjust`, `zero`, `pad` and `rollover` configuration) and rewrites them on
-/// every load, so an edit from here would fight the next run of it.
+/// means. The figures stay read-only because the plugin computes them on every
+/// load; what the screen writes instead is the configuration behind them —
+/// [`budget_settings`], [`budget_init`], [`budget_fund_set`] and
+/// [`budget_rollover_set`].
 #[tauri::command]
 #[specta::specta]
 pub fn budget(month: Option<String>, state: State<'_, AppState>) -> Result<BudgetMonth, String> {
@@ -220,6 +222,103 @@ pub fn budget_range(
     state: State<'_, AppState>,
 ) -> Result<BudgetRange, String> {
     crate::budget::budget_range(&state, from, to)
+}
+
+/// The envelope budget's configuration, as the editor reads it: whether the
+/// journal declares an envelope plugin, the parsed config block (`None` until a
+/// `start date` exists) and every account a `fund`/`rollover` names, with the
+/// newest value and the month it started (`since`).
+///
+/// Read from the ledger's `custom "envelope"` directives, never from the
+/// `Equity:Envelope:` entries the plugin writes: those are the plugin's output
+/// and are recomputed on every load.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_settings(state: State<'_, AppState>) -> Result<BudgetSettings, String> {
+    budget_write::settings(&state)
+}
+
+/// Append the budget's configuration block to a journal file: `start date`, an
+/// optional `end date` and `months ahead`, one `budget account` pattern per
+/// entry, and `assert`/`strict` only when they differ from the plugin's
+/// defaults. Refuses when the journal already has a `start date` (the error says
+/// where) or when `budget_accounts` is empty.
+///
+/// The write goes through the loader-verified edit pipeline, so an invalid
+/// pattern is refused by the plugin and the file is put back byte-for-byte.
+/// `plugin_declared` on [`budget_settings`] is the form's warning that the
+/// journal does not load an envelope plugin yet; it is not a precondition.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_init(
+    file: String,
+    start: String,
+    months_ahead: Option<u32>,
+    end: Option<String>,
+    budget_accounts: Vec<String>,
+    r#assert: bool,
+    strict: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    budget_write::init(
+        &state,
+        &file,
+        &start,
+        months_ahead,
+        end.as_deref(),
+        &budget_accounts,
+        r#assert,
+        strict,
+    )
+}
+
+/// Make `units currency` the amount assigned to `account` from `month`
+/// (`YYYY-MM`) on.
+///
+/// The plugin inherits a `fund` until a later one replaces it, so this is an
+/// upsert: the value already taking effect is left alone when unchanged, an
+/// existing directive dated exactly the month's first day is rewritten rather
+/// than duplicated, and otherwise one line is added. `0.00` is legal and stops
+/// the funding; the plugin's own `To-Be-Budgeted`/`Money` accounts are refused.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_fund_set(
+    file: String,
+    account: String,
+    units: String,
+    currency: String,
+    month: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    budget_write::fund_set(&state, &file, &account, &units, &currency, &month)
+}
+
+/// Set `account`'s rollover policy from `month` on: `carry`, `reset`, or `cap`
+/// with `units`/`currency`.
+///
+/// Same dating and upsert rules as [`budget_fund_set`]: an unchanged policy
+/// writes nothing, a directive at exactly the month's first day is rewritten,
+/// and a cap without both `units` and `currency` is refused.
+#[tauri::command]
+#[specta::specta]
+pub fn budget_rollover_set(
+    file: String,
+    account: String,
+    kind: String,
+    units: Option<String>,
+    currency: Option<String>,
+    month: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    budget_write::rollover_set(
+        &state,
+        &file,
+        &account,
+        &kind,
+        units.as_deref(),
+        currency.as_deref(),
+        &month,
+    )
 }
 
 /// Where dashboards live: the app's own config directory, never the ledger.
