@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Page } from "@playwright/test";
-import type { AccountBalance, AiSettingsView, TransactionEdit, TransactionView } from "../src/bindings";
+import type {
+	AccountBalance,
+	AiSettingsView,
+	BudgetSettings,
+	TransactionEdit,
+	TransactionView,
+} from "../src/bindings";
 
 /**
  * The Tauri IPC stub the e2e tests run against: fixtures defined here, never a
@@ -199,9 +205,19 @@ export const budgetRange = {
 						{
 							name: "Groceries",
 							full_name: "Equity:Envelope:Food:Groceries",
+							account: "Food:Groceries",
 							budgeted: "1000.00",
 							spent: "80.00",
 							balance: "920.00",
+							rollover: true,
+						},
+						{
+							name: "Dining",
+							full_name: "Equity:Envelope:Food:Dining",
+							account: "Food:Dining",
+							budgeted: "0",
+							spent: "0",
+							balance: "0",
 							rollover: true,
 						},
 					],
@@ -224,14 +240,58 @@ export const budgetRange = {
 						{
 							name: "Groceries",
 							full_name: "Equity:Envelope:Food:Groceries",
+							account: "Food:Groceries",
 							budgeted: "1000.00",
 							spent: "123.45",
 							balance: "876.55",
 							rollover: true,
 						},
+						{
+							name: "Dining",
+							full_name: "Equity:Envelope:Food:Dining",
+							account: "Food:Dining",
+							budgeted: "0",
+							spent: "0",
+							balance: "0",
+							rollover: true,
+						},
 					],
 				},
 			],
+		},
+	],
+};
+
+/**
+ * The budget's configuration before setup: no `start date`, so the screen is in
+ * its empty state and offers the form. `budget_init` flips the stub to the
+ * configured fixture below for the rest of that page's life.
+ */
+export const budgetSettings: BudgetSettings = {
+	plugin_declared: true,
+	config: null,
+	envelopes: [],
+};
+
+/** The same ledger after setup: one fund and rollover on the Groceries envelope. */
+export const budgetSettingsConfigured: BudgetSettings = {
+	plugin_declared: true,
+	config: {
+		file: "/ledger/main.bean",
+		start: "2025-12",
+		end: null,
+		months_ahead: 12,
+		budget_accounts: ["^Assets:"],
+		assert: true,
+		strict: false,
+	},
+	envelopes: [
+		{
+			account: "Expenses:Food:Groceries",
+			fund: { units: "1000.00", currency: "TRY" },
+			since: "2025-12",
+			rollover: { kind: "carry", amount: null },
+			file: "/ledger/main.bean",
 		},
 	],
 };
@@ -359,6 +419,8 @@ export async function stubIpc(page: Page) {
 			 * has already swapped by the time the UI refetches.
 			 */
 			let opened = false;
+			/** Whether `budget_init` has run: the setup spec starts before it, everything else after. */
+			let budgetConfigured = false;
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
 					log.push({ cmd, args });
@@ -423,8 +485,46 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(`file://${path}`);
 						case "list_folders":
 							return Promise.resolve(path === "/ledger/Books" ? fixtures.books : fixtures.folders);
-						case "budget_range":
-							return Promise.resolve(fixtures.budgetRange);
+						case "budget_range": {
+							const setupPending =
+								window.location.search.includes("budget_setup=1") && !budgetConfigured;
+							return setupPending
+								? Promise.reject(
+										"this ledger has no envelope budget data — the envelope plugin has written nothing under `Equity:Envelope:`, so there is no month to show"
+									)
+								: Promise.resolve(fixtures.budgetRange);
+						}
+						case "budget_settings": {
+							const setupPending =
+								window.location.search.includes("budget_setup=1") && !budgetConfigured;
+							const base = setupPending
+								? fixtures.budgetSettings
+								: fixtures.budgetSettingsConfigured;
+							return Promise.resolve({
+								...base,
+								plugin_declared: !window.location.search.includes("budget_no_plugin=1"),
+							});
+						}
+						case "budget_init":
+							if (window.location.search.includes("budget_fail=init")) {
+								return Promise.reject(
+									"the ledger already declares a budget `start date`; edit that directive instead"
+								);
+							}
+							budgetConfigured = true;
+							return Promise.resolve(null);
+						case "budget_fund_set":
+							if (window.location.search.includes("budget_fail=fund")) {
+								return Promise.reject(
+									"that fund would make the month's funding negative, which the plugin refuses"
+								);
+							}
+							return Promise.resolve(null);
+						case "budget_rollover_set":
+							if (window.location.search.includes("budget_fail=rollover")) {
+								return Promise.reject("a cap needs both units and a currency");
+							}
+							return Promise.resolve(null);
 						case "dashboards":
 							return Promise.resolve(fixtures.dashboards);
 						case "save_dashboard":
@@ -537,6 +637,8 @@ export async function stubIpc(page: Page) {
 			fileText,
 			gitState,
 			budgetRange,
+			budgetSettings,
+			budgetSettingsConfigured,
 			dashboards,
 			indexSeries,
 			lifestyle,
