@@ -8,6 +8,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { commands } from "../../bindings";
 	import { dismissSyncWatch, noteTreeReport, refreshSyncWatch, syncWatch } from "$lib/sync.svelte.js";
 	import { openLedgerPath, ledger } from "$lib/ledger.svelte.js";
+	import { git } from "$lib/git.svelte.js";
+
+	/**
+	 * Whether the bar has anything of its own to say. In a git repository it
+	 * never does: git owns the ledger's versions there, and its merge conflicts
+	 * live in the merge view. The backend already answers both watch commands
+	 * empty in that mode; this keeps the bar silent even if a report left over
+	 * from the ledger opened before is still in the store (`leaveTreeMode` clears
+	 * it, but the gate must not depend on that call having run first).
+	 */
+	const shows = $derived(
+		!git.repo &&
+			(syncWatch.changes.length > 0 ||
+				syncWatch.external.length > 0 ||
+				syncWatch.conflicts.length > 0 ||
+				syncWatch.treeError !== "" ||
+				syncWatch.error !== "")
+	);
 
 	/**
 	 * The banner for a synced folder that moved on: names how many files did, and
@@ -44,7 +62,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	}
 </script>
 
-{#if syncWatch.changes.length > 0 || syncWatch.external.length > 0 || syncWatch.conflicts.length > 0 || syncWatch.treeError !== "" || syncWatch.error !== ""}
+{#if shows}
 	<div
 		class="bg-secondary text-secondary-foreground flex flex-wrap items-center gap-2 border-b px-3 py-1.5 text-xs"
 		role="status"

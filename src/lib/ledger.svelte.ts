@@ -5,7 +5,7 @@
 import { invalidateAll } from "$app/navigation";
 import { commands, type LoadSummary } from "../bindings";
 import { messageOf } from "./errors.js";
-import { noteSyncReadError, noteTreeReport } from "./sync.svelte.js";
+import { leaveTreeMode, noteSyncReadError, noteTreeReport } from "./sync.svelte.js";
 import { resetLanguageServer } from "./lsp.js";
 import { bumpLedgerEpoch, bumpLedgerRevision } from "./ledger-revision.svelte.js";
 
@@ -100,7 +100,13 @@ export async function syncTree(): Promise<void> {
 		noteSyncReadError(messageOf(cause));
 		return;
 	}
-	if (kind !== "tree") return;
+	if (kind !== "tree") {
+		// Not a mirror: a report from an earlier tree ledger describes a folder
+		// that is not this one, and the bar must not carry it over — and a git
+		// repository's ledger has no folder watch for it to belong to at all.
+		leaveTreeMode();
+		return;
+	}
 	try {
 		const result = await commands.syncLedgerTree();
 		if (result.status === "error") {
