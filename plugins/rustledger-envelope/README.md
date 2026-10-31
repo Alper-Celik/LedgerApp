@@ -317,3 +317,24 @@ validation runs after it, so every generated transaction is checked for balance
 and currency constraints like any other: a wrong sign shows up as the ledger's own
 error rather than as a wrong number in a report. The plugin never modifies what
 you wrote — it keeps every input directive and inserts its own.
+
+### The sandbox's instruction budget
+
+rustledger runs WASM plugins with a fixed fuel budget — 30 million wasmtime
+instructions per call, not scaled by input size — and a plugin that runs out is
+reported as a failed execution with a wasm backtrace. Two things keep this plugin
+inside it on a long ledger:
+
+* postings dated before the configuration's `start date` are skipped before their
+  amount is parsed, because nothing the plan reads is keyed by a month outside
+  the horizon (the exception is the plugin's own namespace, which is folded into
+  every month's starting balances, and the on-budget postings when
+  `include starting balance` is set);
+* `budget account` and `map` patterns are matched directly when their shape
+  allows it — a literal is a substring test, `^…` a prefix, `…$` a suffix, and a
+  literal head before `.*` another substring — and only the rest compiles to a
+  regex, whose Pike VM search per posting is expensive.
+
+A ledger whose *horizon* alone is large enough to exhaust the budget (thousands
+of postings inside the budgeted months) still cannot run: that ceiling belongs to
+the runtime, not to the plugin.

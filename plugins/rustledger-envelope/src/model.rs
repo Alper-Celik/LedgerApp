@@ -215,16 +215,20 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
     };
 
     let budget_accounts = compile(&config.budget_accounts);
-    let mappings: Vec<(Regex, String)> = config
+    let mappings: Vec<(Pattern, String)> = config
         .mappings
         .iter()
         .filter_map(|mapping| {
-            Regex::new(&mapping.pattern)
-                .ok()
+            Pattern::compile(&mapping.pattern)
                 .map(|pattern| (pattern, mapping.node.clone()))
         })
         .collect();
-    let movements = movements(directives);
+    let movements = movements(
+        directives,
+        config.start,
+        config.include_starting_balance,
+        &budget_accounts,
+    );
 
     // Assignments grouped by category and commodity, so each month can pick the
     // newest declaration at or before it.
@@ -615,9 +619,14 @@ pub fn plan(config: &Config, directives: &[DirectiveWrapper]) -> Plan {
             // rustledger checks a `balance` against the account *and its
             // subaccounts*, and a category's balance is its subtree sum, so the
             // asserted figure is the subtree — the same number the budget calls
-            // available.
+            // available. The sums are folded once here rather than scanned per
+            // account: the scan is quadratic in the categories, and the WASM
+            // sandbox metres every instruction the plugin runs.
+            let subtotals = subtree_totals(&categories);
             for account in categories.keys() {
-                let subtree = subtree_of(&categories, account);
+                let Some(subtree) = subtotals.get(account) else {
+                    continue;
+                };
                 for (commodity, amount) in subtree.iter() {
                     if asserted.contains(&(account.clone(), commodity.to_string())) {
                         continue;
@@ -728,7 +737,21 @@ fn horizon(config: &Config, directives: &[DirectiveWrapper]) -> Result<Vec<Month
 }
 
 /// Every posting of every transaction, reduced to what budgeting reads from it.
-fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
+///
+/// A posting dated before the budget starts is skipped unless something reads
+/// it: the plugin's own namespace postings are folded into the balances every
+/// month starts from, and the on-budget ones only when the configuration counts
+/// the starting balance. Everything else about them — the per-month activity,
+/// the rollover sweep, the assignments — is keyed by a horizon month. The test
+/// comes before the decimal is parsed because that parse, over a twenty-year
+/// history the budget never looks at, is most of the instruction budget the WASM
+/// sandbox allows.
+fn movements(
+    directives: &[DirectiveWrapper],
+    start: Month,
+    include_starting_balance: bool,
+    budget_accounts: &[Pattern],
+) -> Vec<Movement> {
     let mut movements = Vec::new();
     for directive in directives {
         let DirectiveData::Transaction(transaction) = &directive.data else {
@@ -738,6 +761,11 @@ fn movements(directives: &[DirectiveWrapper]) -> Vec<Movement> {
             continue;
         };
         for posting in &transaction.postings {
+            let read_before_the_start = accounts::is_generated(&posting.account)
+                || (include_starting_balance && matches_any(budget_accounts, &posting.account));
+            if month < start && !read_before_the_start {
+                continue;
+            }
             let Some(units) = posting.units.as_ref() else {
                 continue;
             };
@@ -823,7 +851,7 @@ fn posting_value(posting: &PostingData, units: &AmountData, quantity: Decimal) -
 }
 
 /// The category a posting's account belongs to, honouring `map` overrides.
-fn category_for(config: &Config, mappings: &[(Regex, String)], account: &str) -> Option<String> {
+fn category_for(config: &Config, mappings: &[(Pattern, String)], account: &str) -> Option<String> {
     if accounts::is_generated(account) {
         return None;
     }
@@ -857,6 +885,27 @@ fn subtree_of(categories: &BTreeMap<String, Inventory>, account: &str) -> Invent
         }
     }
     total
+}
+
+/// Every account's subtree sum, folded in one pass: each category's balance is
+/// added to the account itself and to each of its ancestors, so a lookup is
+/// constant instead of a scan.
+fn subtree_totals(categories: &BTreeMap<String, Inventory>) -> BTreeMap<String, Inventory> {
+    let mut totals: BTreeMap<String, Inventory> = BTreeMap::new();
+    for (account, balance) in categories {
+        let mut prefix = String::new();
+        for part in account.split(':') {
+            if !prefix.is_empty() {
+                prefix.push(':');
+            }
+            prefix.push_str(part);
+            totals
+                .entry(prefix.clone())
+                .or_default()
+                .add_inventory(balance);
+        }
+    }
+    totals
 }
 
 /// Fold a hand-written balance inside the plugin's namespace into the model's
@@ -941,16 +990,76 @@ fn target_month(target: &Target) -> Month {
     }
 }
 
+/// A configured account pattern: the regexes the configuration language accepts,
+/// with the shapes real patterns take matched directly.
+///
+/// Every `budget account` and `map` pattern is matched against every posting, so
+/// the form matters: the WASM sandbox metres the plugin's instructions, and a
+/// Pike VM search per posting is most of what the call can afford — a ledger of
+/// a few hundred transactions exhausted the budget inside `is_match`. A pattern
+/// with no metacharacter is a plain substring test, `^…` a prefix, `…$` a suffix
+/// and a literal head before `.*` another substring; only what is left runs as a
+/// regex. Every rewrite is the regex's own meaning under a search, not an
+/// approximation of it.
+enum Pattern {
+    Contains(String),
+    Prefix(String),
+    Suffix(String),
+    Regex(Regex),
+}
+
+impl Pattern {
+    /// Compile one configured pattern, or `None` when it is not a valid regex
+    /// (the configuration parser already reported that).
+    fn compile(pattern: &str) -> Option<Self> {
+        const META: &[char] = &[
+            '\\', '^', '$', '.', '|', '?', '*', '+', '(', ')', '[', ']', '{', '}',
+        ];
+        let literal = |text: &str| !text.contains(META);
+        if literal(pattern) {
+            return Some(Self::Contains(pattern.to_string()));
+        }
+        if let Some(rest) = pattern.strip_prefix('^') {
+            if literal(rest) {
+                return Some(Self::Prefix(rest.to_string()));
+            }
+            if let Some(head) = rest.strip_suffix(".*") {
+                if literal(head) {
+                    return Some(Self::Prefix(head.to_string()));
+                }
+            }
+        } else if let Some(head) = pattern.strip_suffix('$') {
+            if literal(head) {
+                return Some(Self::Suffix(head.to_string()));
+            }
+        } else if let Some(head) = pattern.strip_suffix(".*") {
+            if literal(head) {
+                return Some(Self::Contains(head.to_string()));
+            }
+        }
+        Regex::new(pattern).ok().map(Self::Regex)
+    }
+
+    fn is_match(&self, account: &str) -> bool {
+        match self {
+            Self::Contains(needle) => account.contains(needle.as_str()),
+            Self::Prefix(prefix) => account.starts_with(prefix.as_str()),
+            Self::Suffix(suffix) => account.ends_with(suffix.as_str()),
+            Self::Regex(regex) => regex.is_match(account),
+        }
+    }
+}
+
 /// Compile the configured patterns; the parser already rejected broken ones.
-fn compile(patterns: &[String]) -> Vec<Regex> {
+fn compile(patterns: &[String]) -> Vec<Pattern> {
     patterns
         .iter()
-        .filter_map(|pattern| Regex::new(pattern).ok())
+        .filter_map(|pattern| Pattern::compile(pattern))
         .collect()
 }
 
 /// Whether `account` matches any on-budget pattern.
-fn matches_any(patterns: &[Regex], account: &str) -> bool {
+fn matches_any(patterns: &[Pattern], account: &str) -> bool {
     patterns.iter().any(|pattern| pattern.is_match(account))
 }
 
@@ -1009,6 +1118,76 @@ mod tests {
             Decimal::from_str(number).expect("test numbers parse"),
             currency,
         )
+    }
+
+    /// The direct shapes match exactly what their regex does: the rewrite is a
+    /// fast path, not a second meaning.
+    #[test]
+    fn direct_patterns_agree_with_the_regex_they_stand_for() {
+        let patterns = [
+            "Assets:Cash",
+            "^Assets:Bank",
+            "^Assets:TR:Enpara:.*",
+            "Liabilities:TR:.*",
+            "Expenses$",
+            "Assets:Cash.*",
+            "^Assets:(Cash|Bank)$",
+            "",
+        ];
+        let accounts = [
+            "Assets:Cash",
+            "Assets:Bank:Checking",
+            "Assets:TR:Enpara:Termless-TRY",
+            "Liabilities:TR:Ziraat:Bankkart",
+            "Expenses",
+            "Equity:Expenses",
+            "Assets:Joint:House",
+            "Assets:Cash-Extra",
+            "Expenses:Food",
+        ];
+        for pattern in patterns {
+            let direct = super::Pattern::compile(pattern).expect("test patterns are valid");
+            let regex = Regex::new(pattern).expect("test patterns compile");
+            for account in accounts {
+                assert_eq!(
+                    direct.is_match(account),
+                    regex.is_match(account),
+                    "pattern {pattern:?} on {account:?}"
+                );
+            }
+        }
+    }
+
+    /// A budget that starts in 2026 does not read 2010: the plan is identical
+    /// with and without history the horizon never looks at, so the skip cannot
+    /// change a figure — it only keeps the plugin inside the sandbox's
+    /// instruction budget.
+    #[test]
+    fn history_before_the_start_date_changes_nothing() {
+        let config = config("2026-10", 3);
+        let spent = [txn(
+            "2026-10-05",
+            &[
+                ("Expenses:Food", "-10.00", "TRY"),
+                ("Assets:Bank:Checking", "10.00", "TRY"),
+            ],
+        )];
+        let history = txn(
+            "2010-05-05",
+            &[
+                ("Expenses:Food", "-99.00", "TRY"),
+                ("Assets:Bank:Checking", "99.00", "TRY"),
+            ],
+        );
+
+        let planned = super::plan(&config, &spent);
+        let mut with_history = vec![history];
+        with_history.extend(spent.iter().cloned());
+        assert_eq!(
+            format!("{:?}", super::plan(&config, &with_history)),
+            format!("{planned:?}"),
+            "history the horizon never reads must not move a figure"
+        );
     }
 
     fn config(start: &str, months: usize) -> Config {

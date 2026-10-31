@@ -658,7 +658,7 @@ pub(crate) fn plugin_install(state: &AppState, source: &str) -> Result<BudgetPlu
     #[cfg(not(target_os = "android"))]
     {
         let bytes = std::fs::read(source).map_err(|error| format!("{source}: {error}"))?;
-        install_module(state, &bytes, source)
+        install_module(state, &bytes, source, false)
     }
 }
 
@@ -674,7 +674,7 @@ pub(crate) fn plugin_install_bundled(state: &AppState) -> Result<BudgetPluginSta
 
     #[cfg(not(target_os = "android"))]
     {
-        install_module(state, BUNDLED_PLUGIN, "the plugin bundled with the app")
+        install_module(state, BUNDLED_PLUGIN, "the plugin bundled with the app", true)
     }
 }
 
@@ -687,12 +687,16 @@ fn android_install_refusal() -> String {
 }
 
 /// Put `bytes` beside the journal and, when the journal already configures the
-/// budget, declare it. `origin` names the source in a refusal.
+/// budget, declare it. `origin` names the source in a refusal, and `replace`
+/// says whether an existing module that differs may be overwritten — the app's
+/// own build may (a ledger holding an older one is otherwise unfixable from the
+/// screen), a file the reader chose may not.
 #[cfg(not(target_os = "android"))]
 fn install_module(
     state: &AppState,
     bytes: &[u8],
     origin: &str,
+    replace: bool,
 ) -> Result<BudgetPluginStatus, String> {
     let (target, configured) = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
@@ -725,11 +729,14 @@ fn install_module(
     if target.exists() {
         let existing =
             std::fs::read(&target).map_err(|error| format!("{}: {error}", target.display()))?;
-        if existing != bytes {
+        if existing != bytes && !replace {
             return Err(format!(
                 "refusing to overwrite {}: it already holds a different plugin; move that file away first",
                 target.display()
             ));
+        }
+        if existing != bytes {
+            crate::fsutil::write_atomic(&target, bytes, Some(0o644))?;
         }
     } else {
         crate::fsutil::write_atomic(&target, bytes, Some(0o644))?;
@@ -2792,6 +2799,21 @@ option \"operating_currency\" \"TRY\"
             1
         );
         assert!(status.wasm[0].present);
+    }
+
+    /// The app's own build replaces a module already there: a ledger holding an
+    /// older copy of this plugin is otherwise unfixable from the screen, because
+    /// the download path refuses a different file and the notice only speaks for
+    /// an undeclared journal.
+    #[test]
+    fn the_bundled_plugin_replaces_a_stale_copy() {
+        let (dir, _path, state) = fixture_without_wasm("budget-plugin-stale", CONFIGURED);
+        let target = dir.file("rustledger_envelope.wasm");
+        fs::write(&target, b"\0asm-this-is-an-older-build").unwrap();
+
+        let status = budget_write::plugin_install_bundled(&state).unwrap();
+        assert!(status.declared, "the configuration is declared");
+        assert_eq!(fs::read(&target).unwrap(), BUNDLED_PLUGIN, "the app's build wins");
     }
 
     #[test]
