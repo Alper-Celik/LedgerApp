@@ -7,9 +7,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { resolve } from "$app/paths";
 	import { ChevronRightIcon } from "@hugeicons/core-free-icons";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
+	import type { BudgetSettings } from "../../../bindings";
 	import BudgetAmount from "$lib/components/budget/budget-amount.svelte";
+	import BudgetBudgetedCell from "$lib/components/budget/budget-budgeted-cell.svelte";
+	import BudgetRolloverControl from "$lib/components/budget/budget-rollover-control.svelte";
 	import { monthLabel } from "$lib/budget.js";
 	import type { BudgetCell, BudgetRow } from "$lib/budget-grid.js";
+	import {
+		categoryAccount,
+		envelopeFile,
+		envelopeSetting,
+	} from "$lib/budget-settings.js";
 	import { cn } from "$lib/utils.js";
 
 	let {
@@ -17,15 +25,18 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		cell,
 		month,
 		currency,
+		settings = null,
 		collapsed = false,
 		ontoggle,
 	}: {
 		row: BudgetRow;
 		/** The row's figures in the one month the phone layout shows. */
 		cell: BudgetCell;
-		/** That month, `YYYY-MM`, for the register links' labels. */
+		/** That month, `YYYY-MM`, for the register links' labels and the write controls. */
 		month: string;
 		currency: string;
+		/** The budget's writable configuration, for the card's funding and rollover controls. */
+		settings?: BudgetSettings | null;
 		/** A group's envelopes are folded away; only a group row has any. */
 		collapsed?: boolean;
 		ontoggle: () => void;
@@ -33,6 +44,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	/** A group's own row and one of its envelopes are drawn differently, not by two components. */
 	const grouped = $derived(row.envelope === "");
+	/** The setting this envelope joins to, and the account/file a write names. */
+	const setting = $derived(envelopeSetting(settings, row));
+	const account = $derived(categoryAccount(settings, row));
+	const file = $derived(envelopeFile(settings, row));
 </script>
 
 <!--
@@ -57,7 +72,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 			<span class="truncate">{row.group}</span>
 		</button>
 	{:else}
-		<div class="truncate text-sm" title={row.account}>{row.envelope}</div>
+		<div class="flex min-w-0 items-center gap-2">
+			<div class="min-w-0 flex-1 truncate text-sm" title={row.account}>{row.envelope}</div>
+			{#if month !== ""}
+				<BudgetRolloverControl
+					{setting}
+					account={account}
+					{file}
+					{month}
+					label={account || row.envelope}
+					{currency}
+				/>
+			{/if}
+		</div>
 	{/if}
 	<div class="mt-1 grid grid-cols-3 gap-2">
 		{#each [{ label: "Budgeted", units: cell.budgeted }, { label: "Spent", units: cell.spent }, { label: "Balance", units: cell.balance }] as figure (figure.label)}
@@ -65,7 +92,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 				<span class="text-muted-foreground text-[10px] tracking-wide uppercase">
 					{figure.label}
 				</span>
-				{#if figure.label === "Spent" && row.fullName}
+				{#if figure.label === "Budgeted" && !grouped}
+					<!-- The same dated-fund editor the desktop column uses, at card scale. -->
+					<span class="text-sm">
+						<BudgetBudgetedCell
+							units={cell.budgeted}
+							{currency}
+							{month}
+							account={account}
+							{file}
+							label={account || row.envelope}
+						/>
+					</span>
+				{:else if figure.label === "Spent" && row.fullName}
 					<!-- As on the desktop grid: the envelope's spending opens its register. -->
 					<a
 						class="focus-visible:ring-ring rounded-sm text-sm underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:outline-none"

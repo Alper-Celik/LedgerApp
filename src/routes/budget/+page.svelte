@@ -4,17 +4,18 @@ SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <!--
-	The ledger's envelope budget as a multi-month grid, read-only.
+	The ledger's envelope budget as a multi-month grid.
 
 	Every allocation the screen shows is the envelope plugin's own arithmetic:
 	the plugin reads its configuration out of the ledger (`fund`, `adjust`,
 	`zero`, `pad`, `rollover` under a `custom "envelope"` directive) and writes
-	the resulting bookkeeping into `Equity:Envelope:` on every load. Editing a
-	figure here would therefore be a second writer of the same numbers, and the
-	next load — of the same ledger, after any edit anywhere — would overwrite
-	whatever was typed. Until the configuration is the thing being edited, this
-	page only reads it; the plugin stays the source of truth for what is
-	assigned where.
+	the resulting bookkeeping into `Equity:Envelope:` on every load. What this
+	screen edits is therefore the *configuration that drives the plugin* — an
+	envelope's `fund` and `rollover` — and never the emitted figures themselves:
+	an optimistic edit would be overwritten by the next load of the same ledger.
+	Every save goes through the backend's loader-verified funnel and then asks
+	the ledger to reload, so the grid shows the plugin's output again, even when
+	a directive from another month moves figures in more than one column.
 
 	The shape follows Actual Budget's grid: a pinned month-summary strip (what
 	each visible month still has to assign), a pinned column header (the month's
@@ -26,12 +27,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
 	import { untrack } from "svelte";
+	import { invalidateAll } from "$app/navigation";
 	import { ChevronLeftIcon, ChevronRightIcon } from "@hugeicons/core-free-icons";
 	import { HugeiconsIcon } from "@hugeicons/svelte";
-	import { commands, type BudgetRange } from "../../bindings";
+	import { commands, type BudgetRange, type BudgetSettings } from "../../bindings";
 	import BudgetAmount from "$lib/components/budget/budget-amount.svelte";
 	import BudgetGridRow from "$lib/components/budget/budget-grid-row.svelte";
 	import BudgetMonthCard from "$lib/components/budget/budget-month-card.svelte";
+	import BudgetSetup from "$lib/components/budget/budget-setup.svelte";
 	import BudgetStackedRow from "$lib/components/budget/budget-stacked-row.svelte";
 	import { Alert } from "$lib/components/ui/alert/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
@@ -50,22 +53,36 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	} from "$lib/budget.js";
 	import { messageOf } from "$lib/errors.js";
 	import { IsMobile } from "$lib/hooks/is-mobile.svelte.js";
-	import { ledgerEpoch, ledgerRevision } from "$lib/ledger-revision.svelte.js";
+	import {
+		bumpLedgerRevision,
+		ledgerEpoch,
+		ledgerRevision,
+	} from "$lib/ledger-revision.svelte.js";
 	import { cn } from "$lib/utils.js";
 	import type { PageProps } from "./$types";
 
 	let { data }: PageProps = $props();
 
 	/**
-	 * A range read since the page loaded, or `null` while the route's own load
-	 * still stands. A revision refetches the same window in one call rather than
-	 * a month at a time: the grid holds several and they are one IPC.
+	 * A range and settings read since the page loaded, or `null` while the
+	 * route's own load still stands. A revision refetches the same window and
+	 * the configuration in one round rather than a month at a time: the grid
+	 * holds several and they are one IPC.
 	 */
-	let fetched = $state<{ range: BudgetRange | null; error: string } | null>(null);
+	let fetched = $state<{
+		range: BudgetRange | null;
+		error: string;
+		settings: BudgetSettings | null;
+		settingsError: string;
+	} | null>(null);
 	const range = $derived(fetched ? fetched.range : data.range);
 	const error = $derived(fetched ? fetched.error : data.error);
+	const settings = $derived(fetched ? fetched.settings : data.settings);
+	const settingsError = $derived(fetched ? fetched.settingsError : data.settingsError);
 	const currency = $derived(range?.currency ?? "");
 	let busy = $state(false);
+	/** The setup sheet, opened from the empty state when no config exists. */
+	let setupOpen = $state(false);
 
 	const months = $derived(range?.months ?? []);
 	const total = $derived(months.length);
@@ -139,7 +156,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		if (
 			target instanceof HTMLElement &&
 			target.closest(
-				"input, textarea, select, [contenteditable='true'], [role='listbox'], [role='dialog']"
+				"input, textarea, select, [contenteditable='true'], [role='listbox'], [role='menu'], [role='dialog']"
 			)
 		) {
 			return;
@@ -163,18 +180,43 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 	async function refetch() {
 		const current = untrack(() => range);
+		const currentSettings = untrack(() => settings);
 		busy = true;
 		try {
-			const result = await commands.budgetRange(current?.from || null, current?.to || null);
-			// A failed read keeps the window on screen: the alert says what went
-			// wrong rather than the grid blanking out under it.
-			fetched =
-				result.status === "error"
-					? { range: current, error: result.error }
-					: { range: result.data, error: "" };
-		} catch (cause) {
-			console.error("budgetRange failed", cause);
-			fetched = { range: current, error: messageOf(cause) };
+			const [rangeOutcome, settingsOutcome] = await Promise.allSettled([
+				commands.budgetRange(current?.from || null, current?.to || null),
+				commands.budgetSettings(),
+			]);
+			// A failed read keeps the window (or the configuration) on screen: the
+			// alert says what went wrong rather than the grid blanking out under it.
+			let nextRange = current;
+			let nextError = "";
+			if (rangeOutcome.status === "rejected") {
+				console.error("budgetRange failed", rangeOutcome.reason);
+				nextError = messageOf(rangeOutcome.reason);
+			} else if (rangeOutcome.value.status === "error") {
+				nextError = rangeOutcome.value.error;
+			} else {
+				nextRange = rangeOutcome.value.data;
+			}
+
+			let nextSettings = currentSettings;
+			let nextSettingsError = "";
+			if (settingsOutcome.status === "rejected") {
+				console.error("budgetSettings failed", settingsOutcome.reason);
+				nextSettingsError = messageOf(settingsOutcome.reason);
+			} else if (settingsOutcome.value.status === "error") {
+				nextSettingsError = settingsOutcome.value.error;
+			} else {
+				nextSettings = settingsOutcome.value.data;
+			}
+
+			fetched = {
+				range: nextRange,
+				error: nextError,
+				settings: nextSettings,
+				settingsError: nextSettingsError,
+			};
 		} finally {
 			busy = false;
 		}
@@ -209,7 +251,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<header class="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 pb-2">
 		<h1 class="text-lg font-semibold tracking-tight">Budget</h1>
 		<span class="text-muted-foreground hidden text-xs md:inline">
-			the envelope plugin's months, as it wrote them — read-only
+			the envelope plugin's months — a funding edit is dated from its month, so the grid reloads
+			from the plugin's output and other months can move too
 		</span>
 		<span class="text-muted-foreground ms-auto text-[10px]" aria-live="polite">
 			{busy ? "updating…" : ""}
@@ -245,6 +288,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	{#if error && range}
 		<div class="shrink-0 px-4 pb-2">
 			<Alert variant="destructive">{error}</Alert>
+		</div>
+	{/if}
+	{#if settingsError && range}
+		<div class="shrink-0 px-4 pb-2">
+			<Alert variant="destructive">The budget's configuration could not be read: {settingsError}</Alert>
 		</div>
 	{/if}
 
@@ -305,6 +353,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							cell={row.cells[0]}
 							month={visible[0]?.month ?? ""}
 							{currency}
+							{settings}
 							collapsed={collapsed.includes(row.group)}
 							ontoggle={() => toggleGroup(row.group)}
 						/>
@@ -382,6 +431,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 							{template}
 							{currency}
 							months={visible}
+							{settings}
 							collapsed={collapsed.includes(row.group)}
 							ontoggle={() => toggleGroup(row.group)}
 						/>
@@ -391,14 +441,51 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		{/if}
 	{:else}
 		<!--
-			Nothing to lay out, and the backend's own sentence below says whether
-			that is "a ledger not yet budgeted" or a read that failed. The empty
-			state stays calm rather than destructive: a ledger without an envelope
-			budget is the normal state of one, not a failure.
+			Nothing to lay out. The empty state is a state, not a failure: a
+			ledger without an envelope budget is the normal state of one. When the
+			config is missing the screen offers the way in; when it exists but the
+			plugin wrote no months, it says why that can be (usually the plugin
+			line is absent, which the app cannot write for the reader).
 		-->
 		<div class="min-h-0 flex-1 overflow-y-auto p-4" bind:clientWidth={width}>
 			<div class="flex max-w-md flex-col gap-2">
-				{#if range === null}
+				{#if settings?.config === null}
+					<h2 class="text-sm font-medium">No envelope budget yet</h2>
+					<p class="text-muted-foreground text-xs">
+						The envelope plugin writes the budget from
+						<code class="font-mono">custom "envelope"</code>
+						directives. Set up its configuration — the start month, the on-budget accounts,
+						and how far the budget runs — and its funding, spending and rollovers land under
+						<code class="font-mono">Equity:Envelope:</code> for the months to appear here.
+					</p>
+					<div>
+						<Button size="sm" onclick={() => (setupOpen = true)}>Set up the envelope budget</Button>
+					</div>
+					{#if !settings.plugin_declared}
+						<p class="text-muted-foreground text-xs">
+							This journal does not declare
+							<code class="font-mono">plugin "rustledger_envelope.wasm"</code>. Setup writes the
+							configuration only — the app cannot install a plugin — so add that line to the
+							journal as well.
+						</p>
+					{/if}
+				{:else if settings?.config}
+					<h2 class="text-sm font-medium">
+						{error ? "The budget could not be read" : "The budget is configured"}
+					</h2>
+					<p class="text-muted-foreground text-xs">
+						The envelope budget is configured from {monthLabel(settings.config.start)}, but the
+						plugin has written no months for this window. Load the ledger again, or widen the
+						window with <code class="font-mono">?from=</code>.
+					</p>
+					{#if !settings.plugin_declared}
+						<p class="text-muted-foreground text-xs">
+							This journal does not declare
+							<code class="font-mono">plugin "rustledger_envelope.wasm"</code>. Add that line to
+							the journal: setup wrote the configuration only.
+						</p>
+					{/if}
+				{:else if range === null}
 					<h2 class="text-sm font-medium">The budget could not be read</h2>
 					<p class="text-muted-foreground text-xs">
 						The backend did not return a month range. Open a ledger, or fix what the message
@@ -412,10 +499,25 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 						and the months appear here.
 					</p>
 				{/if}
+				{#if settingsError}
+					<Alert variant="destructive">
+						The budget's configuration could not be read: {settingsError}
+					</Alert>
+				{/if}
 				{#if error}
 					<Alert variant="destructive">{error}</Alert>
 				{/if}
 			</div>
 		</div>
 	{/if}
+
+	<BudgetSetup
+		open={setupOpen}
+		pluginDeclared={settings?.plugin_declared ?? false}
+		onclose={() => (setupOpen = false)}
+		onsaved={async () => {
+			bumpLedgerRevision();
+			await invalidateAll();
+		}}
+	/>
 </div>
