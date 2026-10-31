@@ -179,8 +179,9 @@ export const commands = {
 	 *  in the ledger's operating currency; see [`BudgetMonth`] for what each one
 	 *  means. The figures stay read-only because the plugin computes them on every
 	 *  load; what the screen writes instead is the configuration behind them —
-	 *  [`budget_settings`], [`budget_init`], [`budget_fund_set`] and
-	 *  [`budget_rollover_set`].
+	 *  [`budget_settings`], [`budget_init`], [`budget_config_set`],
+	 *  [`budget_fund_set`], [`budget_rollover_set`] and the plugin's own
+	 *  [`budget_plugin_status`]/[`budget_plugin_enable`].
 	 */
 	budget: (month: string | null) => typedError<BudgetMonth, string>(__TAURI_INVOKE("budget", { month })),
 	/**
@@ -212,8 +213,11 @@ export const commands = {
 	 * 
 	 *  The write goes through the loader-verified edit pipeline, so an invalid
 	 *  pattern is refused by the plugin and the file is put back byte-for-byte.
-	 *  `plugin_declared` on [`budget_settings`] is the form's warning that the
-	 *  journal does not load an envelope plugin yet; it is not a precondition.
+	 *  When the journal does not declare the envelope plugin yet, the `plugin`
+	 *  line is written in the same commit (into the root journal, in a second call
+	 *  when the block goes into an included file). A missing
+	 *  `rustledger_envelope.wasm` is refused before anything is written, with the
+	 *  path to put it at.
 	 */
 	budgetInit: (file: string, start: string, monthsAhead: number | null, end: string | null, budgetAccounts: string[], assert: boolean, strict: boolean) => typedError<null, string>(__TAURI_INVOKE("budget_init", { file, start, monthsAhead, end, budgetAccounts, assert, strict })),
 	/**
@@ -236,6 +240,66 @@ export const commands = {
 	 *  and a cap without both `units` and `currency` is refused.
 	 */
 	budgetRolloverSet: (file: string, account: string, kind: string, units: string | null, currency: string | null, month: string) => typedError<null, string>(__TAURI_INVOKE("budget_rollover_set", { file, account, kind, units, currency, month })),
+	/**
+	 *  Replace the journal's existing budget configuration — the editor's way to
+	 *  change a budget that was already set up, rather than adding a second one.
+	 * 
+	 *  The block holding `start date` is rewritten, in whichever journal file it
+	 *  lives: the returned [`BudgetConfig::file`] is that file, which need not be
+	 *  `file`. Every directive that is part of the configuration (`start date`,
+	 *  `end date`, `months ahead`, `budget account`, `assert`, `strict`) is
+	 *  replaced, so a key the new configuration does not use loses its line; every
+	 *  other envelope directive (`fund`, `rollover`, `adjust`, …) is left byte for
+	 *  byte where it stood. An `end date` and `months ahead` cannot be asked for
+	 *  together — the plugin rejects both — and a journal with no `start date` yet
+	 *  is refused with a pointer to [`budget_init`]. A journal that has the block
+	 *  but no `plugin` line gets one in the same write, so a legacy configuration
+	 *  is repaired by the edit; a missing `rustledger_envelope.wasm` is refused
+	 *  before anything is written.
+	 */
+	budgetConfigSet: (file: string, start: string, monthsAhead: number | null, end: string | null, budgetAccounts: string[], assert: boolean, strict: boolean) => typedError<BudgetConfig, string>(__TAURI_INVOKE("budget_config_set", { file, start, monthsAhead, end, budgetAccounts, assert, strict })),
+	/**
+	 *  Whether the journal declares the envelope plugin, where the declaration
+	 *  lives, and the candidate locations of `rustledger_envelope.wasm` beside the
+	 *  journal — the budget screen's "the plugin is off" notice and the path it
+	 *  names. No ledger loaded answers an empty status.
+	 */
+	budgetPluginStatus: () => __TAURI_INVOKE<BudgetPluginStatus>("budget_plugin_status"),
+	/**
+	 *  Declare the envelope plugin in the root journal, if it is not declared
+	 *  already and its `.wasm` exists in one of the candidates
+	 *  [`budget_plugin_status`] names.
+	 * 
+	 *  Already declared: the status comes back and nothing is written. Not there:
+	 *  the error names the absolute path to put the file at, because declaring a
+	 *  plugin that does not exist makes the loader fail and the write would be
+	 *  rolled back. The declaration joins the journal's other `plugin`/`option`
+	 *  lines.
+	 */
+	budgetPluginEnable: () => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_enable")),
+	/**
+	 *  The reader's own `rustledger_envelope.wasm`, chosen with the desktop file
+	 *  chooser — the release asset they downloaded. `None` when they cancel. A
+	 *  phone has no chooser here (the ledger is a SAF tree), so it answers `None`
+	 *  as well and [`budget_plugin_install`] explains what to do instead.
+	 */
+	pickPluginFile: () => __TAURI_INVOKE<string | null>("pick_plugin_file"),
+	/**
+	 *  Copy a chosen `rustledger_envelope.wasm` beside the file that declares the
+	 *  plugin and, when a configuration already exists, declare it.
+	 * 
+	 *  The source must start with the WebAssembly magic (`\0asm`); the target is
+	 *  the first path [`budget_plugin_status`] names — the declaring file's
+	 *  directory, which is the root journal's before a declaration exists. A file
+	 *  already there is kept when it is byte-identical and never overwritten when
+	 *  it is a different plugin. Everything is checked before the first write, so
+	 *  a failed install leaves the ledger untouched; with a configuration present
+	 *  the returned status is the same [`budget_plugin_enable`] would give. With
+	 *  no configuration the file is copied but not declared: the plugin would
+	 *  report a missing `start date`, and the next configuration write adds the
+	 *  line with the block.
+	 */
+	budgetPluginInstall: (source: string) => typedError<BudgetPluginStatus, string>(__TAURI_INVOKE("budget_plugin_install", { source })),
 	/**
 	 *  Every saved dashboard, oldest id order as stored; a first run answers with
 	 *  the six seeded defaults (and writes nothing until one is saved).
@@ -265,6 +329,18 @@ export const commands = {
 	 *  `price` directive already in it — the prices view never fetches on load.
 	 */
 	priceTargets: () => __TAURI_INVOKE<PriceTarget[]>("price_targets"),
+	/**
+	 *  One commodity's price history, from the two sources the journal states it
+	 *  in: explicit `price` directives, the rates implied by trades, or both.
+	 * 
+	 *  `source` is `"explicit"`, `"transactions"` or `"both"`; `currency` narrows
+	 *  the answer to one quote currency; `from`/`to` are inclusive `YYYY-MM` month
+	 *  labels and `limit` keeps only the newest that many points. A point says
+	 *  which source it came from, and `both` prefers the explicit price when a day
+	 *  has one. Every amount is an exact decimal string; see
+	 *  [`crate::price_history`] for the full rule.
+	 */
+	priceHistory: (commodity: string, currency: string | null, source: string, from: string | null, to: string | null, limit: number | null) => typedError<PriceHistory, string>(__TAURI_INVOKE("price_history", { commodity, currency, source, from, to, limit })),
 	/**
 	 *  Fetch quotes for the given requests. Blocking network work, so it runs on a
 	 *  worker thread; per-request failures come back as `PriceFetch::Failed` and the
@@ -359,6 +435,14 @@ export const commands = {
 	 */
 	indexRefresh: (id: string) => typedError<IndexSeries, string>(__TAURI_INVOKE("index_refresh", { id })),
 	/**
+	 *  Write a stored index series into the journal as `price` directives — one per
+	 *  point, on the point's own month — so the index is a commodity the rest of
+	 *  the app can chart and convert with. The series is read from the store by id
+	 *  (a series fetched a moment ago is already there); `file` defaults to the
+	 *  ledger's root journal.
+	 */
+	indexWritePrices: (id: string, file: string | null) => typedError<IndexPriceWrite, string>(__TAURI_INVOKE("index_write_prices", { id, file })),
+	/**
 	 *  Spending per month in nominal and index-adjusted terms, per category — the
 	 *  lifestyle-inflation screen's data. `index` names a stored series.
 	 */
@@ -387,12 +471,27 @@ export const commands = {
 	/**
 	 *  Files the ledger's folder changed behind the app (another device, a cloud
 	 *  client): the app should offer a reload rather than keep serving what it
-	 *  loaded. Empty when nothing moved or when the ledger is not in a synced folder.
+	 *  loaded.
+	 * 
+	 *  Empty when nothing moved, and always empty when the folder is not the
+	 *  tracker: in a git repository git owns the tree's history, and the operation
+	 *  log's last-seen map is a second baseline that a commit, a checkout or a
+	 *  branch switch leaves behind the index — comparing them would report the
+	 *  app's own repository work as an outside change. In a SAF tree the mirror is
+	 *  the app's private copy, so there is nothing to compare either. The answer
+	 *  comes from `sync::changes_for`, which shares `sync::watches` — the one gate —
+	 *  with `sync_conflicts`.
 	 */
 	syncChanges: () => typedError<ExternalChange[], string>(__TAURI_INVOKE("sync_changes")),
 	/**
 	 *  Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
 	 *  Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
+	 * 
+	 *  Empty when git owns the ledger: a conflict copy is a sync client's second
+	 *  version, and a repository's versions are git's (its merge conflicts are
+	 *  surfaced by the merge view). Reporting name-shaped copies there would put a
+	 *  conflict in front of the reader that git already accounts for. The answer
+	 *  comes from `sync::conflicts_for`, the same gate `sync_changes` uses.
 	 */
 	syncConflicts: () => typedError<Report, string>(__TAURI_INVOKE("sync_conflicts")),
 	/**
@@ -687,6 +786,23 @@ export type BudgetMonth = {
 };
 
 /**
+ *  Whether the journal declares the envelope plugin, and where its `.wasm`
+ *  could live.
+ */
+export type BudgetPluginStatus = {
+	/**  A `plugin` directive names the envelope module. */
+	declared: boolean,
+	/**  The loaded path of the file that declares it, when one does. */
+	file: string | null,
+	/**
+	 *  The candidate locations for `rustledger_envelope.wasm`: the declaring
+	 *  file's directory first, then the root journal's. Empty when no ledger
+	 *  is loaded.
+	 */
+	wasm: PluginWasm[],
+};
+
+/**
  *  Several consecutive months of the ledger's envelope budget.
  * 
  *  The single-month [`BudgetMonth`] is the screen's *one* page; this is the
@@ -753,7 +869,8 @@ export type BudgetRangeMonth = {
 export type BudgetSettings = {
 	/**
 	 *  The journal declares an envelope plugin (`plugin "…envelope…wasm"`).
-	 *  The init form warns when this is false; the commands still write.
+	 *  A configuration write adds the line itself when its module is present;
+	 *  this field is what the screen's notice and repair controls read.
 	 */
 	plugin_declared: boolean,
 	/**  The parsed configuration, or `None` when no `start date` exists. */
@@ -1222,6 +1339,25 @@ export type IndexPoint = {
 };
 
 /**
+ *  What one write did: the commodity it named, the file it landed in, and how
+ *  many of the series' points were new.
+ */
+export type IndexPriceWrite = {
+	/**  The series id the points came from. */
+	series: string,
+	/**  The ledger commodity the points were written as, e.g. `IDX.TR-CPI`. */
+	commodity: string,
+	/**  The currency the prices are in. */
+	currency: string,
+	/**  The journal file the directives went into. */
+	file: string,
+	/**  How many `price` directives this run appended. */
+	written: number,
+	/**  How many points the ledger already carried verbatim. */
+	skipped: number,
+};
+
+/**
  *  What a provider publishes, without its points — the picker's fix, without
  *  points: a stored series can be refreshed, but with nothing stored there is
  *  still a list of series worth adding.
@@ -1602,6 +1738,14 @@ export type PdfPage = {
 	png: number[],
 };
 
+/**  One place the envelope plugin's `.wasm` could sit. */
+export type PluginWasm = {
+	/**  Absolute path of the candidate plugin file. */
+	path: string,
+	/**  Whether a file exists at [`PluginWasm::path`]. */
+	present: boolean,
+};
+
 /**
  *  One posting's new units figure. Everything else on the posting's line — its
  *  currency, `@`/`@@` price, `{cost}` spec and comment — stays as written.
@@ -1643,6 +1787,86 @@ export type PriceFetch =
 ({ quote: PriceQuote }) & { failed?: never } | 
 /**  Why that request produced none. */
 ({ failed: PriceFailure }) & { quote?: never };
+
+/**  One commodity's price history as the screen reads it. */
+export type PriceHistory = {
+	/**  The commodity the history is for. */
+	commodity: string,
+	/**
+	 *  The source selector the answer was built for: `explicit`,
+	 *  `transactions` or `both`.
+	 */
+	source: string,
+	/**
+	 *  Every currency the commodity has ever been priced in, across both
+	 *  sources, sorted. This is the currency picker's list, and it does not
+	 *  move when the source changes — an option that disappears under another
+	 *  source would be a control that changes under the hand.
+	 */
+	currencies: string[],
+	/**
+	 *  What each source holds for the commodity and the requested currency,
+	 *  before `from`/`to` and `limit` apply — the empty state's evidence.
+	 */
+	counts: PriceHistoryCounts,
+	/**
+	 *  The points, oldest first; a day with several currencies has one point
+	 *  per currency, ordered by currency.
+	 */
+	points: PriceHistoryPoint[],
+	/**  The small summary above the series. */
+	summary: PriceHistorySummary,
+};
+
+/**
+ *  How many points each source holds for a commodity before the requested
+ *  range and point limit narrow them. The screen uses this to say *why* an
+ *  answer is empty: nothing in the ledger, nothing in the chosen source, or
+ *  nothing in the chosen months.
+ */
+export type PriceHistoryCounts = {
+	/**  Points stated by `price` directives. */
+	explicit: number,
+	/**  Points implied by trades. */
+	transactions: number,
+};
+
+/**  One day's price for one commodity, in one currency, and where it came from. */
+export type PriceHistoryPoint = {
+	/**  The day, `YYYY-MM-DD`. */
+	date: string,
+	/**  The exact price as a decimal string. */
+	value: string,
+	/**  The currency the price is in. */
+	currency: string,
+	/**
+	 *  `"explicit"` for a `price` directive, `"transactions"` for a rate
+	 *  implied by a posting.
+	 */
+	source: string,
+};
+
+/**
+ *  The figures a reader wants before scrolling: how many days, when they run,
+ *  and the range of prices.
+ */
+export type PriceHistorySummary = {
+	/**  How many points the answer holds. */
+	points: number,
+	/**  The oldest point's day, `None` for an empty history. */
+	first: string | null,
+	/**  The newest point's day, `None` for an empty history. */
+	last: string | null,
+	/**
+	 *  The smallest price across the returned points, an exact decimal string.
+	 *  `None` for an empty history. When the answer holds several currencies
+	 *  the figure is the smallest decimal among them, which is a range of
+	 *  numbers rather than of money; ask for one currency to compare values.
+	 */
+	min: string | null,
+	/**  The largest price across the returned points; see [`Self::min`]. */
+	max: string | null,
+};
 
 /**
  *  One quote: one commodity, one currency, one day, one exact decimal price.

@@ -2951,6 +2951,7 @@ dependencies = [
  "tauri-runtime-qt",
  "tauri-specta",
  "ureq 2.12.1",
+ "wat",
 ]
 
 [[package]]

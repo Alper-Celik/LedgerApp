@@ -23,7 +23,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   per-file transactions, the new-entry file suggestion), `budget.rs` (one month and a range of envelope
   budget), `budget_write.rs` (the budget editor: reads the plugin's `custom "envelope"` configuration,
   appends/updates its `start date`, `fund` and `rollover` directives through the edit pipeline),
-  `reports.rs` (net worth, cash flow, category months, lifestyle inflation).
+  `reports.rs` (net worth, cash flow, category months, lifestyle inflation), `price_history.rs`
+  (a commodity's daily prices from `price` directives and from trade-implied rates, merged and
+  source-labelled).
 - **Edits** — `editing.rs` (write → reload → roll back on a *new* loader error → stage), `rewrite.rs` (pure
   byte-range surgery), `conflict.rs` (directive-level three-way merge), `conflict_cmd.rs` (compare/resolve
   over the operation log), `conflict_names.rs` (every sync client's conflict-copy naming).
@@ -39,7 +41,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
   device, so a phone's operation undoes on the desktop).
 - **Fetchers** — `prices.rs` + `prices/tefas.rs` (quotes via rustledger's `PriceSource`, TEFAS
   downstream, written to the journal through the edit pipeline), `index.rs` (index-as-price maths),
-  `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `dashboards.rs` (the saved
+  `index_store.rs`, `index_providers.rs` (FRED, Eurostat, TÜİK, ENAG, ECB), `index_price.rs` (a stored
+  series written into the journal as `IDX.<ID>` prices, one per month), `dashboards.rs` (the saved
   dashboard store).
 - **Assistant** — `ai.rs` (OpenAI-compatible transport, settings that never leak the key), `ai_cmd.rs`
   (IPC surface, system prompt, tool table), `ai_stream.rs` (streaming reads forwarded as `ai://delta`),

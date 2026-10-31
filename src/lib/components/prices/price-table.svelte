@@ -4,6 +4,7 @@ SPDX-FileCopyrightText: 2026 Alper Çelik <alper@alper-celik.dev>
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <script lang="ts">
+	import { resolve } from "$app/paths";
 	import type { PriceSourceInfo, PriceTarget } from "../../../bindings";
 	import MoneyAmount from "$lib/components/money-amount.svelte";
 	import { Badge } from "$lib/components/ui/badge/index.js";
@@ -72,9 +73,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 					class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_4rem_5rem_10rem_10rem_6rem] sm:gap-2"
 					aria-busy={fetching}
 				>
-					<span class="min-w-0 truncate font-medium" title={target.commodity}>
+					<a
+						class="min-w-0 truncate font-medium underline-offset-2 hover:underline"
+						href={resolve("/prices/[commodity]", { commodity: target.commodity })}
+						title={`${target.commodity} — price history`}
+					>
 						{target.commodity}
-					</span>
+					</a>
 					<span class="justify-self-end sm:justify-self-start">
 						<Badge variant="outline">{target.kind}</Badge>
 					</span>

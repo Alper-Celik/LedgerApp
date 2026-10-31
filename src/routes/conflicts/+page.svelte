@@ -13,6 +13,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	import { Badge } from "$lib/components/ui/badge/index.js";
 	import { Button } from "$lib/components/ui/button/index.js";
 	import { messageOf } from "$lib/errors.js";
+	import { git, refreshGit } from "$lib/git.svelte.js";
 	import { bumpLedgerRevision } from "$lib/ledger-revision.svelte.js";
 	import type { PageProps } from "./$types";
 
@@ -39,6 +40,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	let refreshing = $state(false);
 	/** The copy whose resolver is open, by path. */
 	let reviewing = $state<string | null>(null);
+
+	// The scan answers empty in a git repository (git owns that ledger's
+	// versions), so the screen has to say why rather than claim the folder has
+	// no copies. `git.repo` is the same answer Settings and the merge view use.
+	void refreshGit();
 
 	$effect(() => {
 		// A scan belongs to one folder: after another ledger is opened (which
@@ -94,12 +100,20 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 	<div class="flex flex-wrap items-center gap-2">
 		<h1 class="text-lg font-semibold tracking-tight">Conflicts</h1>
 		<span class="text-muted-foreground text-xs">
-			copies the sync client left beside the ledger's files
+			{git.repo
+				? "git owns this ledger's versions; sync-client copies are not scanned"
+				: "copies the sync client left beside the ledger's files"}
 		</span>
 		<div class="ml-auto flex items-center gap-1">
-			<Button size="sm" variant="ghost" onclick={refresh} disabled={refreshing}>
-				{refreshing ? "Scanning…" : "Rescan"}
-			</Button>
+			{#if git.repo}
+				<!-- There is nothing to rescan where git is the tracker; a merge
+				     git could not settle is the merge view's, on Branches. -->
+				<Button size="sm" variant="outline" href={resolve("/branches")}>Branches</Button>
+			{:else}
+				<Button size="sm" variant="ghost" onclick={refresh} disabled={refreshing}>
+					{refreshing ? "Scanning…" : "Rescan"}
+				</Button>
+			{/if}
 			<Button size="sm" variant="outline" href={resolve("/history")}>History</Button>
 		</div>
 	</div>
@@ -119,8 +133,14 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		<div class="flex flex-col gap-0.5">
 			<h2 class="text-sm font-medium">No conflict copies</h2>
 			<p class="text-muted-foreground text-xs">
-				Every file the sync client touched is still under its own name; nothing was left
-				beside it to reconcile.
+				{#if git.repo}
+					This ledger's folder is a git repository, so git tracks its versions: a sync
+					client's second copy of a file is not what settles a difference here. A merge git
+					could not finish is on the Branches screen.
+				{:else}
+					Every file the sync client touched is still under its own name; nothing was left
+					beside it to reconcile.
+				{/if}
 			</p>
 		</div>
 	{:else}

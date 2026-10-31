@@ -34,8 +34,23 @@
 //! state, and a UI that silently rewrote them would be editing the reader's
 //! journal in ways the screen cannot show. They stay hand-written in the
 //! ledger.
+//!
+//! # The configuration block and the plugin declaration
+//!
+//! [`config_set`] rewrites the six configuration keys ([`CONFIG_KEYS`]) of the
+//! one block that holds `start date`, wherever that file is, and leaves every
+//! other envelope directive exactly where it stood. [`init`] and
+//! [`config_set`] also declare the plugin through the same funnel when the
+//! journal has no `plugin` line yet: the `.wasm` must exist beside the journal
+//! first, because a declaration for a missing file makes the loader fail — so
+//! a missing module is an explicit refusal and nothing is written.
+//! [`plugin_status`] says whether the journal declares the plugin and where its
+//! `.wasm` could live; [`plugin_enable`] and [`plugin_install`] are the repair
+//! path for a journal that was configured before this rule existed, or whose
+//! module the reader has just downloaded.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use rust_decimal::Decimal;
@@ -51,6 +66,20 @@ use crate::session::AppState;
 
 /// The prefix every `custom "envelope"` line carries after its date.
 const ENVELOPE_PREFIX: &str = "custom \"envelope\"";
+
+/// The plugin's file name, and the line a declaration writes.
+const ENVELOPE_PLUGIN: &str = "rustledger_envelope.wasm";
+
+/// The directives [`config_set`] owns. Every other envelope key is a
+/// month-scoped instruction and is left byte-for-byte alone.
+const CONFIG_KEYS: [&str; 6] = [
+    "start date",
+    "end date",
+    "months ahead",
+    "budget account",
+    "assert",
+    "strict",
+];
 
 /// Where an amount starts, as both sides of the payload need it.
 ///
@@ -138,12 +167,36 @@ pub struct BudgetConfig {
     pub strict: bool,
 }
 
+/// One place the envelope plugin's `.wasm` could sit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
+pub struct PluginWasm {
+    /// Absolute path of the candidate plugin file.
+    pub path: String,
+    /// Whether a file exists at [`PluginWasm::path`].
+    pub present: bool,
+}
+
+/// Whether the journal declares the envelope plugin, and where its `.wasm`
+/// could live.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, specta::Type)]
+pub struct BudgetPluginStatus {
+    /// A `plugin` directive names the envelope module.
+    pub declared: bool,
+    /// The loaded path of the file that declares it, when one does.
+    pub file: Option<String>,
+    /// The candidate locations for `rustledger_envelope.wasm`: the declaring
+    /// file's directory first, then the root journal's. Empty when no ledger
+    /// is loaded.
+    pub wasm: Vec<PluginWasm>,
+}
+
 /// Everything the budget screen's editor reads: whether the plugin is declared,
 /// the configuration block, and every account it configures.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 pub struct BudgetSettings {
     /// The journal declares an envelope plugin (`plugin "…envelope…wasm"`).
-    /// The init form warns when this is false; the commands still write.
+    /// A configuration write adds the line itself when its module is present;
+    /// this field is what the screen's notice and repair controls read.
     pub plugin_declared: bool,
     /// The parsed configuration, or `None` when no `start date` exists.
     pub config: Option<BudgetConfig>,
@@ -309,14 +362,10 @@ pub(crate) fn settings_of(ledger: &Ledger) -> BudgetSettings {
     });
 
     BudgetSettings {
-        plugin_declared: ledger.plugins.iter().any(|plugin| {
-            let file = plugin
-                .name
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&plugin.name);
-            file.to_ascii_lowercase().contains("envelope")
-        }),
+        plugin_declared: ledger
+            .plugins
+            .iter()
+            .any(|plugin| names_envelope_plugin(&plugin.name)),
         config,
         envelopes,
     }
@@ -332,6 +381,310 @@ fn file_of(ledger: &Ledger, file_id: u16) -> Option<String> {
         .source_map
         .get(usize::from(file_id))
         .map(|file| file.path.display().to_string())
+}
+
+/// The file part of a `plugin` directive's path, in either slash convention.
+fn plugin_file_name(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// Whether a `plugin` directive names the envelope module.
+///
+/// The module ships as `rustledger_envelope.wasm`; the comparison is on the
+/// file name and ignores case, so a declaration through a path
+/// (`plugins/rustledger_envelope.wasm`) reads the same as a bare one.
+fn names_envelope_plugin(name: &str) -> bool {
+    plugin_file_name(name)
+        .to_ascii_lowercase()
+        .contains("envelope")
+}
+
+/// The root journal of the loaded ledger: the first file the loader read, which
+/// is the one the session was opened with.
+fn root_journal(ledger: &Ledger) -> Result<&rustledger_loader::SourceFile, String> {
+    ledger
+        .source_map
+        .files()
+        .first()
+        .ok_or_else(|| "the journal holds no files".to_string())
+}
+
+/// Whether the journal declares the envelope plugin, where, and where its
+/// `.wasm` can live.
+///
+/// The first candidate is the declaring file's own directory, because a
+/// `plugin` path is resolved relative to the file that declares it; before a
+/// declaration exists that file is the root journal, which is where
+/// [`declaration_for`] puts the line. The root stays a second candidate for a
+/// declaration that lives in an included file: the loader resolves every
+/// plugin against the root journal, so a module beside the root is still one
+/// the loader can find. No ledger loaded answers the empty status rather than
+/// an error: the screen reads it before one is open.
+pub(crate) fn plugin_status(state: &AppState) -> BudgetPluginStatus {
+    let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+    let Some(loaded) = guard.as_ref() else {
+        return BudgetPluginStatus::default();
+    };
+    let root = root_journal(&loaded.ledger).map_or(&loaded.root, |file| &file.path);
+    plugin_status_of(&loaded.ledger, root)
+}
+
+fn plugin_status_of(ledger: &Ledger, root: &Path) -> BudgetPluginStatus {
+    let declared = ledger
+        .plugins
+        .iter()
+        .find(|plugin| names_envelope_plugin(&plugin.name));
+    let file = declared.and_then(|plugin| {
+        ledger
+            .source_map
+            .get(plugin.file_id)
+            .map(|source| source.path.display().to_string())
+    });
+
+    let mut directories: Vec<PathBuf> = Vec::new();
+    for directory in [
+        file.as_deref().and_then(|file| Path::new(file).parent()),
+        root.parent(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let directory = directory.to_path_buf();
+        if !directories.contains(&directory) {
+            directories.push(directory);
+        }
+    }
+
+    let wasm = directories
+        .into_iter()
+        .map(|directory| {
+            let path = directory.join(ENVELOPE_PLUGIN);
+            PluginWasm {
+                present: path.is_file(),
+                path: path.display().to_string(),
+            }
+        })
+        .collect();
+
+    BudgetPluginStatus {
+        declared: declared.is_some(),
+        file,
+        wasm,
+    }
+}
+
+/// The refusal when no candidate holds the plugin.
+///
+/// The screen shows this sentence under the form with the draft still in it,
+/// so it names the exact path to put the file at and the command that can
+/// copy it there.
+fn missing_wasm(status: &BudgetPluginStatus) -> String {
+    let path = status
+        .wasm
+        .first()
+        .map(|wasm| wasm.path.as_str())
+        .unwrap_or(ENVELOPE_PLUGIN);
+    format!(
+        "the envelope plugin is not declared and its file is missing: put rustledger_envelope.wasm at {path} first, or install a downloaded copy from the budget screen. A plugin path that does not point at a file makes the loader fail, so nothing was written"
+    )
+}
+
+/// The `plugin` directive that loads the envelope module.
+fn plugin_line() -> String {
+    format!("plugin {}", quote_beancount(ENVELOPE_PLUGIN))
+}
+
+/// The declaration a configuration write has to add: the root journal and the
+/// text that now carries the `plugin` line, or `None` when one is declared.
+///
+/// The line goes into the root journal rather than the file being configured,
+/// so the file that declares the plugin is also the file the `.wasm` sits
+/// beside — a `plugin` path is resolved relative to the declaring file.
+/// [`plugin_enable`] and [`plugin_install`] write the same line into the same
+/// file, so a journal configured here and one repaired there read alike.
+///
+/// A missing module is a refusal from here, before the caller writes anything:
+/// declaring a file that is not there makes the next load fail, and the edit
+/// funnel would put the configuration back with it.
+fn declaration_for(ledger: &Ledger, root: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    let status = plugin_status_of(ledger, root);
+    if status.declared {
+        return Ok(None);
+    }
+    if !status.wasm.iter().any(|wasm| wasm.present) {
+        return Err(missing_wasm(&status));
+    }
+    let root_file = root_journal(ledger)?;
+    Ok(Some((
+        root_file.path.clone(),
+        insert_preamble(&root_file.source, &[plugin_line()]),
+    )))
+}
+
+/// Write a configuration block, adding the plugin declaration when the journal
+/// does not have one yet.
+///
+/// The two go into one funnel call when they share a file — the usual case,
+/// with the block in the root journal — so the configuration and the line that
+/// reads it land together or not at all. A block that lives in an included
+/// file is written first and the declaration second: a `plugin` line written
+/// before any `start date` runs the plugin against an empty configuration, and
+/// its own diagnostic would roll the declaration back.
+fn commit_config(
+    state: &AppState,
+    target: &Path,
+    rewritten: &str,
+    declaration: Option<(PathBuf, String)>,
+) -> Result<(), String> {
+    let target_name = target.display().to_string();
+    match declaration {
+        Some((root, root_text)) => {
+            if root.as_path() == target {
+                let rewritten = insert_preamble(rewritten, &[plugin_line()]);
+                return crate::editing::edit_named_file_source(
+                    state,
+                    &target_name,
+                    &rewritten,
+                    None,
+                );
+            }
+            crate::editing::edit_named_file_source(state, &target_name, rewritten, None)?;
+            crate::editing::edit_named_file_source(
+                state,
+                &root.display().to_string(),
+                &root_text,
+                None,
+            )
+        }
+        None => crate::editing::edit_named_file_source(state, &target_name, rewritten, None),
+    }
+}
+
+/// Declare the envelope plugin in the root journal.
+///
+/// Already declared: the status comes back unchanged and nothing is written.
+/// Otherwise the plugin file has to exist first, in one of the candidate
+/// locations [`plugin_status`] reports. A declaration for a missing file makes
+/// the loader fail, and the edit funnel would put the journal back, so the
+/// check is what turns that rollback into a sentence naming the path to put
+/// the file at.
+pub(crate) fn plugin_enable(state: &AppState) -> Result<BudgetPluginStatus, String> {
+    let declaration = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let root = root_journal(&loaded.ledger)?.path.clone();
+        declaration_for(&loaded.ledger, &root)?
+    };
+
+    if let Some((root, text)) = declaration {
+        crate::editing::edit_named_file_source(state, &root.display().to_string(), &text, None)?;
+    }
+    Ok(plugin_status(state))
+}
+
+/// Install the reader's own copy of the plugin beside the file that declares
+/// it and, when the journal already has a configuration, declare it.
+///
+/// The source is whatever the file chooser handed back — normally the release
+/// asset the reader downloaded. It is read and checked for the WebAssembly
+/// magic before anything is written; the target is the first candidate
+/// [`plugin_status`] names, which is the declaring file's directory and, with
+/// no declaration yet, the root journal's. A file already there is kept when
+/// it is byte-identical and never overwritten when it is a different plugin: a
+/// ledger already using an envelope module must not see it change under a
+/// stray download. Anything that cannot succeed — an unreadable source, the
+/// wrong bytes, a missing target directory — is refused before the first
+/// write, so a failed install leaves the ledger untouched.
+///
+/// With no configuration in the journal the file is copied but the `plugin`
+/// line is not written: the plugin reports a missing `start date` on the next
+/// load and the edit funnel would roll the declaration back. The next
+/// configuration write adds the line with the block, in one edit.
+pub(crate) fn plugin_install(state: &AppState, source: &str) -> Result<BudgetPluginStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (state, source);
+        return Err(
+            "installing the envelope plugin is not available on Android: the ledger is a mirror of a storage tree, so copy rustledger_envelope.wasm into the ledger folder itself with the system file manager and sync it; a file the app chose from its own storage would not reach the ledger"
+                .to_string(),
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let (target, configured) = {
+            let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+            let root = root_journal(&loaded.ledger)?;
+            let status = plugin_status_of(&loaded.ledger, &root.path);
+            let target = status
+                .wasm
+                .first()
+                .map(|wasm| PathBuf::from(&wasm.path))
+                .ok_or_else(|| {
+                    format!(
+                        "{} has no directory; the plugin cannot be installed beside it",
+                        root.path.display()
+                    )
+                })?;
+            let directory = target.parent().unwrap_or_else(|| Path::new("."));
+            if !directory.is_dir() {
+                return Err(format!(
+                    "{} is not a directory; the plugin cannot be installed beside the journal",
+                    directory.display()
+                ));
+            }
+            (target, configuration_block(&loaded.ledger).is_some())
+        };
+
+        let bytes = std::fs::read(source).map_err(|error| format!("{source}: {error}"))?;
+        if !bytes.starts_with(b"\0asm") {
+            return Err(not_a_wasm_module(source, &bytes));
+        }
+        if target.exists() {
+            let existing =
+                std::fs::read(&target).map_err(|error| format!("{}: {error}", target.display()))?;
+            if existing != bytes {
+                return Err(format!(
+                    "refusing to overwrite {}: it already holds a different plugin; move that file away first",
+                    target.display()
+                ));
+            }
+        } else {
+            crate::fsutil::write_atomic(&target, &bytes, Some(0o644))?;
+        }
+        if configured {
+            plugin_enable(state)
+        } else {
+            Ok(plugin_status(state))
+        }
+    }
+}
+
+/// What a refused install says about the source: enough of its head to tell a
+/// script, an archive or a truncated download from a module.
+#[cfg(not(target_os = "android"))]
+fn not_a_wasm_module(source: &str, bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return format!(
+            "{source} is empty; the plugin is a WebAssembly module that starts with the bytes `\\0asm`"
+        );
+    }
+    let head: String = bytes
+        .iter()
+        .take(8)
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte).to_string()
+            } else {
+                format!("\\x{byte:02x}")
+            }
+        })
+        .collect();
+    format!(
+        "{source} is not a WebAssembly module: it starts with `{head}` ({} bytes), not `\\0asm`",
+        bytes.len()
+    )
 }
 
 /// The newest directive for one config key.
@@ -488,16 +841,20 @@ fn month_start(month: &str) -> Result<NaiveDate, String> {
         .map_err(|_| format!("month `{month}` is not a calendar month"))
 }
 
-/// Append the budget's configuration block to `file`.
+/// Append the budget's configuration block to `file`, and the plugin
+/// declaration when the journal does not have one.
 ///
 /// A second `start date` is refused rather than added: the plugin reads the
 /// newest one, so two would make the older directive silently dead. The error
 /// names the file and line that already holds it.
 ///
-/// The command does not require the envelope plugin to be declared — a journal
-/// that has the directives but not the `plugin` line is a configuration the
-/// reader may be about to complete, and [`BudgetSettings::plugin_declared`] is
-/// the form's warning.
+/// The plugin declaration is part of the same write when the block and the
+/// root journal are the same file, so the screen's setup is complete in one
+/// edit; a block written into an included file gets the declaration in a
+/// second funnel call against the root journal. A journal whose
+/// `rustledger_envelope.wasm` is missing is refused before anything is
+/// written — the sentence names the path, and so the setup is never a
+/// half-configured journal the next load would reject.
 pub(crate) fn init(
     state: &AppState,
     file: &str,
@@ -510,11 +867,9 @@ pub(crate) fn init(
 ) -> Result<(), String> {
     let start = checked_month("start", start)?;
     let end = end.map(|end| checked_month("end", end)).transpose()?;
-    if budget_accounts.is_empty() {
-        return Err("budget_accounts is empty; an envelope budget needs at least one on-budget account pattern".to_string());
-    }
+    let budget_accounts = checked_patterns(budget_accounts)?;
 
-    let (previous, rewritten) = {
+    let (target, rewritten, declaration) = {
         let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("no ledger loaded")?;
         if let Some((found, line)) = existing_start_date(&loaded.ledger) {
@@ -523,45 +878,209 @@ pub(crate) fn init(
             ));
         }
         let source = source_of_file(&loaded.ledger, file)?;
+        let root = root_journal(&loaded.ledger)?.path.clone();
+        let declaration = declaration_for(&loaded.ledger, &root)?;
         let previous = source.source.to_string();
-
-        let date = month_start(&start)?;
-        let date = date.to_string();
-        let mut lines = vec![directive_line(
-            &date,
-            "start date",
-            &[quote_beancount(&start)],
-        )];
-        if let Some(end) = &end {
-            lines.push(directive_line(&date, "end date", &[quote_beancount(end)]));
-        }
-        if let Some(count) = months_ahead {
-            lines.push(directive_line(&date, "months ahead", &[count.to_string()]));
-        }
-        for pattern in budget_accounts {
-            lines.push(directive_line(
-                &date,
-                "budget account",
-                &[quote_beancount(pattern)],
-            ));
-        }
-        // Both flags are only written when they differ from the plugin's own
-        // defaults, so the block says what changes and nothing else.
-        if !assert {
-            lines.push(directive_line(&date, "assert", &["FALSE".to_string()]));
-        }
-        if strict {
-            lines.push(directive_line(&date, "strict", &["TRUE".to_string()]));
-        }
-
+        let lines = config_block_lines(
+            &month_start(&start)?.to_string(),
+            &start,
+            months_ahead,
+            end.as_deref(),
+            &budget_accounts,
+            assert,
+            strict,
+        );
         let rewritten = insert_block(&previous, &lines);
-        (previous, rewritten)
+        (source.path.clone(), rewritten, declaration)
     };
 
-    if rewritten == previous {
-        return Ok(());
+    commit_config(state, &target, &rewritten, declaration)
+}
+
+/// Replace the journal's existing envelope configuration with the one given.
+///
+/// The block rewritten is the one that holds `start date`, in whichever journal
+/// file that is: [`BudgetConfig::file`] comes back as that file, which need not
+/// be `file`. Every directive with a key in [`CONFIG_KEYS`] in that file is
+/// removed and the requested set is written once, in its place; a key the new
+/// configuration does not use (an `end date` when `months ahead` replaces it,
+/// or an `assert`/`strict` that is back at the plugin's default) therefore has
+/// no line left to override it. Every other envelope directive — `fund`,
+/// `rollover`, `adjust`, `zero`, `pad`, `balance`, `map`, … — keeps its exact
+/// bytes and position.
+///
+/// `file` is the screen's context, not the target: a configuration that lives
+/// in an included file is edited where it lives, because a second `start date`
+/// in the named file would lose to the newer one.
+///
+/// The two ways of bounding the budget are mutually exclusive in the plugin
+/// (an `end date` or a number of `months ahead`), so asking for both is refused
+/// here rather than written as a block the next load would reject.
+///
+/// A journal that has the block but no `plugin` line gets one in the same
+/// write (or, when the block lives in an included file, in a second call to
+/// the root journal), so editing a legacy configuration repairs it. A missing
+/// `.wasm` is refused before anything is written.
+pub(crate) fn config_set(
+    state: &AppState,
+    _file: &str,
+    start: &str,
+    months_ahead: Option<u32>,
+    end: Option<&str>,
+    budget_accounts: &[String],
+    assert: bool,
+    strict: bool,
+) -> Result<BudgetConfig, String> {
+    let start = checked_month("start", start)?;
+    let end = end.map(|end| checked_month("end", end)).transpose()?;
+    if months_ahead.is_some() && end.is_some() {
+        return Err(
+            "`months ahead` and `end date` cannot both be set; choose a last month (`end`) or a number of months ahead (`months_ahead`), not both"
+                .to_string(),
+        );
     }
-    crate::editing::edit_named_file_source(state, file, &rewritten, None)
+    let budget_accounts = checked_patterns(budget_accounts)?;
+    let lines = config_block_lines(
+        &month_start(&start)?.to_string(),
+        &start,
+        months_ahead,
+        end.as_deref(),
+        &budget_accounts,
+        assert,
+        strict,
+    );
+
+    let (target, rewritten, declaration) = {
+        let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("no ledger loaded")?;
+        let (file_id, starts) = configuration_block(&loaded.ledger).ok_or_else(|| {
+            "this journal has no envelope budget `start date` yet; set one up with budget_init before editing it"
+                .to_string()
+        })?;
+        let source = source_of_id(&loaded.ledger, file_id)?;
+        let root = root_journal(&loaded.ledger)?.path.clone();
+        let declaration = declaration_for(&loaded.ledger, &root)?;
+        let previous = source.source.to_string();
+        let rewritten = rewrite_config_lines(&previous, &starts, &lines);
+        (source.path.clone(), rewritten, declaration)
+    };
+
+    commit_config(state, &target, &rewritten, declaration)?;
+
+    Ok(BudgetConfig {
+        file: target.display().to_string(),
+        start,
+        end,
+        months_ahead,
+        budget_accounts,
+        assert,
+        strict,
+    })
+}
+
+/// One configuration block's lines, as the plugin writes them.
+fn config_block_lines(
+    date: &str,
+    start: &str,
+    months_ahead: Option<u32>,
+    end: Option<&str>,
+    budget_accounts: &[String],
+    assert: bool,
+    strict: bool,
+) -> Vec<String> {
+    let mut lines = vec![directive_line(
+        date,
+        "start date",
+        &[quote_beancount(start)],
+    )];
+    if let Some(end) = end {
+        lines.push(directive_line(date, "end date", &[quote_beancount(end)]));
+    }
+    if let Some(count) = months_ahead {
+        lines.push(directive_line(date, "months ahead", &[count.to_string()]));
+    }
+    for pattern in budget_accounts {
+        lines.push(directive_line(
+            date,
+            "budget account",
+            &[quote_beancount(pattern)],
+        ));
+    }
+    // Both flags are only written when they differ from the plugin's own
+    // defaults, so the block says what changes and nothing else.
+    if !assert {
+        lines.push(directive_line(date, "assert", &["FALSE".to_string()]));
+    }
+    if strict {
+        lines.push(directive_line(date, "strict", &["TRUE".to_string()]));
+    }
+    lines
+}
+
+/// The on-budget patterns, with the one rule the block syntax needs: at least
+/// one, none of them empty.
+fn checked_patterns(patterns: &[String]) -> Result<Vec<String>, String> {
+    if patterns.is_empty() {
+        return Err("budget_accounts is empty; an envelope budget needs at least one on-budget account pattern".to_string());
+    }
+    if patterns.iter().any(|pattern| pattern.trim().is_empty()) {
+        return Err(
+            "budget_accounts contains an empty pattern; every on-budget pattern must match at least one character"
+                .to_string(),
+        );
+    }
+    Ok(patterns.to_vec())
+}
+
+/// The file and the line starts of the configuration block that holds the
+/// newest `start date`.
+fn configuration_block(ledger: &Ledger) -> Option<(usize, Vec<usize>)> {
+    let (file_id, _) = newest_start(ledger)?;
+    let starts = ledger
+        .directives
+        .iter()
+        .filter(|spanned| usize::from(spanned.file_id) == file_id)
+        .filter_map(|spanned| {
+            let Directive::Custom(custom) = &spanned.value else {
+                return None;
+            };
+            if custom.custom_type != "envelope" {
+                return None;
+            }
+            let key = custom.values.first().and_then(meta_string)?;
+            CONFIG_KEYS.contains(&key).then_some(spanned.span.start)
+        })
+        .collect();
+    Some((file_id, starts))
+}
+
+/// The newest valid `start date` directive, and the file it lives in.
+fn newest_start(ledger: &Ledger) -> Option<(usize, NaiveDate)> {
+    let mut newest: Option<(NaiveDate, usize, usize)> = None;
+    for (seq, spanned) in ledger.directives.iter().enumerate() {
+        let Directive::Custom(custom) = &spanned.value else {
+            continue;
+        };
+        if custom.custom_type != "envelope"
+            || custom.values.first().and_then(meta_string) != Some("start date")
+        {
+            continue;
+        }
+        let Some(month) = custom.values.get(1).and_then(meta_string) else {
+            continue;
+        };
+        if !is_month_label(month) {
+            continue;
+        }
+        let candidate = (custom.date, seq, usize::from(spanned.file_id));
+        if newest
+            .as_ref()
+            .is_none_or(|current| (candidate.0, candidate.1) > (current.0, current.1))
+        {
+            newest = Some(candidate);
+        }
+    }
+    newest.map(|(date, _, file_id)| (file_id, date))
 }
 
 /// The journal file the loader holds under `file_id`.
@@ -640,7 +1159,10 @@ pub(crate) fn fund_set(
             Some((file_id, start, on)) => {
                 let target = source_of_id(&loaded.ledger, file_id)?;
                 let line = directive_line(&on.to_string(), "fund", &arguments);
-                (target.path.clone(), replace_line(&target.source, start, &line))
+                (
+                    target.path.clone(),
+                    replace_line(&target.source, start, &line),
+                )
             }
             None => {
                 let source = source_of_file(&loaded.ledger, file)?;
@@ -651,12 +1173,7 @@ pub(crate) fn fund_set(
     };
 
     let (target, rewritten) = rewritten;
-    crate::editing::edit_named_file_source(
-        state,
-        &target.display().to_string(),
-        &rewritten,
-        None,
-    )
+    crate::editing::edit_named_file_source(state, &target.display().to_string(), &rewritten, None)
 }
 
 /// Set `account`'s rollover policy from `month` on: `carry`, `reset`, or `cap`
@@ -692,7 +1209,10 @@ pub(crate) fn rollover_set(
             Some((file_id, start, on)) => {
                 let target = source_of_id(&loaded.ledger, file_id)?;
                 let line = directive_line(&on.to_string(), "rollover", &arguments);
-                (target.path.clone(), replace_line(&target.source, start, &line))
+                (
+                    target.path.clone(),
+                    replace_line(&target.source, start, &line),
+                )
             }
             None => {
                 let source = source_of_file(&loaded.ledger, file)?;
@@ -703,12 +1223,7 @@ pub(crate) fn rollover_set(
     };
 
     let (target, rewritten) = rewritten;
-    crate::editing::edit_named_file_source(
-        state,
-        &target.display().to_string(),
-        &rewritten,
-        None,
-    )
+    crate::editing::edit_named_file_source(state, &target.display().to_string(), &rewritten, None)
 }
 
 /// The `rollover` policy the caller asked for, with the argument rules the
@@ -938,6 +1453,53 @@ fn directive_line(date: &str, key: &str, arguments: &[String]) -> String {
     line
 }
 
+/// The whole line that starts at `offset`, newline included.
+fn line_range(text: &str, offset: usize) -> (usize, usize) {
+    let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let end = text[start..]
+        .find('\n')
+        .map_or(text.len(), |index| start + index + 1);
+    (start, end)
+}
+
+/// Replace the lines at `starts` with `block`, all of it in the place the first
+/// of them occupied.
+///
+/// The starts come from directive spans, which the loader sorts by date rather
+/// than by position, so they are sorted here. A range that overlaps an earlier
+/// one is skipped (two directives cannot share a line, but the guard keeps a
+/// malformed span from duplicating bytes). The block inherits the removed
+/// line's newline, so a file whose last line had none keeps it that way.
+fn rewrite_config_lines(text: &str, starts: &[usize], block: &[String]) -> String {
+    let mut ranges: Vec<(usize, usize)> = starts
+        .iter()
+        .map(|start| line_range(text, *start))
+        .collect();
+    ranges.sort_unstable();
+
+    let eol = line_ending(text);
+    let joined = block.join(eol);
+    let mut rewritten = String::with_capacity(text.len() + joined.len() + eol.len());
+    let mut cursor = 0;
+    let mut inserted = false;
+    for (start, end) in ranges {
+        if start < cursor {
+            continue;
+        }
+        rewritten.push_str(&text[cursor..start]);
+        if !inserted {
+            rewritten.push_str(&joined);
+            if text[start..end].ends_with('\n') || end < text.len() {
+                rewritten.push_str(eol);
+            }
+            inserted = true;
+        }
+        cursor = end;
+    }
+    rewritten.push_str(&text[cursor..]);
+    rewritten
+}
+
 /// Replace the whole line that starts at `offset`, keeping its line ending.
 fn replace_line(text: &str, offset: usize, line: &str) -> String {
     let start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
@@ -961,8 +1523,18 @@ fn replace_line(text: &str, offset: usize, line: &str) -> String {
 /// endings and its trailing-newline presence are preserved, and every other
 /// byte is left alone.
 fn insert_block(text: &str, lines: &[String]) -> String {
+    insert_at(text, lines, insertion_offset(text))
+}
+
+/// Insert `lines` after the file's last `plugin`/`option` line, else at the top
+/// — where a `plugin` declaration belongs, even when the file already has an
+/// envelope group further down.
+fn insert_preamble(text: &str, lines: &[String]) -> String {
+    insert_at(text, lines, preamble_offset(text))
+}
+
+fn insert_at(text: &str, lines: &[String], offset: usize) -> String {
     let eol = line_ending(text);
-    let offset = insertion_offset(text);
     let prefix = &text[..offset];
     let suffix = &text[offset..];
     let mut block = lines.join(eol);
@@ -1021,8 +1593,12 @@ fn insertion_offset(text: &str) -> usize {
         return offset;
     }
 
-    // Otherwise beneath the journal's preamble, which is where a `plugin` or
-    // `option` line is expected to be.
+    preamble_offset(text)
+}
+
+/// The offset just past the file's last `plugin`/`option` line, else zero.
+fn preamble_offset(text: &str) -> usize {
+    let lines = line_spans(text);
     lines
         .iter()
         .rposition(|(start, end)| {
@@ -1102,7 +1678,40 @@ option \"operating_currency\" \"TRY\"
 2026-01-01 open Expenses:Food
 ";
 
+    /// A configured budget with a last month, an explicit non-default flag and
+    /// the plugin's other directives around the configuration: the block the
+    /// editor rewrites, a `fund` and a `rollover` it must leave alone, and
+    /// ordinary directives after.
+    const CONFIGURED_WITH_END: &str = "\
+option \"operating_currency\" \"TRY\"
+
+2026-01-01 custom \"envelope\" \"start date\" \"2026-01\"
+2026-01-01 custom \"envelope\" \"end date\" \"2026-06\"
+2026-01-01 custom \"envelope\" \"budget account\" \"Assets:Bank\"
+2026-01-01 custom \"envelope\" \"assert\" FALSE
+2026-01-01 custom \"envelope\" \"fund\" Expenses:Food 400.00 TRY
+2026-01-01 custom \"envelope\" \"rollover\" Expenses:Food FALSE
+
+2026-01-01 open Assets:Bank
+2026-01-01 open Expenses:Food
+";
+
+    /// A fixture journal, with the envelope plugin's module beside it.
+    ///
+    /// Every configuration write now declares the plugin, so a fixture that
+    /// expects to configure a journal needs a module the loader can run; the
+    /// pass-through module below covers any directive count.
     fn fixture(name: &str, ledger: &str) -> (TempDir, std::path::PathBuf, AppState) {
+        let dir = TempDir::new(name);
+        let path = dir.seed("main.bean", ledger);
+        fs::write(dir.file(ENVELOPE_PLUGIN), passthrough_wasm()).unwrap();
+        let state = loaded_state(&path);
+        (dir, path, state)
+    }
+
+    /// A fixture journal with no `.wasm` beside it: the state a reader starts
+    /// in when they have not downloaded the plugin yet.
+    fn fixture_without_wasm(name: &str, ledger: &str) -> (TempDir, std::path::PathBuf, AppState) {
         let dir = TempDir::new(name);
         let path = dir.seed("main.bean", ledger);
         let state = loaded_state(&path);
@@ -1119,6 +1728,115 @@ option \"operating_currency\" \"TRY\"
 
     fn occurrences(text: &str, needle: &str) -> usize {
         text.matches(needle).count()
+    }
+
+    /// A minimal envelope-plugin module the loader can run: every input
+    /// directive comes back as `Keep`, with no diagnostics, however many there
+    /// are.
+    ///
+    /// The AppState fixtures are bare journals, but the loader executes every
+    /// `plugin` it finds — a missing or malformed module raises a `PLUGIN`
+    /// error, and the edit funnel would refuse (and roll back) the declaration
+    /// that introduced it. A configuration write changes the directive count,
+    /// so a module with a baked `Keep(0) … Keep(n)` list would have to be
+    /// regenerated per write; this one reads the count back out of the
+    /// MessagePack input instead.
+    ///
+    /// The ABI: `PluginInput` is a three-field struct serialized as an array,
+    /// so the directive vector's header sits at `ptr + 1`. The fixture
+    /// journals stay under sixteen directives, where rmp writes the length as
+    /// the low nibble of a fixarray (`0x90 | n`). The output is
+    /// `[ops, errors]` at address 0 — each op `{"Keep": i}` as a one-pair map,
+    /// followed by the empty error array — and `alloc` puts the host's input
+    /// far enough away not to overwrite it. `process` returns the address and
+    /// length packed the way the runtime expects (`ptr << 32 | len`).
+    fn passthrough_wasm() -> Vec<u8> {
+        let text = r#"(module
+  (memory (export "memory") 1)
+  (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+  (func (export "alloc") (param i32) (result i32) i32.const 8192)
+  (func (export "process") (param $ptr i32) (param $len i32) (result i64)
+    (local $count i32)
+    (local $out i32)
+    (local $next i32)
+    local.get $ptr
+    i32.load8_u offset=1
+    i32.const 15
+    i32.and
+    local.set $count
+    i32.const 0
+    i32.const 0x92
+    i32.store8
+    i32.const 1
+    local.get $count
+    i32.const 0x90
+    i32.or
+    i32.store8
+    i32.const 2
+    local.set $out
+    i32.const 0
+    local.set $next
+    block $done
+      loop $ops
+        local.get $next
+        local.get $count
+        i32.ge_u
+        br_if $done
+        local.get $out
+        i32.const 0x81
+        i32.store8
+        local.get $out
+        i32.const 0xa4
+        i32.store8 offset=1
+        local.get $out
+        i32.const 0x7065654b
+        i32.store offset=2
+        local.get $out
+        local.get $next
+        i32.store8 offset=6
+        local.get $out
+        i32.const 7
+        i32.add
+        local.set $out
+        local.get $next
+        i32.const 1
+        i32.add
+        local.set $next
+        br $ops
+      end
+    end
+    local.get $out
+    i32.const 0x90
+    i32.store8
+    local.get $out
+    i32.const 1
+    i32.add
+    i64.extend_i32_u
+  )
+)"#;
+        wat::parse_str(text).expect("the fixture module parses")
+    }
+
+    /// The file with every configuration directive line and the plugin
+    /// declaration removed — what [`budget_write::config_set`] promises to
+    /// leave alone.
+    fn without_config_lines(text: &str) -> String {
+        let keys = [
+            "\"start date\"",
+            "\"end date\"",
+            "\"months ahead\"",
+            "\"budget account\"",
+            "\"assert\"",
+            "\"strict\"",
+        ];
+        text.split_inclusive('\n')
+            .filter(|line| {
+                if line.trim_start().starts_with("plugin ") {
+                    return false;
+                }
+                !line.contains("custom \"envelope\"") || !keys.iter().any(|key| line.contains(key))
+            })
+            .collect()
     }
 
     /// The one envelope the tests care about, by account.
@@ -1149,8 +1867,9 @@ option \"operating_currency\" \"TRY\"
         .unwrap();
 
         let text = read(&path);
-        // The block follows the option line, and one blank line separates it
-        // from the open directives that follow.
+        // The declaration and the block follow the option line; one blank line
+        // separates each of the two groups, and the open directives that used
+        // to sit under the option line stay one blank line below.
         let block = "\
 2026-02-01 custom \"envelope\" \"start date\" \"2026-02\"
 2026-02-01 custom \"envelope\" \"end date\" \"2026-12\"
@@ -1159,11 +1878,8 @@ option \"operating_currency\" \"TRY\"
 2026-02-01 custom \"envelope\" \"assert\" FALSE
 2026-02-01 custom \"envelope\" \"strict\" TRUE
 ";
-        // The block goes straight after the option line ("immediately after"
-        // the last preamble line), and the blank line it replaced now follows
-        // the block, so what follows is still one blank line away.
         let expected = format!(
-            "option \"operating_currency\" \"TRY\"\n{block}\n2026-01-01 open Assets:Bank\n2026-01-01 open Expenses:Food\n"
+            "option \"operating_currency\" \"TRY\"\nplugin \"rustledger_envelope.wasm\"\n\n{block}\n2026-01-01 open Assets:Bank\n2026-01-01 open Expenses:Food\n"
         );
         assert_eq!(text, expected);
         // Every byte before and after the insertion survives.
@@ -1182,7 +1898,10 @@ option \"operating_currency\" \"TRY\"
         assert!(!config.assert);
         assert!(config.strict);
         assert_eq!(config.file, file);
-        assert!(!settings.plugin_declared);
+        assert!(
+            settings.plugin_declared,
+            "the setup declares the plugin when its module is there"
+        );
 
         let second = budget_write::init(
             &state,
@@ -1631,5 +2350,418 @@ option \"operating_currency\" \"TRY\"
         .unwrap_err();
         assert!(error.contains(&journal(&included)), "{error}");
         assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn config_set_rewrites_the_block_in_place_and_switches_the_limit() {
+        let (_dir, path, state) = fixture("budget-config-set", CONFIGURED_WITH_END);
+        let file = journal(&path);
+        let before = read(&path);
+
+        let accounts = vec!["Assets:Bank".to_string(), "Liabilities:TR:.*".to_string()];
+        let config = budget_write::config_set(
+            &state,
+            &file,
+            "2026-02",
+            Some(3),
+            None,
+            &accounts,
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config,
+            BudgetConfig {
+                file: file.clone(),
+                start: "2026-02".to_string(),
+                end: None,
+                months_ahead: Some(3),
+                budget_accounts: accounts.clone(),
+                assert: true,
+                strict: true,
+            }
+        );
+
+        let text = read(&path);
+        assert!(!text.contains("\"end date\""), "{text}");
+        assert_eq!(occurrences(&text, "plugin \"rustledger_envelope.wasm\""), 1);
+        assert!(
+            text.starts_with(
+                "option \"operating_currency\" \"TRY\"\nplugin \"rustledger_envelope.wasm\"\n\n"
+            ),
+            "the declaration joins the preamble:\n{text}"
+        );
+        assert!(
+            budget_write::settings(&state).unwrap().plugin_declared,
+            "editing a legacy configuration adds the plugin line"
+        );
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"start date\" \"2026-02\""));
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"months ahead\" 3"));
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"budget account\" \"Assets:Bank\""));
+        assert!(
+            text.contains(
+                "2026-02-01 custom \"envelope\" \"budget account\" \"Liabilities:TR:.*\""
+            )
+        );
+        // Assert is back at the plugin's default, so it has no line; strict is
+        // not, so it has one.
+        assert!(!text.contains("\"assert\""), "{text}");
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"strict\" TRUE"));
+        // Fund and rollover survive byte for byte, in their own place.
+        assert!(text.contains("2026-01-01 custom \"envelope\" \"fund\" Expenses:Food 400.00 TRY"));
+        assert!(text.contains("2026-01-01 custom \"envelope\" \"rollover\" Expenses:Food FALSE"));
+        assert_eq!(without_config_lines(&text), without_config_lines(&before));
+
+        // The reverse: a last month replaces the count, and the count's line is
+        // gone — both present would be rejected by the plugin.
+        let config = budget_write::config_set(
+            &state,
+            &file,
+            "2026-02",
+            None,
+            Some("2026-12"),
+            &accounts,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.end.as_deref(), Some("2026-12"));
+        assert_eq!(config.months_ahead, None);
+
+        let text = read(&path);
+        assert!(!text.contains("\"months ahead\""), "{text}");
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"end date\" \"2026-12\""));
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"assert\" FALSE"));
+        assert!(!text.contains("\"strict\""), "{text}");
+        assert_eq!(without_config_lines(&text), without_config_lines(&before));
+
+        // The same request again writes nothing.
+        let again = budget_write::config_set(
+            &state,
+            &file,
+            "2026-02",
+            None,
+            Some("2026-12"),
+            &accounts,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(again.end.as_deref(), Some("2026-12"));
+        assert_eq!(read(&path), text);
+    }
+
+    #[test]
+    fn config_set_edits_the_file_that_holds_the_start_date() {
+        let dir = TempDir::new("budget-config-include");
+        dir.seed(
+            "main.bean",
+            "option \"operating_currency\" \"TRY\"\ninclude \"budget.bean\"\n\n2026-01-01 open Assets:Bank\n2026-01-01 open Expenses:Food\n",
+        );
+        let included = dir.seed(
+            "budget.bean",
+            "2026-01-01 custom \"envelope\" \"start date\" \"2026-01\"\n\
+             2026-01-01 custom \"envelope\" \"budget account\" \"Assets:Bank\"\n\
+             2026-01-01 custom \"envelope\" \"fund\" Expenses:Food 100.00 TRY\n",
+        );
+        fs::write(dir.file(ENVELOPE_PLUGIN), passthrough_wasm()).unwrap();
+        let main = dir.file("main.bean");
+        let state = loaded_state(&main);
+
+        let config = budget_write::config_set(
+            &state,
+            &journal(&main),
+            "2026-03",
+            Some(1),
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(config.file, journal(&included));
+        let main_text = read(&main);
+        // The declaration goes into the root journal even when the block lives
+        // in an include: that is the file a `plugin` path resolves from and
+        // the file the module sits beside.
+        assert_eq!(
+            occurrences(&main_text, "plugin \"rustledger_envelope.wasm\""),
+            1
+        );
+        assert!(
+            main_text.starts_with(
+                "option \"operating_currency\" \"TRY\"\nplugin \"rustledger_envelope.wasm\"\n"
+            ),
+            "{main_text}"
+        );
+        let included_text = read(&included);
+        assert!(
+            included_text.contains("2026-03-01 custom \"envelope\" \"start date\" \"2026-03\""),
+            "{included_text}"
+        );
+        assert!(included_text.contains("2026-03-01 custom \"envelope\" \"months ahead\" 1"));
+        assert!(
+            included_text
+                .contains("2026-01-01 custom \"envelope\" \"fund\" Expenses:Food 100.00 TRY")
+        );
+        assert!(
+            !included_text.contains("plugin "),
+            "the block's file is not where the declaration goes:\n{included_text}"
+        );
+        let settings = budget_write::settings(&state).unwrap();
+        assert!(settings.plugin_declared);
+        assert_eq!(
+            settings.config.map(|config| config.start),
+            Some("2026-03".to_string())
+        );
+    }
+
+    #[test]
+    fn config_set_refuses_missing_configuration_or_both_limits() {
+        let (_dir, path, state) = fixture("budget-config-missing", LEDGER);
+        let file = journal(&path);
+        let before = read(&path);
+
+        let error = budget_write::config_set(
+            &state,
+            &file,
+            "2026-02",
+            Some(1),
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("budget_init"), "{error}");
+        assert_eq!(read(&path), before);
+
+        let (_dir, path, state) = fixture("budget-config-both-limits", CONFIGURED_WITH_END);
+        let file = journal(&path);
+        let before = read(&path);
+        let error = budget_write::config_set(
+            &state,
+            &file,
+            "2026-02",
+            Some(1),
+            Some("2026-12"),
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("months_ahead"), "{error}");
+        assert!(error.contains("end"), "{error}");
+        assert_eq!(read(&path), before);
+    }
+
+    #[test]
+    fn config_set_keeps_crlf_and_its_trailing_newline() {
+        let ledger = "option \"operating_currency\" \"TRY\"\r\n\r\n\
+                      2026-01-01 custom \"envelope\" \"start date\" \"2026-01\"\r\n\
+                      2026-01-01 custom \"envelope\" \"end date\" \"2026-06\"\r\n\
+                      2026-01-01 custom \"envelope\" \"budget account\" \"Assets:Bank\"\r\n\r\n\
+                      2026-01-01 open Assets:Bank\r\n";
+        let (_dir, path, state) = fixture("budget-config-crlf", ledger);
+
+        budget_write::config_set(
+            &state,
+            &journal(&path),
+            "2026-02",
+            Some(2),
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+
+        let text = read(&path);
+        let bytes = text.as_bytes();
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                assert!(
+                    index > 0 && bytes[index - 1] == b'\r',
+                    "lone LF at byte {index} in {text:?}"
+                );
+            }
+        }
+        assert!(text.ends_with("\r\n"));
+        assert!(!text.contains("\"end date\""), "{text}");
+        assert!(text.contains("2026-02-01 custom \"envelope\" \"months ahead\" 2\r\n"));
+    }
+
+    #[test]
+    fn plugin_status_names_the_wasm_and_enable_refuses_without_one() {
+        let (_dir, path, state) = fixture_without_wasm("budget-plugin-missing", CONFIGURED);
+        let status = budget_write::plugin_status(&state);
+        assert!(!status.declared);
+        assert!(status.file.is_none());
+        assert_eq!(status.wasm.len(), 1);
+        let candidate = &status.wasm[0];
+        assert_eq!(
+            candidate.path,
+            path.with_file_name("rustledger_envelope.wasm")
+                .display()
+                .to_string()
+        );
+        assert!(!candidate.present);
+
+        let before = read(&path);
+        let error = budget_write::plugin_enable(&state).unwrap_err();
+        assert!(error.contains(&candidate.path), "{error}");
+        assert!(error.contains(ENVELOPE_PLUGIN), "{error}");
+        assert_eq!(read(&path), before, "a refused enable writes nothing");
+    }
+
+    #[test]
+    fn plugin_enable_writes_the_declaration_once() {
+        let (_dir, path, state) = fixture("budget-plugin-enable", CONFIGURED);
+
+        let status = budget_write::plugin_status(&state);
+        assert!(!status.declared);
+        assert!(status.wasm[0].present);
+
+        let status = budget_write::plugin_enable(&state).unwrap();
+        assert!(status.declared);
+        assert_eq!(status.file.as_deref(), Some(journal(&path).as_str()));
+
+        let text = read(&path);
+        assert_eq!(occurrences(&text, "plugin \"rustledger_envelope.wasm\""), 1);
+        assert!(
+            text.starts_with(
+                "option \"operating_currency\" \"TRY\"\nplugin \"rustledger_envelope.wasm\"\n"
+            ),
+            "the declaration joins the journal's preamble:\n{text}"
+        );
+
+        let again = budget_write::plugin_enable(&state).unwrap();
+        assert!(again.declared);
+        assert_eq!(read(&path), text, "a second enable writes nothing");
+
+        let reloaded = loaded_state(&path);
+        assert!(budget_write::settings(&reloaded).unwrap().plugin_declared);
+    }
+
+    #[test]
+    fn install_refuses_a_non_wasm_and_a_different_existing_plugin() {
+        let (dir, path, state) = fixture_without_wasm("budget-plugin-install-refused", CONFIGURED);
+        let before = read(&path);
+        let source = dir.seed("downloaded.txt", "not a plugin\n");
+
+        let error = budget_write::plugin_install(&state, &journal(&source)).unwrap_err();
+        assert!(error.contains("not a WebAssembly module"), "{error}");
+        assert!(!dir.file("rustledger_envelope.wasm").exists());
+        assert_eq!(read(&path), before);
+
+        // A different module already at the target is never clobbered.
+        let target = dir.file("rustledger_envelope.wasm");
+        let existing: &[u8] = b"\0asm\x01\x00\x00\x00different";
+        fs::write(&target, existing).unwrap();
+        let source = dir.file("downloaded.wasm");
+        fs::write(&source, passthrough_wasm()).unwrap();
+
+        let error = budget_write::plugin_install(&state, &journal(&source)).unwrap_err();
+        assert!(error.contains("refusing to overwrite"), "{error}");
+        assert_eq!(fs::read(&target).unwrap(), existing);
+        assert_eq!(read(&path), before);
+    }
+
+    #[test]
+    fn install_puts_the_plugin_beside_the_journal_and_declares_it() {
+        let (dir, path, state) = fixture_without_wasm("budget-plugin-install", CONFIGURED);
+        let source = dir.file("downloads/rustledger_envelope.wasm");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, passthrough_wasm()).unwrap();
+
+        let status = budget_write::plugin_install(&state, &journal(&source)).unwrap();
+        assert!(status.declared);
+        let target = dir.file("rustledger_envelope.wasm");
+        assert!(target.is_file());
+        assert_eq!(fs::read(&target).unwrap(), passthrough_wasm());
+
+        let text = read(&path);
+        assert_eq!(occurrences(&text, "plugin \"rustledger_envelope.wasm\""), 1);
+
+        // The same bytes again write neither the plugin nor the journal.
+        let again = budget_write::plugin_install(&state, &journal(&source)).unwrap();
+        assert!(again.declared);
+        assert_eq!(read(&path), text);
+
+        let status = budget_write::plugin_status(&state);
+        assert!(status.declared);
+        assert!(status.wasm[0].present);
+    }
+
+    #[test]
+    fn install_without_a_configuration_copies_the_module_but_declares_nothing() {
+        let (dir, path, state) = fixture_without_wasm("budget-plugin-install-bare", LEDGER);
+        let before = read(&path);
+        let source = dir.seed("downloads/rustledger_envelope.wasm", "");
+        fs::write(&source, passthrough_wasm()).unwrap();
+
+        let status = budget_write::plugin_install(&state, &journal(&source)).unwrap();
+        // Copying the file is safe; the `plugin` line is not written until
+        // there is a `start date` for the plugin to read.
+        assert!(!status.declared);
+        assert!(status.wasm[0].present);
+        assert_eq!(read(&path), before);
+
+        // Setup then lands the block and the declaration together.
+        budget_write::init(
+            &state,
+            &journal(&path),
+            "2026-02",
+            None,
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+        let text = read(&path);
+        assert_eq!(occurrences(&text, "plugin \"rustledger_envelope.wasm\""), 1);
+        assert!(budget_write::settings(&state).unwrap().plugin_declared);
+    }
+
+    #[test]
+    fn configuration_writes_refuse_a_missing_wasm_and_write_nothing() {
+        let (_dir, path, state) = fixture_without_wasm("budget-config-no-wasm", LEDGER);
+        let before = read(&path);
+        let error = budget_write::init(
+            &state,
+            &journal(&path),
+            "2026-02",
+            None,
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("rustledger_envelope.wasm"), "{error}");
+        assert!(error.contains("nothing was written"), "{error}");
+        assert_eq!(read(&path), before);
+
+        let (_dir, path, state) =
+            fixture_without_wasm("budget-config-set-no-wasm", CONFIGURED_WITH_END);
+        let before = read(&path);
+        let error = budget_write::config_set(
+            &state,
+            &journal(&path),
+            "2026-02",
+            None,
+            None,
+            &["Assets:Bank".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("rustledger_envelope.wasm"), "{error}");
+        assert!(error.contains("nothing was written"), "{error}");
+        assert_eq!(read(&path), before);
     }
 }

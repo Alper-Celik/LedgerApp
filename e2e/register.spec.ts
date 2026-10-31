@@ -141,6 +141,31 @@ test("phones get a card per entry, with the register's work still there", async 
 		{ index: 1, units: "40.00" },
 		{ index: 2, units: "60.00" },
 	]);
+
+	// Nothing may hang off the side: a 390px page is read as it is, not
+	// sideways.
+	expect(
+		await page.evaluate(() => {
+			const root = document.documentElement;
+			return root.scrollWidth <= root.clientWidth;
+		})
+	).toBe(true);
+
+	// A short window scrolls. Scrolled to the end, the last entry's own actions
+	// must clear the fixed quick-add button sitting over the same corner.
+	await page.setViewportSize({ width: 390, height: 420 });
+	await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+	expect(
+		await page.evaluate(() => {
+			const buttons = document.querySelectorAll("main li[data-entry-id] button");
+			const last = buttons[buttons.length - 1]?.getBoundingClientRect();
+			const quickAdd = document
+				.querySelector('button[aria-label="Add transaction"]')
+				?.getBoundingClientRect();
+			if (!last || !quickAdd) return false;
+			return last.bottom <= quickAdd.top || last.right <= quickAdd.left;
+		})
+	).toBe(true);
 });
 
 test("the ledger-wide views the sidebar links to render", async ({ page }) => {
@@ -156,7 +181,8 @@ test("the ledger-wide views the sidebar links to render", async ({ page }) => {
 	await page.getByRole("link", { name: "Dashboards", exact: true }).click();
 	await expect(page.getByRole("heading", { name: "Dashboards" })).toBeVisible();
 
-	// Files: the sidebar lists the journal's files; the root one opens.
+	// Files: the sidebar's Files tab lists the journal's files; the root one opens.
+	await page.getByRole("tab", { name: "Files" }).click();
 	await expect(page.getByRole("link", { name: /main\.bean/ })).toBeVisible();
 	await page.getByRole("link", { name: /main\.bean/ }).click();
 	await expect(page.getByRole("heading", { name: "main.bean" })).toBeVisible();
@@ -191,8 +217,10 @@ test("a commit in the branches screen opens its patch", async ({ page }) => {
 	await row.click();
 	await expect(page.getByText(/Assets:Bank:Checking\s+-123\.45 TRY/)).toBeVisible();
 
-	// Both branches the fixture reports are listed, the current one marked.
-	await expect(page.getByText("main").first()).toBeVisible();
+	// Both branches the fixture reports are listed, the current one marked. Scoped
+	// to the screen: the sidebar's file tree also holds a "main.bean", hidden
+	// behind its Files tab.
+	await expect(page.getByRole("main").getByText("main", { exact: true }).first()).toBeVisible();
 });
 
 test("the python sandbox boots in the app's origin and runs a script", async ({ page }) => {

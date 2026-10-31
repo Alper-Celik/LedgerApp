@@ -22,6 +22,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		refreshing = false,
 		error = "",
 		onrefresh,
+		writing = false,
+		writeNote = "",
+		writeError = "",
+		onwrite,
 	}: {
 		series: IndexSeries;
 		/** A refresh of this series is in flight. */
@@ -29,6 +33,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		/** The provider's refusal, verbatim, from the last refresh. */
 		error?: string;
 		onrefresh: () => void;
+		/** A write of this series into the journal is in flight. */
+		writing?: boolean;
+		/** What the last write did, ready to show. */
+		writeNote?: string;
+		/** Why the last write refused, verbatim. */
+		writeError?: string;
+		onwrite: () => void;
 	} = $props();
 
 	const last = $derived(lastPoint(series));
@@ -94,8 +105,32 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 		</span>
 	</div>
 
+	<div class="flex flex-wrap items-center gap-2">
+		<Button
+			class="h-8"
+			variant="outline"
+			disabled={writing || series.points.length === 0}
+			aria-label={`Add ${series.label} to the journal as prices`}
+			onclick={onwrite}
+		>
+			{writing ? "Writing…" : "Add to the journal as prices"}
+		</Button>
+		<span class="text-muted-foreground text-[0.625rem]">
+			one price per month, in {series.currency || "the series' currency"}
+		</span>
+	</div>
+
+	{#if writeNote}
+		<p class="text-muted-foreground text-xs">{writeNote}</p>
+	{/if}
+
 	{#if error}
 		<!-- Verbatim: a provider with no public endpoint answers with an explanation, not a code. -->
 		<Alert variant="destructive">{error}</Alert>
+	{/if}
+
+	{#if writeError}
+		<!-- Verbatim: a currency mismatch or a collision names what it refused. -->
+		<Alert variant="destructive">{writeError}</Alert>
 	{/if}
 </section>

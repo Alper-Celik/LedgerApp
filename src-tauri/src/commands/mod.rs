@@ -54,6 +54,11 @@ pub fn load_ledger(
     // tree mode, or git would stay off and every revision would push the old
     // tree's mirror behind an unrelated ledger.
     crate::storage::set_tree_active(is_mirror_ledger(&app, &loaded.root));
+    // The reader has now read what the folder holds: adopting those bytes as
+    // this device's last-seen baseline is what keeps the sync bar from
+    // re-reporting the very reload that showed it (and leaves a git-owned
+    // ledger's log alone — see `sync::watches`).
+    crate::sync::adopt_loaded(&loaded);
     // A poisoned lock means an earlier command panicked while holding the ledger;
     // its contents are still consistent, so recover rather than propagating it as
     // a permanent failure to every later command.

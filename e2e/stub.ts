@@ -6,6 +6,7 @@ import type {
 	AccountBalance,
 	AiSettingsView,
 	BudgetSettings,
+	PriceHistory,
 	TransactionEdit,
 	TransactionView,
 } from "../src/bindings";
@@ -326,6 +327,16 @@ export const indexSeries = [
 	},
 ];
 
+/** What `index_write_prices` answers: the stored series, now a ledger commodity. */
+export const indexPriceWrite = {
+	series: "CPI:TRY",
+	commodity: "IDX.CPI-TRY",
+	currency: "TRY",
+	file: "/ledger/main.bean",
+	written: 3,
+	skipped: 0,
+};
+
 /** Lifestyle inflation: nominal vs index-adjusted spending per category. */
 export const lifestyle = {
 	index: { id: "CPI:TRY", label: "TÜİK CPI (TR)", change: "3.81" },
@@ -368,9 +379,52 @@ export const priceTargets = [
 	{ commodity: "AFT", currency: "TRY", kind: "fund", latest: null },
 ];
 
+/**
+ * What `fetch_prices` answers: one outcome per request, in request order, in
+ * the backend's `PriceFetch` shape — `{ quote }` for an answer, `{ failed }`
+ * for a refusal. The frontend reads the tag, so a bare quote here would be
+ * reported as "returned no quote".
+ */
+export const priceFetches = [
+	{
+		quote: {
+			commodity: "AFT",
+			currency: "TRY",
+			date: "2026-01-30",
+			price: "1.2345",
+			source: "tefas",
+		},
+	},
+];
+
 export const priceQuotes = [
 	{ commodity: "AFT", currency: "TRY", date: "2026-01-30", price: "1.2345", source: "tefas" },
 ];
+
+/**
+ * The history the prices screen's links open: two explicit points and one
+ * implied by a trade, in two currencies, so a source or currency control has
+ * something to change. `source` filtering happens in the stub's
+ * `price_history` case, which is what the screen's own controls exercise.
+ */
+export const priceHistory: PriceHistory = {
+	commodity: "USD",
+	source: "both",
+	currencies: ["EUR", "TRY"],
+	counts: { explicit: 2, transactions: 1 },
+	points: [
+		{ date: "2026-01-02", value: "42.10", currency: "TRY", source: "explicit" },
+		{ date: "2026-01-03", value: "42.00", currency: "TRY", source: "transactions" },
+		{ date: "2026-01-04", value: "0.92", currency: "EUR", source: "explicit" },
+	],
+	summary: {
+		points: 3,
+		first: "2026-01-02",
+		last: "2026-01-04",
+		min: "0.92",
+		max: "42.10",
+	},
+};
 
 /**
  * The assistant, unconfigured: the endpoint's default root, no model chosen and
@@ -421,6 +475,14 @@ export async function stubIpc(page: Page) {
 			let opened = false;
 			/** Whether `budget_init` has run: the setup spec starts before it, everything else after. */
 			let budgetConfigured = false;
+			/** The envelope plugin's declaration and its module, as the budget screen reads them. */
+			let pluginDeclared = !window.location.search.includes("budget_no_plugin=1");
+			let pluginWasmPresent = !window.location.search.includes("budget_wasm_missing=1");
+			const pluginStatus = () => ({
+				declared: pluginDeclared,
+				file: pluginDeclared ? "/ledger/main.bean" : null,
+				wasm: [{ path: "/ledger/rustledger_envelope.wasm", present: pluginWasmPresent }],
+			});
 			const internals = {
 				invoke: (cmd: string, args: unknown) => {
 					log.push({ cmd, args });
@@ -433,7 +495,14 @@ export async function stubIpc(page: Page) {
 					// Rust command would produce; rejecting models `Err`.
 					switch (cmd) {
 						case "accounts":
-							return Promise.resolve(opened ? fixtures.booksAccounts : fixtures.accounts);
+							// `?empty=1` models a journal with no accounts to list.
+							return Promise.resolve(
+								window.location.search.includes("empty=1")
+									? []
+									: opened
+										? fixtures.booksAccounts
+										: fixtures.accounts
+							);
 						case "account_transactions":
 							return Promise.resolve(fixtures.transactions);
 						case "transaction_source":
@@ -464,7 +533,8 @@ export async function stubIpc(page: Page) {
 							return Promise.resolve(fixtures.budgetMonth);
 						case "journal_files":
 							return Promise.resolve(
-								window.location.search.includes("no_ledger=1")
+								window.location.search.includes("no_ledger=1") ||
+									window.location.search.includes("empty=1")
 									? []
 									: fixtures.journalFiles
 							);
@@ -510,19 +580,71 @@ export async function stubIpc(page: Page) {
 							const base = setupPending
 								? fixtures.budgetSettings
 								: fixtures.budgetSettingsConfigured;
-							return Promise.resolve({
-								...base,
-								plugin_declared: !window.location.search.includes("budget_no_plugin=1"),
-							});
+							return Promise.resolve({ ...base, plugin_declared: pluginDeclared });
 						}
+						case "budget_plugin_status":
+							return Promise.resolve(pluginStatus());
+						case "budget_plugin_enable":
+							if (!pluginWasmPresent) {
+								return Promise.reject(
+									"the envelope plugin is not declared and its file is missing: put rustledger_envelope.wasm at /ledger/rustledger_envelope.wasm first, or install a downloaded copy from the budget screen. A plugin path that does not point at a file makes the loader fail, so nothing was written"
+								);
+							}
+							pluginDeclared = true;
+							return Promise.resolve(pluginStatus());
+						case "pick_plugin_file":
+							return Promise.resolve(
+								window.location.search.includes("plugin_source=1")
+									? "/home/reader/Downloads/rustledger_envelope.wasm"
+									: null
+							);
+						case "budget_plugin_install":
+							if (window.location.search.includes("budget_fail=install")) {
+								return Promise.reject("that file is not a WebAssembly module");
+							}
+							pluginWasmPresent = true;
+							// A bare journal gains the module but not the declaration: the
+							// next configuration write adds the line with the block.
+							pluginDeclared = budgetConfigured;
+							return Promise.resolve(pluginStatus());
 						case "budget_init":
 							if (window.location.search.includes("budget_fail=init")) {
 								return Promise.reject(
 									"the ledger already declares a budget `start date`; edit that directive instead"
 								);
 							}
+							if (!pluginDeclared && !pluginWasmPresent) {
+								return Promise.reject(
+									"the envelope plugin is not declared and its file is missing: put rustledger_envelope.wasm at /ledger/rustledger_envelope.wasm first, or install a downloaded copy from the budget screen. A plugin path that does not point at a file makes the loader fail, so nothing was written"
+								);
+							}
 							budgetConfigured = true;
+							pluginDeclared = true;
 							return Promise.resolve(null);
+						case "budget_config_set": {
+							const changed = args as {
+								start: string;
+								monthsAhead: number | null;
+								end: string | null;
+								budgetAccounts: string[];
+								assert: boolean;
+								strict: boolean;
+							};
+							if (window.location.search.includes("budget_fail=config")) {
+								return Promise.reject("`months ahead` and `end date` cannot both be set");
+							}
+							budgetConfigured = true;
+							pluginDeclared = true;
+							return Promise.resolve({
+								file: "/ledger/main.bean",
+								start: changed.start,
+								end: changed.end,
+								months_ahead: changed.monthsAhead,
+								budget_accounts: changed.budgetAccounts,
+								assert: changed.assert,
+								strict: changed.strict,
+							});
+						}
 						case "budget_fund_set":
 							if (window.location.search.includes("budget_fail=fund")) {
 								return Promise.reject(
@@ -543,16 +665,89 @@ export async function stubIpc(page: Page) {
 						case "index_series":
 							return Promise.resolve(fixtures.indexSeries);
 						case "index_import":
-						case "index_refresh":
 							return Promise.resolve(fixtures.indexSeries[0]);
+						case "index_refresh": {
+							// A fetched series takes the id it was fetched under, which
+							// is what the provider row and the new card are keyed by.
+							const id = (args as { id?: string } | null)?.id ?? "";
+							const base = fixtures.indexSeries[0];
+							return Promise.resolve({
+								...base,
+								id,
+								label: id === base.id ? base.label : `Index ${id}`,
+							});
+						}
+						case "index_write_prices": {
+							// The write is per stored id; the answer names the commodity
+							// and how many points were new (a second run reports zero).
+							const id = (args as { id?: string } | null)?.id ?? "";
+							const commodity = `IDX.${id.toUpperCase().replace(/[^A-Z0-9'._-]/g, "-")}`;
+							return Promise.resolve({ ...fixtures.indexPriceWrite, series: id, commodity });
+						}
 						case "lifestyle_report":
 							return Promise.resolve(fixtures.lifestyle);
 						case "price_sources":
 							return Promise.resolve(fixtures.priceSources);
 						case "price_targets":
 							return Promise.resolve(fixtures.priceTargets);
+						case "price_history": {
+							// The screen's controls ask again with different filters; the
+							// stub narrows the one fixture the same way the backend narrows
+							// the ledger, so a control's effect is visible in the rows.
+							const request = (args ?? {}) as {
+								commodity?: string;
+								currency?: string | null;
+								source?: string;
+								from?: string | null;
+								to?: string | null;
+								limit?: number | null;
+							};
+							const source = request.source ?? "both";
+							const all = fixtures.priceHistory.points;
+							const counts = {
+								explicit: all.filter(
+									(point) =>
+										point.source === "explicit" &&
+										(!request.currency || point.currency === request.currency)
+								).length,
+								transactions: all.filter(
+									(point) =>
+										point.source === "transactions" &&
+										(!request.currency || point.currency === request.currency)
+								).length,
+							};
+							let rows = all.filter(
+								(point) =>
+									(source === "both" || point.source === source) &&
+									(!request.currency || point.currency === request.currency) &&
+									(!request.from || point.date.slice(0, 7) >= request.from) &&
+									(!request.to || point.date.slice(0, 7) <= request.to)
+							);
+							if (request.limit != null) rows = rows.slice(-request.limit);
+							const extreme = (direction: 1 | -1) =>
+								rows.reduce<string | null>((best, point) => {
+									if (best === null) return point.value;
+									return direction * Number(point.value) < direction * Number(best)
+										? point.value
+										: best;
+								}, null);
+							return Promise.resolve({
+								...fixtures.priceHistory,
+								commodity: request.commodity ?? fixtures.priceHistory.commodity,
+								source,
+								counts,
+								points: rows,
+								summary: {
+									points: rows.length,
+									first: rows[0]?.date ?? null,
+									last: rows.at(-1)?.date ?? null,
+									min: extreme(-1),
+									max: extreme(1),
+								},
+							});
+						}
 						case "fetch_prices":
-							return Promise.resolve(fixtures.priceQuotes);
+							return Promise.resolve(fixtures.priceFetches);
 						case "write_prices":
 							return Promise.resolve(null);
 						case "git_branches":
@@ -651,10 +846,13 @@ export async function stubIpc(page: Page) {
 			budgetSettingsConfigured,
 			dashboards,
 			indexSeries,
+			indexPriceWrite,
 			lifestyle,
 			priceSources,
 			priceTargets,
+			priceFetches,
 			priceQuotes,
+			priceHistory,
 			aiSettings,
 			commits,
 			commitDiff,

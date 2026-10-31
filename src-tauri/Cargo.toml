@@ -155,6 +155,13 @@ tauri-plugin-dialog = "2"
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-android-fs = "30"
 
+# The budget writer's positive-path tests need a plugin the loader can actually
+# run: a hand-written WAT module that keeps every directive is the fixture.
+# `wat` is already in the graph through the WASM plugin runtime, so this names
+# a crate the build carries anyway rather than adding one.
+[dev-dependencies]
+wat = "1.262"
+
 [features]
 # Escape hatch: build the Linux app on wry instead (e.g. to compare engines).
 wry = ["tauri/wry"]

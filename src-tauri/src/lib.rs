@@ -35,10 +35,12 @@ mod git;
 mod git_ops;
 mod history;
 mod index;
+mod index_price;
 mod index_providers;
 mod index_store;
 mod lsp;
 mod model;
+mod price_history;
 mod prices;
 mod query;
 mod repo;
@@ -103,6 +105,11 @@ pub fn command_builder() -> Builder<AppRuntime> {
         budget_init,
         budget_fund_set,
         budget_rollover_set,
+        budget_config_set,
+        budget_plugin_status,
+        budget_plugin_enable,
+        pick_plugin_file,
+        budget_plugin_install,
         dashboards,
         save_dashboard,
         delete_dashboard,
@@ -111,6 +118,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         git_set_identity,
         price_sources,
         price_targets,
+        price_history,
         fetch_prices,
         write_prices,
         ai_settings,
@@ -130,6 +138,7 @@ pub fn command_builder() -> Builder<AppRuntime> {
         index_series,
         index_import,
         index_refresh,
+        index_write_prices,
         lifestyle_report,
         conversations,
         conversation,

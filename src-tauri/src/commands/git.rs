@@ -149,6 +149,11 @@ fn note_best_effort(state: &State<'_, AppState>) {
 /// operation, so its own rewrites are not reported as changes made outside the
 /// app. The journal files are hashed again; git and the log stay separate
 /// records, this only corrects the baseline `sync::changed` compares against.
+///
+/// A repository's ledger has no folder watch ([`crate::sync::watches`]), so
+/// there is no baseline to correct: noting the hashes would only create the
+/// sync log in a folder git already tracks. The command that called this still
+/// reports success — the repair is a no-op, not a failure.
 fn note_rewritten_files(state: &State<'_, AppState>) -> Result<(), String> {
     let guard = state.loaded.read().unwrap_or_else(|e| e.into_inner());
     let loaded = guard.as_ref().ok_or("no ledger is open")?;
@@ -156,12 +161,14 @@ fn note_rewritten_files(state: &State<'_, AppState>) -> Result<(), String> {
         .root
         .parent()
         .ok_or_else(|| format!("{} has no directory", loaded.root.display()))?;
-    // Every file the loader read, not just the root: a branch switch or a merge
-    // rewrites whichever ones the two branches disagree on.
-    // Every file the loader read, including ones the operation just deleted: a
-    // branch switch can remove an include, and a path left out here keeps its old
-    // hash in the state file, so `sync::changed` would report the app's own
-    // deletion as one made outside it, for ever.
+    if !crate::sync::watches(root) {
+        return Ok(());
+    }
+    // Every file the loader read, not just the root, and including ones the
+    // operation just deleted: a branch switch or a merge rewrites whichever ones
+    // the two branches disagree on and can remove an include, and a path left
+    // out here keeps its old hash in the state file — so `sync::changed` would
+    // report the app's own deletion as one made outside it, for ever.
     let paths: Vec<PathBuf> = loaded
         .ledger
         .source_map
@@ -248,29 +255,36 @@ pub fn git_revert_commit(id: String, state: State<'_, AppState>) -> Result<Strin
 
 /// Files the ledger's folder changed behind the app (another device, a cloud
 /// client): the app should offer a reload rather than keep serving what it
-/// loaded. Empty when nothing moved or when the ledger is not in a synced folder.
+/// loaded.
+///
+/// Empty when nothing moved, and always empty when the folder is not the
+/// tracker: in a git repository git owns the tree's history, and the operation
+/// log's last-seen map is a second baseline that a commit, a checkout or a
+/// branch switch leaves behind the index — comparing them would report the
+/// app's own repository work as an outside change. In a SAF tree the mirror is
+/// the app's private copy, so there is nothing to compare either. The answer
+/// comes from `sync::changes_for`, which shares `sync::watches` — the one gate —
+/// with `sync_conflicts`.
 #[tauri::command]
 #[specta::specta]
 pub fn sync_changes(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::sync::ExternalChange>, String> {
-    // In a SAF tree the ledger's own paths are the private mirror, so comparing
-    // it against its log can only ever say "unchanged": the folder is the other
-    // side, and the reconciliation (`sync_ledger_tree`) reports what it found
-    // there. Running this anyway would report the app's own writes as external
-    // after a restore, on every revision bump.
-    if crate::storage::kind() == crate::storage::StorageKind::Tree {
-        return Ok(Vec::new());
-    }
-    crate::sync::changed(&crate::sync::log_dir(&ledger_dir(&state)?))
+    crate::sync::changes_for(&ledger_dir(&state)?)
 }
 
 /// Sync-client conflict copies found in the ledger (Drive's `name (1).bean`,
 /// Syncthing's `.sync-conflict-…`, and the rest) — the resolver's input.
+///
+/// Empty when git owns the ledger: a conflict copy is a sync client's second
+/// version, and a repository's versions are git's (its merge conflicts are
+/// surfaced by the merge view). Reporting name-shaped copies there would put a
+/// conflict in front of the reader that git already accounts for. The answer
+/// comes from `sync::conflicts_for`, the same gate `sync_changes` uses.
 #[tauri::command]
 #[specta::specta]
 pub fn sync_conflicts(state: State<'_, AppState>) -> Result<crate::conflict_names::Report, String> {
-    crate::conflict_names::scan_report(&ledger_dir(&state)?)
+    crate::sync::conflicts_for(&ledger_dir(&state)?)
 }
 
 /// Unified diff of the ledger's files against HEAD, index and working tree

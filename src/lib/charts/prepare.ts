@@ -56,7 +56,11 @@ export type PreparedChart = {
  * decimal string, for reading) is the whole point: the chart never formats an
  * amount, and nothing downstream ever sees a rounded one.
  */
-export function prepareChart(series: readonly ChartSeries[], kind: string): PreparedChart {
+export function prepareChart(
+	series: readonly ChartSeries[],
+	kind: string,
+	unit: "month" | "day" = "month",
+): PreparedChart {
 	const labels = categoryLabels(series);
 	const prepared: PreparedSeries[] = series.map((one, index) => ({
 		key: `s${index}`,
@@ -86,7 +90,7 @@ export function prepareChart(series: readonly ChartSeries[], kind: string): Prep
 		return { key: one.key, label: one.name, color: one.color };
 	});
 
-	return { rows, series: defs, prepared, config, summary: describeSeries(kind, series) };
+	return { rows, series: defs, prepared, config, summary: describeSeries(kind, series, unit) };
 }
 
 /** One slice of a share chart: the amount it carries, as a number and as written. */
